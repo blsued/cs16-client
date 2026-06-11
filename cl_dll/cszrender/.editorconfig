@@ -1,0 +1,18 @@
+# cl_dll/cszrender/.editorconfig
+# CSOZ own-module style pin (code-standards.md section 2); upstream files are
+# not governed by this file.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{cpp,h,hpp,inl}]
+indent_style = tab
+indent_size = 4
+
+[*.{vert,frag,glsl}]
+indent_style = tab
+indent_size = 4

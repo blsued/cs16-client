@@ -73,7 +73,11 @@ else()
 	add_definitions(-D_CRT_SECURE_NO_WARNINGS -D_CRT_NONSTDC_NO_DEPRECATE)
 endif()
 
+add_subdirectory(cszrender) # CSOZ hook: CSZ renderer module (docs/upstream-diff.md)
+
 add_library(${CLIENT_LIB} SHARED ${CS_CLIENT_SRC})
+
+target_link_libraries(${CLIENT_LIB} PRIVATE cszrender) # CSOZ hook: link CSZ renderer module
 
 set_target_postfix(${CLIENT_LIB})
 
