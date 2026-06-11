@@ -37,6 +37,8 @@
 
 #include "cl_util.h"
 
+#include "cszrender/csz_render_iface.h" // CSOZ hook: CSZ renderer entry points
+
 cl_enginefunc_t		gEngfuncs  = { };
 render_api_t		gRenderAPI = { };
 mobile_engfuncs_t	gMobileAPI = { };
@@ -139,6 +141,7 @@ void DLLEXPORT HUD_Shutdown( void )
 		miniMem->Reset();
 		miniMem->Shutdown();
 	}
+	CSZ_Shutdown(); // CSOZ hook: destroy CSZ renderer resources
 }
 
 
@@ -248,6 +251,7 @@ bool isLoaded = false;
 int DLLEXPORT HUD_VidInit( void )
 {
 	gHUD.VidInit();
+	CSZ_VidInit(); // CSOZ hook: invalidate CSZ GPU resources on vid restart
 
 	isLoaded = true;
 
@@ -276,7 +280,8 @@ void DLLEXPORT HUD_Init( void )
 	LoadMenuInterface();
 	InitInput();
 	gHUD.Init();
-	
+	CSZ_HudInit(); // CSOZ hook: CSZ renderer cvars/commands + handshake sanity check
+
 	// Initialize menu if it's loaded
 	if( g_pMenu && !g_pMenu->Initialize( Sys_GetFactoryThis() ) )
 	{
@@ -420,6 +425,8 @@ int DLLEXPORT HUD_GetRenderInterface( int version, render_api_t *renderfuncs, re
 		return false;
 
 	gRenderAPI = *renderfuncs;
+
+	CSZ_GetRenderInterface( version, renderfuncs, callback ); // CSOZ hook: register CSZ render callbacks (FATAL on failure, spec 3.2)
 
 	// we didn't send callbacks to engine, because we don't use it
 	// *callback = renderInterface;
