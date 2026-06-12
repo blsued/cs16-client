@@ -76,3 +76,58 @@ void main()
 	fragColor = vec4( base.rgb * lm * ( 2.0 * 128.0 / 192.0 ), base.a );
 }
 )GLSL";
+
+// World lit-additive pass (T6): per-light contribution, blended additively on
+// top of the opaque pass at equal depth (LEQUAL). Spot uniform group and the
+// falloff formula are the plan 2.4 contract (shared with the studio family).
+static const char kWorldLitVs[] = R"GLSL(#version 330 core
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in vec2 a_uv;
+layout(location = 3) in vec3 a_normal;
+uniform mat4 u_viewProj;
+out vec2 v_uv;
+out vec3 v_worldPos;
+out vec3 v_worldNormal;
+void main()
+{
+	v_uv = a_uv;
+	v_worldPos = a_pos;
+	v_worldNormal = a_normal;
+	gl_Position = u_viewProj * vec4( a_pos, 1.0 );
+}
+)GLSL";
+
+static const char kWorldLitFs[] = R"GLSL(#version 330 core
+in vec2 v_uv;
+in vec3 v_worldPos;
+in vec3 v_worldNormal;
+uniform sampler2D u_texDiffuse;       // unit 0
+uniform float u_alphaTest;            // 0 = off, else discard threshold (0.25)
+uniform vec3 u_lightOrigin;
+uniform vec3 u_lightDir;
+uniform vec3 u_lightColor;
+uniform float u_lightRadius;
+uniform float u_cosInner;
+uniform float u_cosOuter;
+uniform mat4 u_matShadow;
+uniform sampler2DShadow u_shadowMap;  // unit 2 (bound only when u_hasShadow != 0)
+uniform int u_hasShadow;
+out vec4 fragColor;
+void main()
+{
+	vec4 base = texture( u_texDiffuse, v_uv );
+	if( u_alphaTest > 0.0 && base.a < u_alphaTest )
+		discard;
+	vec3 L = u_lightOrigin - v_worldPos;
+	float d = length( L );
+	L /= max( d, 1e-4 );
+	float atten = clamp( 1.0 - d / u_lightRadius, 0.0, 1.0 );
+	atten *= atten;
+	float cone = clamp(( dot( -L, u_lightDir ) - u_cosOuter ) / max( u_cosInner - u_cosOuter, 1e-4 ), 0.0, 1.0 );
+	float ndotl = max( dot( normalize( v_worldNormal ), L ), 0.0 );
+	float shadow = 1.0;
+	if( u_hasShadow != 0 )
+		shadow = textureProj( u_shadowMap, u_matShadow * vec4( v_worldPos, 1.0 ));
+	fragColor = vec4( base.rgb * u_lightColor * ( atten * cone * ndotl * shadow ), 1.0 );
+}
+)GLSL";

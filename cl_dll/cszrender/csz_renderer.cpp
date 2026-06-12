@@ -43,6 +43,8 @@
 #include "geom/csz_studio.h"
 #include "geom/csz_viewmodel.h"
 #include "geom/csz_world.h"
+#include "lighting/csz_light_pass.h"
+#include "lighting/csz_light_registry.h"
 
 namespace csz
 {
@@ -139,6 +141,7 @@ void Renderer::OnHudInit()
 		m_cvarEnable = gEngfuncs.pfnRegisterVariable( "csz_renderer", "1", FCVAR_CLIENTDLL );
 
 	RegisterSpriteCommands();	// csz_testsprite (T5)
+	RegisterLightingCommands();	// csz_testspot + csz_testlight (T6)
 }
 
 void Renderer::OnVidInit()
@@ -199,7 +202,7 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	g_world.BuildVisibleSet( view );
 
 	g_studio.BeginFrame( ClientTime());				// slot 7: studio begin-frame
-	// pass slot: light matrix update (T6)
+	g_lights.UpdateMatrices();					// slot 7: light matrix update
 
 	EnterTakeover();						// slot 8
 
@@ -214,7 +217,7 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 
 	g_studio.DrawOpaque( view, m_frame.studio, m_frame.numStudio );	// slot 12: studio opaque
 
-	// pass slot: additive light passes (T6)
+	RunLightPasses( view, m_frame.studio, m_frame.numStudio );	// slot 13: additive light passes
 
 	DrawSprites( view, m_frame.sprites, m_frame.numSprites );	// slot 14: sprites
 
@@ -241,6 +244,7 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 void Renderer::ClearScene()
 {
 	m_frame.Clear();
+	g_lights.DecayFrame( ClientTime());	// expire die>0 lights (plan 2.2)
 
 	// Per-frame callback: log wiring exactly once (throttling rule, R8).
 	static bool s_logged = false;

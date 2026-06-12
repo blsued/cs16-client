@@ -20,6 +20,8 @@ set(CSZRENDER_SRC
 	geom/csz_studio_bones.cpp
 	geom/csz_studio_mesh.cpp
 	geom/csz_viewmodel.cpp
+	lighting/csz_light_registry.cpp
+	lighting/csz_light_pass.cpp
 )
 add_library(cszrender STATIC ${CSZRENDER_SRC})
 target_include_directories(cszrender PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

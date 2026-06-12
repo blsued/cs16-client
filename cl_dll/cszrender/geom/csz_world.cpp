@@ -77,6 +77,7 @@ struct FaceRec
 	float planeNormal[3];
 	float planeDist;
 	bool planeBack;
+	float mins[3], maxs[3];		// surface bounds (engine mextrasurf, light cull)
 };
 
 // All persistent state lives here (single g_world instance; header stays
@@ -93,6 +94,11 @@ struct WorldState
 	unsigned int vao, vbo;
 	ShaderProgram program;
 	int uViewProj, uAlphaTest;
+	ShaderProgram litProgram;	// additive per-light pass (T6)
+	int litUViewProj, litUAlphaTest;
+	int litULightOrigin, litULightDir, litULightColor;
+	int litULightRadius, litUCosInner, litUCosOuter;
+	int litUMatShadow, litUHasShadow;
 
 	FaceRec *faces;			// [numFaces], indexed by local face index
 	int *opaque;			// sorted local indices (texture, lightmap page)
@@ -231,6 +237,40 @@ int CompareOpaque( const void *a, const void *b )
 	return ( ka->faceIndex < kb->faceIndex ) ? -1 : ( ka->faceIndex > kb->faceIndex );
 }
 
+// Conservative spot-light vs AABB test (T6). SpotLightParams carries no
+// frustum (core POD contract), so the cone is approximated by its bounding
+// sphere plus the apex half-space: boxes fully outside the radius or fully
+// behind the cone apex cannot receive light.
+bool SpotTouchesBox( const SpotLightParams &light, const float mins[3], const float maxs[3] )
+{
+	float distSq = 0.0f;
+
+	for( int j = 0; j < 3; j++ )
+	{
+		float v = light.origin[j];
+		float e = 0.0f;
+
+		if( v < mins[j] )
+			e = mins[j] - v;
+		else if( v > maxs[j] )
+			e = v - maxs[j];
+
+		distSq += e * e;
+	}
+
+	if( distSq > light.radius * light.radius )
+		return false;
+
+	// Positive vertex along the cone direction: if even the farthest corner
+	// sits behind the apex plane, the box is fully behind the light.
+	float d = 0.0f;
+
+	for( int j = 0; j < 3; j++ )
+		d += light.dir[j] * ((( light.dir[j] >= 0.0f ) ? maxs[j] : mins[j] ) - light.origin[j] );
+
+	return d >= 0.0f;
+}
+
 void ReuploadLightmaps()
 {
 	for( int i = 0; i < s_world.numFaces; i++ )
@@ -288,6 +328,14 @@ void WorldRenderer::Destroy()
 			DestroyProgram( s_world.program );
 		else
 			s_world.program.program = 0;
+	}
+
+	if( s_world.litProgram.program != 0 )
+	{
+		if( sameContext )
+			DestroyProgram( s_world.litProgram );
+		else
+			s_world.litProgram.program = 0;
 	}
 
 	delete[] s_world.faces;
@@ -382,6 +430,13 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 		f.planeNormal[1] = plane->normal[1];
 		f.planeNormal[2] = plane->normal[2];
 		f.planeDist = plane->dist;
+
+		// Surface bounds for per-light culling (engine-filled mextrasurf).
+		for( int j = 0; j < 3; j++ )
+		{
+			f.mins[j] = surf.info->mins[j];
+			f.maxs[j] = surf.info->maxs[j];
+		}
 
 		if( surf.flags & kSurfDrawSky )
 		{
@@ -534,6 +589,25 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	glUniform1f( s_world.uAlphaTest, 0.0f );
 	UseProgram( 0 );
 
+	// Lit-additive program (T6 spot pass); init-time, so failure is FATAL.
+	BuildProgram( "csz_world_lit", kWorldLitVs, kWorldLitFs, true, s_world.litProgram );
+	s_world.litUViewProj = UniformLoc( s_world.litProgram, "u_viewProj" );
+	s_world.litUAlphaTest = UniformLoc( s_world.litProgram, "u_alphaTest" );
+	s_world.litULightOrigin = UniformLoc( s_world.litProgram, "u_lightOrigin" );
+	s_world.litULightDir = UniformLoc( s_world.litProgram, "u_lightDir" );
+	s_world.litULightColor = UniformLoc( s_world.litProgram, "u_lightColor" );
+	s_world.litULightRadius = UniformLoc( s_world.litProgram, "u_lightRadius" );
+	s_world.litUCosInner = UniformLoc( s_world.litProgram, "u_cosInner" );
+	s_world.litUCosOuter = UniformLoc( s_world.litProgram, "u_cosOuter" );
+	s_world.litUMatShadow = UniformLoc( s_world.litProgram, "u_matShadow" );
+	s_world.litUHasShadow = UniformLoc( s_world.litProgram, "u_hasShadow" );
+
+	UseProgram( s_world.litProgram.program );
+	glUniform1i( UniformLoc( s_world.litProgram, "u_texDiffuse" ), 0 );
+	glUniform1i( UniformLoc( s_world.litProgram, "u_shadowMap" ), 2 );
+	glUniform1f( s_world.litUAlphaTest, 0.0f );
+	UseProgram( 0 );
+
 	int pages = maxPage + 1;
 
 	s_world.built = true;
@@ -667,16 +741,90 @@ void WorldRenderer::DrawDepth( const ViewSetup &lightView, const Frustum &lightC
 
 void WorldRenderer::DrawLitAdditive( const ViewSetup &view, const SpotLightParams &light )
 {
-	// Filled by T6 (additive spot light pass); signature fixed by plan 2.2.
-	(void)view;
-	(void)light;
+	if( !s_world.built )
+		return;
 
-	static bool s_logged;
+	UseProgram( s_world.litProgram.program );
+	glUniformMatrix4fv( s_world.litUViewProj, 1, GL_FALSE, view.matViewProj.m );
+	glUniform3fv( s_world.litULightOrigin, 1, light.origin );
+	glUniform3fv( s_world.litULightDir, 1, light.dir );
+	glUniform3fv( s_world.litULightColor, 1, light.color );
+	glUniform1f( s_world.litULightRadius, light.radius );
+	glUniform1f( s_world.litUCosInner, light.cosInner );
+	glUniform1f( s_world.litUCosOuter, light.cosOuter );
+	glUniformMatrix4fv( s_world.litUMatShadow, 1, GL_FALSE, light.matShadow.m );
+	glUniform1i( s_world.litUHasShadow, ( light.shadowTexSlot != 0 ) ? 1 : 0 );
 
-	if( !s_logged )
+	if( light.shadowTexSlot != 0 )
+		BindTextureSlot( 2, light.shadowTexSlot );	// T7 depth map (T6: never taken)
+
+	BindVao( s_world.vao );
+	SetCull( false );
+	// Equal-depth additive on top of the opaque pass: depth func stays
+	// LEQUAL (EnterTakeover baseline), writes off so later passes are
+	// unaffected by this one.
+	SetBlend( kBlendAdditive );
+	SetDepthWrite( false );
+
+	glUniform1f( s_world.litUAlphaTest, 0.0f );
+
+	int curTex = -1;
+	float curAlpha = 0.0f;
+	int drawn = 0;
+
+	for( int i = 0; i < s_world.numOpaque; i++ )
 	{
-		s_logged = true;
-		CSZ_LogDev( "world", "DrawLitAdditive stub called (lands in T6)" );
+		const FaceRec &f = s_world.faces[s_world.opaque[i]];
+
+		if( !s_world.visible[f.surfIndex] || f.firstVert < 0 )
+			continue;
+
+		// Same view-side plane cull as the opaque pass (invisible faces).
+		float d = view.origin[0] * f.planeNormal[0] + view.origin[1] * f.planeNormal[1] +
+			view.origin[2] * f.planeNormal[2] - f.planeDist;
+
+		if( f.planeBack ? ( d > -kBackfaceEpsilon ) : ( d < kBackfaceEpsilon ))
+			continue;
+
+		// Light-side plane cull: a face whose front side faces away from the
+		// light gets zero ndotl everywhere -- skip it entirely.
+		float dl = light.origin[0] * f.planeNormal[0] + light.origin[1] * f.planeNormal[1] +
+			light.origin[2] * f.planeNormal[2] - f.planeDist;
+
+		if( f.planeBack ? ( dl > -kBackfaceEpsilon ) : ( dl < kBackfaceEpsilon ))
+			continue;
+
+		if( !SpotTouchesBox( light, f.mins, f.maxs ))
+			continue;
+
+		if( f.texSlot != curTex )
+		{
+			BindTextureSlot( 0, f.texSlot );
+			curTex = f.texSlot;
+		}
+
+		if( f.alphaTest != curAlpha )
+		{
+			glUniform1f( s_world.litUAlphaTest, f.alphaTest );
+			curAlpha = f.alphaTest;
+		}
+
+		glDrawArrays( GL_TRIANGLE_FAN, f.firstVert, f.numVerts );
+		drawn++;
+	}
+
+	SetBlend( kBlendNone );
+	SetDepthWrite( true );
+
+	// Per-frame stats at Dev level with 1s self-throttle (R8).
+	static float s_nextStatsTime;
+	float now = ClientTime();
+
+	if( now >= s_nextStatsTime )
+	{
+		s_nextStatsTime = now + 1.0f;
+		CSZ_LogDev( "world", "lit %d faces (spot at %.0f %.0f %.0f)",
+			drawn, light.origin[0], light.origin[1], light.origin[2] );
 	}
 }
 

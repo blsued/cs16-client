@@ -59,12 +59,26 @@ namespace
 const int kStudioNfMasked = 0x0040;	// alpha-tested texture
 const int kStudioNfAdditive = 0x0020;	// additive (M1: drawn opaque, known gap)
 
+// Uniform locations of one studio program. Both passes share the per-mesh
+// uniform helper: locations a program lacks are -1 and glUniform* on -1 is
+// ignored by GL, so base-only/lit-only members stay harmless cross-program.
+struct PassLocs
+{
+	int uViewProj, uBones, uAlphaTest, uChrome, uViewRight, uViewUp;
+	int uAmbient, uShadeColor;					// base program only
+	int uLightOrigin, uLightDir, uLightColor;			// lit program only
+	int uLightRadius, uCosInner, uCosOuter, uMatShadow, uHasShadow;	// lit program only
+};
+
 struct StudioState
 {
 	bool shaderReady;
 	int shaderGeneration;
-	ShaderProgram program;
-	int uViewProj, uBones, uAlphaTest, uAmbient, uShadeColor, uChrome, uViewRight, uViewUp;
+	ShaderProgram program;		// base (opaque) pass
+	ShaderProgram litProgram;	// additive per-light pass (T6)
+	PassLocs baseLocs, litLocs;
+	const PassLocs *locs;		// active pass locations (set by Begin*Pass)
+	bool litPass;			// true while DrawLitAdditive runs (skips LightVec)
 	int whiteTexSlot;
 	float time;		// latched at BeginFrame
 	// per-draw uniform dedup
@@ -76,25 +90,41 @@ struct StudioState
 
 StudioState s_studio;
 
+void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
+{
+	out.uViewProj = UniformLoc( prog, "u_viewProj" );
+	out.uBones = UniformLoc( prog, "u_bones" );
+	out.uAlphaTest = UniformLoc( prog, "u_alphaTest" );
+	out.uChrome = UniformLoc( prog, "u_chrome" );
+	out.uViewRight = UniformLoc( prog, "u_viewRight" );
+	out.uViewUp = UniformLoc( prog, "u_viewUp" );
+	out.uAmbient = UniformLoc( prog, "u_ambient" );
+	out.uShadeColor = UniformLoc( prog, "u_shadeColor" );
+	out.uLightOrigin = UniformLoc( prog, "u_lightOrigin" );
+	out.uLightDir = UniformLoc( prog, "u_lightDir" );
+	out.uLightColor = UniformLoc( prog, "u_lightColor" );
+	out.uLightRadius = UniformLoc( prog, "u_lightRadius" );
+	out.uCosInner = UniformLoc( prog, "u_cosInner" );
+	out.uCosOuter = UniformLoc( prog, "u_cosOuter" );
+	out.uMatShadow = UniformLoc( prog, "u_matShadow" );
+	out.uHasShadow = UniformLoc( prog, "u_hasShadow" );
+}
+
 void EnsureShader()
 {
 	if( s_studio.shaderReady && s_studio.shaderGeneration == GpuGeneration())
 		return;
 
-	if( s_studio.program.program != 0 && s_studio.shaderGeneration != GpuGeneration())
-		s_studio.program.program = 0;	// stale generation: forget, never delete (T1 rule)
+	if( s_studio.shaderGeneration != GpuGeneration())
+	{
+		// Stale generation: forget, never delete (T1 rule).
+		s_studio.program.program = 0;
+		s_studio.litProgram.program = 0;
+	}
 
-	// Init-time shader: compile failure is FATAL (spec 3.2).
+	// Init-time shaders: compile failure is FATAL (spec 3.2).
 	BuildProgram( "csz_studio", kStudioVs, kStudioFs, true, s_studio.program );
-
-	s_studio.uViewProj = UniformLoc( s_studio.program, "u_viewProj" );
-	s_studio.uBones = UniformLoc( s_studio.program, "u_bones" );
-	s_studio.uAlphaTest = UniformLoc( s_studio.program, "u_alphaTest" );
-	s_studio.uAmbient = UniformLoc( s_studio.program, "u_ambient" );
-	s_studio.uShadeColor = UniformLoc( s_studio.program, "u_shadeColor" );
-	s_studio.uChrome = UniformLoc( s_studio.program, "u_chrome" );
-	s_studio.uViewRight = UniformLoc( s_studio.program, "u_viewRight" );
-	s_studio.uViewUp = UniformLoc( s_studio.program, "u_viewUp" );
+	QueryPassLocs( s_studio.program, s_studio.baseLocs );
 
 	UseProgram( s_studio.program.program );
 	glUniform1i( UniformLoc( s_studio.program, "u_texDiffuse" ), 0 );
@@ -103,8 +133,16 @@ void EnsureShader()
 	const float kShadeDir[3] = { 0.0f, 0.0f, 1.0f };
 
 	glUniform3fv( UniformLoc( s_studio.program, "u_shadeDir" ), 1, kShadeDir );
+
+	BuildProgram( "csz_studio_lit", kStudioLitVs, kStudioLitFs, true, s_studio.litProgram );
+	QueryPassLocs( s_studio.litProgram, s_studio.litLocs );
+
+	UseProgram( s_studio.litProgram.program );
+	glUniform1i( UniformLoc( s_studio.litProgram, "u_texDiffuse" ), 0 );
+	glUniform1i( UniformLoc( s_studio.litProgram, "u_shadowMap" ), 2 );
 	UseProgram( 0 );
 
+	s_studio.locs = &s_studio.baseLocs;
 	s_studio.whiteTexSlot = ( gRenderAPI.GL_FindTexture != NULL )
 		? gRenderAPI.GL_FindTexture( "*white" ) : 0;
 	s_studio.shaderGeneration = GpuGeneration();
@@ -155,9 +193,9 @@ void SampleEntityLight( const cl_entity_s *ent, float out[3] )
 	}
 }
 
-// Conservative sphere test from the sequence bbox corner radius
+// Conservative bounding-sphere radius from the sequence bbox corner radius
 // (rotation-safe; progress-t3.md decision 8).
-bool CullEntity( const ViewSetup &view, const cl_entity_s *ent, const studiohdr_t *hdr )
+float EntityProbeRadius( const cl_entity_s *ent, const studiohdr_t *hdr )
 {
 	int seq = ent->curstate.sequence;
 
@@ -174,10 +212,33 @@ bool CullEntity( const ViewSetup &view, const cl_entity_s *ent, const studiohdr_
 	if( r < 16.0f )
 		r = 16.0f;	// degenerate bbox: keep a minimum probe
 
+	return r;
+}
+
+bool CullEntity( const ViewSetup &view, const cl_entity_s *ent, const studiohdr_t *hdr )
+{
+	float r = EntityProbeRadius( ent, hdr );
 	float mins[3] = { ent->origin[0] - r, ent->origin[1] - r, ent->origin[2] - r };
 	float maxs[3] = { ent->origin[0] + r, ent->origin[1] + r, ent->origin[2] + r };
 
 	return view.frustum.CullBox( mins, maxs );
+}
+
+// Conservative spot-light vs entity test (T6): bounding spheres + apex
+// half-space (SpotLightParams carries no frustum; see csz_world.cpp twin).
+bool SpotTouchesEntity( const SpotLightParams &light, const cl_entity_s *ent, const studiohdr_t *hdr )
+{
+	float r = EntityProbeRadius( ent, hdr );
+	float dx = ent->origin[0] - light.origin[0];
+	float dy = ent->origin[1] - light.origin[1];
+	float dz = ent->origin[2] - light.origin[2];
+	float reach = light.radius + r;
+
+	if( dx * dx + dy * dy + dz * dz > reach * reach )
+		return false;
+
+	// Fully behind the cone apex plane (by more than the probe radius).
+	return ( dx * light.dir[0] + dy * light.dir[1] + dz * light.dir[2] ) >= -r;
 }
 
 void SetMeshUniforms( int texFlags, const float lightColor[3], bool force )
@@ -188,13 +249,13 @@ void SetMeshUniforms( int texFlags, const float lightColor[3], bool force )
 
 	if( force || alphaTest != s_studio.curAlphaTest )
 	{
-		glUniform1f( s_studio.uAlphaTest, alphaTest );
+		glUniform1f( s_studio.locs->uAlphaTest, alphaTest );
 		s_studio.curAlphaTest = alphaTest;
 	}
 
 	if( force || chrome != s_studio.curChrome )
 	{
-		glUniform1i( s_studio.uChrome, chrome );
+		glUniform1i( s_studio.locs->uChrome, chrome );
 		s_studio.curChrome = chrome;
 	}
 
@@ -205,13 +266,14 @@ void SetMeshUniforms( int texFlags, const float lightColor[3], bool force )
 
 	if( lightChanged || fullbright != s_studio.curFullbright )
 	{
+		// Base-pass-only uniforms; -1 (ignored) in the lit program.
 		if( fullbright )
 		{
 			const float kOne[3] = { 1.0f, 1.0f, 1.0f };
 			const float kZero[3] = { 0.0f, 0.0f, 0.0f };
 
-			glUniform3fv( s_studio.uAmbient, 1, kOne );
-			glUniform3fv( s_studio.uShadeColor, 1, kZero );
+			glUniform3fv( s_studio.locs->uAmbient, 1, kOne );
+			glUniform3fv( s_studio.locs->uShadeColor, 1, kZero );
 		}
 		else
 		{
@@ -219,8 +281,8 @@ void SetMeshUniforms( int texFlags, const float lightColor[3], bool force )
 			float ambient[3] = { 0.6f * lightColor[0], 0.6f * lightColor[1], 0.6f * lightColor[2] };
 			float shade[3] = { 0.4f * lightColor[0], 0.4f * lightColor[1], 0.4f * lightColor[2] };
 
-			glUniform3fv( s_studio.uAmbient, 1, ambient );
-			glUniform3fv( s_studio.uShadeColor, 1, shade );
+			glUniform3fv( s_studio.locs->uAmbient, 1, ambient );
+			glUniform3fv( s_studio.locs->uShadeColor, 1, shade );
 		}
 
 		s_studio.curFullbright = fullbright;
@@ -234,7 +296,7 @@ void SetMeshUniforms( int texFlags, const float lightColor[3], bool force )
 void DrawModelMeshes( StudioModelGpu *gpu, const studiohdr_t *hdr, int body,
 	const BoneSetup *bones, const float lightColor[3] )
 {
-	glUniform4fv( s_studio.uBones, bones->numBones * 3, &bones->gpuBones[0][0] );
+	glUniform4fv( s_studio.locs->uBones, bones->numBones * 3, &bones->gpuBones[0][0] );
 
 	const mstudiobodyparts_t *pbodyparts = (const mstudiobodyparts_t *)((const byte *)hdr + hdr->bodypartindex );
 	int selected[MAXSTUDIOBODYPARTS];
@@ -279,7 +341,9 @@ void DrawModelMeshes( StudioModelGpu *gpu, const studiohdr_t *hdr, int body,
 
 // Full single-entity path: model resolve, cull, bones, light, meshes,
 // player p_ weapon merge. Returns true when something was drawn.
-bool DrawEntity( const ViewSetup &view, cl_entity_s *ent, bool doCull )
+// spotCull != NULL additionally rejects entities outside that light's reach
+// (lit-additive pass).
+bool DrawEntity( const ViewSetup &view, cl_entity_s *ent, bool doCull, const SpotLightParams *spotCull )
 {
 	model_t *mod = ent->model;
 
@@ -310,6 +374,9 @@ bool DrawEntity( const ViewSetup &view, cl_entity_s *ent, bool doCull )
 	if( doCull && CullEntity( view, ent, hdr ))
 		return false;
 
+	if( spotCull != NULL && !SpotTouchesEntity( *spotCull, ent, hdr ))
+		return false;
+
 	const BoneSetup *bones = NULL;
 
 	if( !SetupBones( ent, hdr, s_studio.time, &bones ))
@@ -320,9 +387,12 @@ bool DrawEntity( const ViewSetup &view, cl_entity_s *ent, bool doCull )
 	if( gpu == NULL )
 		return false;
 
-	float lightColor[3];
+	float lightColor[3] = { 0.5f, 0.5f, 0.5f };
 
-	SampleEntityLight( ent, lightColor );
+	// The lit pass ignores ambient/shade (locations -1); skip the LightVec
+	// trace there -- it would run once per entity per light otherwise.
+	if( !s_studio.litPass )
+		SampleEntityLight( ent, lightColor );
 
 	// Mirrored setups (right-hand viewmodel) have reversed triangle winding;
 	// the stock path solves this by drawing the flipped viewmodel with
@@ -363,17 +433,18 @@ bool DrawEntity( const ViewSetup &view, cl_entity_s *ent, bool doCull )
 }
 
 // Common pass prologue: program, view uniforms, chrome basis, dedup reset.
-void BeginStudioPass( const ViewSetup &view )
+void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, const PassLocs &locs )
 {
 	EnsureShader();
-	UseProgram( s_studio.program.program );
-	glUniformMatrix4fv( s_studio.uViewProj, 1, GL_FALSE, view.matViewProj.m );
+	s_studio.locs = &locs;
+	UseProgram( prog.program );
+	glUniformMatrix4fv( locs.uViewProj, 1, GL_FALSE, view.matViewProj.m );
 
 	float fwd[3], right[3], up[3];
 
 	AngleVectors( view.angles, fwd, right, up );
-	glUniform3fv( s_studio.uViewRight, 1, right );
-	glUniform3fv( s_studio.uViewUp, 1, up );
+	glUniform3fv( locs.uViewRight, 1, right );
+	glUniform3fv( locs.uViewUp, 1, up );
 
 	// Pin known uniform state so per-mesh dedup stays truthful.
 	const float kGray[3] = { 0.5f, 0.5f, 0.5f };
@@ -387,10 +458,51 @@ void BeginStudioPass( const ViewSetup &view )
 	SetCullFront( true );
 }
 
+void BeginStudioPass( const ViewSetup &view )
+{
+	// EnsureShader runs first inside BeginStudioPassWith; the references
+	// below are stable storage, so taking them before is safe.
+	BeginStudioPassWith( view, s_studio.program, s_studio.baseLocs );
+}
+
+// Lit-additive prologue: lit program + per-light uniforms + additive blend
+// with depth writes off (equal-depth LEQUAL on top of the opaque pass).
+void BeginStudioLitPass( const ViewSetup &view, const SpotLightParams &light )
+{
+	s_studio.litPass = true;
+	BeginStudioPassWith( view, s_studio.litProgram, s_studio.litLocs );
+
+	const PassLocs &locs = s_studio.litLocs;
+
+	glUniform3fv( locs.uLightOrigin, 1, light.origin );
+	glUniform3fv( locs.uLightDir, 1, light.dir );
+	glUniform3fv( locs.uLightColor, 1, light.color );
+	glUniform1f( locs.uLightRadius, light.radius );
+	glUniform1f( locs.uCosInner, light.cosInner );
+	glUniform1f( locs.uCosOuter, light.cosOuter );
+	glUniformMatrix4fv( locs.uMatShadow, 1, GL_FALSE, light.matShadow.m );
+	glUniform1i( locs.uHasShadow, ( light.shadowTexSlot != 0 ) ? 1 : 0 );
+
+	if( light.shadowTexSlot != 0 )
+		BindTextureSlot( 2, light.shadowTexSlot );	// T7 depth map (T6: never taken)
+
+	SetBlend( kBlendAdditive );
+	SetDepthWrite( false );
+}
+
 void EndStudioPass()
 {
 	SetCull( false );	// EnterTakeover baseline (world pass relies on it)
 	BindVao( 0 );
+}
+
+void EndStudioLitPass()
+{
+	SetBlend( kBlendNone );
+	SetDepthWrite( true );
+	s_studio.litPass = false;
+	s_studio.locs = &s_studio.baseLocs;
+	EndStudioPass();
 }
 
 }
@@ -410,6 +522,14 @@ void StudioRenderer::DestroyAll()
 			DestroyProgram( s_studio.program );
 		else
 			s_studio.program.program = 0;
+	}
+
+	if( s_studio.litProgram.program != 0 )
+	{
+		if( s_studio.shaderGeneration == GpuGeneration())
+			DestroyProgram( s_studio.litProgram );
+		else
+			s_studio.litProgram.program = 0;
 	}
 
 	s_studio.shaderReady = false;
@@ -432,7 +552,7 @@ void StudioRenderer::DrawOpaque( const ViewSetup &view, cl_entity_s *const *ents
 
 	for( int i = 0; i < count; i++ )
 	{
-		if( ents[i] != NULL && DrawEntity( view, ents[i], true ))
+		if( ents[i] != NULL && DrawEntity( view, ents[i], true, NULL ))
 			drawn++;
 	}
 
@@ -470,18 +590,29 @@ void StudioRenderer::DrawDepth( const ViewSetup &lightView, const Frustum &light
 void StudioRenderer::DrawLitAdditive( const ViewSetup &view, const SpotLightParams &light,
 	cl_entity_s *const *ents, int count )
 {
-	// Filled by T6 (additive spot light pass); signature fixed by plan 2.2.
-	(void)view;
-	(void)light;
-	(void)ents;
-	(void)count;
+	if( count <= 0 )
+		return;
 
-	static bool s_logged;
+	BeginStudioLitPass( view, light );
 
-	if( !s_logged )
+	int drawn = 0;
+
+	for( int i = 0; i < count; i++ )
 	{
-		s_logged = true;
-		CSZ_LogDev( "studio", "DrawLitAdditive stub called (lands in T6)" );
+		if( ents[i] != NULL && DrawEntity( view, ents[i], true, &light ))
+			drawn++;
+	}
+
+	EndStudioLitPass();
+
+	// Per-frame stats at Dev level with 1s self-throttle (R8).
+	static float s_nextStatsTime;
+	float now = ClientTime();
+
+	if( drawn > 0 && now >= s_nextStatsTime )
+	{
+		s_nextStatsTime = now + 1.0f;
+		CSZ_LogDev( "studio", "lit %d / %d studio entities", drawn, count );
 	}
 }
 
@@ -493,7 +624,7 @@ void StudioRenderer::DrawSingle( const ViewSetup &view, cl_entity_s *ent )
 		return;
 
 	BeginStudioPass( view );
-	DrawEntity( view, ent, false );
+	DrawEntity( view, ent, false, NULL );
 	EndStudioPass();
 }
 
