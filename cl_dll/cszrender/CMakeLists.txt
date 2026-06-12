@@ -15,6 +15,7 @@ set(CSZRENDER_SRC
 	core/csz_view.cpp
 	geom/csz_world.cpp
 	geom/csz_lightmap.cpp
+	geom/csz_sprite.cpp
 	geom/csz_studio.cpp
 	geom/csz_studio_bones.cpp
 	geom/csz_studio_mesh.cpp

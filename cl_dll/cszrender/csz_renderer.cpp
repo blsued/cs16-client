@@ -39,6 +39,7 @@
 #include "core/csz_log.h"
 #include "core/csz_fatal.h"
 #include "core/csz_view.h"
+#include "geom/csz_sprite.h"
 #include "geom/csz_studio.h"
 #include "geom/csz_viewmodel.h"
 #include "geom/csz_world.h"
@@ -136,6 +137,8 @@ void Renderer::OnHudInit()
 
 	if( m_cvarEnable == NULL )
 		m_cvarEnable = gEngfuncs.pfnRegisterVariable( "csz_renderer", "1", FCVAR_CLIENTDLL );
+
+	RegisterSpriteCommands();	// csz_testsprite (T5)
 }
 
 void Renderer::OnVidInit()
@@ -212,7 +215,8 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	g_studio.DrawOpaque( view, m_frame.studio, m_frame.numStudio );	// slot 12: studio opaque
 
 	// pass slot: additive light passes (T6)
-	// pass slot: sprites (T5)
+
+	DrawSprites( view, m_frame.sprites, m_frame.numSprites );	// slot 14: sprites
 
 	DrawViewModelPass( view );					// slot 15: viewmodel (last; own depth range)
 
