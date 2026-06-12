@@ -9,6 +9,9 @@ set(CSZRENDER_SRC
 	core/csz_fatal.cpp
 	core/csz_glfuncs.cpp
 	core/csz_glcaps.cpp
+	core/csz_glstate.cpp
+	core/csz_shader.cpp
+	core/csz_math.cpp
 )
 add_library(cszrender STATIC ${CSZRENDER_SRC})
 target_include_directories(cszrender PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
