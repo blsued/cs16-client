@@ -642,13 +642,13 @@ void CPartSnowFlake::Touch(Vector pos, Vector normal, int index, bool enteringWa
 	}
 }
 
-void CEnvironment::Initialize()
+// CSOZ hook: gl_snow_* used to register lazily here (first map load). The
+// FCVAR_ARCHIVE flag then writes them into config.cfg on exit, and every
+// later boot execs that config BEFORE any map loads -> 5x "Unknown command"
+// startup spam. CHud::Init now calls RegisterCvars() before the engine
+// execs configs; Initialize() keeps calling it for upstream parity.
+void CEnvironment::RegisterCvars()
 {
-	Reset();
-
-	m_flWeatherValue = gHUD.cl_weather->value;
-	m_iSavedWeatherType = 0;
-
 	if (!gl_snow_speed)
 		gl_snow_speed = CVAR_CREATE("gl_snow_speed", "0", FCVAR_ARCHIVE);
 	if (!gl_snow_rate)
@@ -659,6 +659,16 @@ void CEnvironment::Initialize()
 		gl_snow_melttime = CVAR_CREATE("gl_snow_melttime", "0", FCVAR_ARCHIVE);
 	if (!gl_snow_size)
 		gl_snow_size = CVAR_CREATE("gl_snow_size", "0", FCVAR_ARCHIVE);
+}
+
+void CEnvironment::Initialize()
+{
+	Reset();
+
+	m_flWeatherValue = gHUD.cl_weather->value;
+	m_iSavedWeatherType = 0;
+
+	RegisterCvars(); // CSOZ hook: moved out for early registration
 
 	RestoreWeather();
 }

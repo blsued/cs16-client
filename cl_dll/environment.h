@@ -113,6 +113,7 @@ public:
 	float GetOldTime() const { return m_flOldTime; }
 
 	void Initialize();
+	static void RegisterCvars(); // CSOZ hook: early gl_snow_* registration, no startup cfg warnings
 	void Reset();
 	void Clear();
 	void Update();
