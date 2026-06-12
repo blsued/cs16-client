@@ -453,7 +453,10 @@ StudioModelGpu *GetOrBuild( model_t *mod, studiohdr_t *hdr )
 							out.texSlot = extSlot;
 							texW = extW;
 							texH = extH;
-							CSZ_LogDev( "studio", "%s: external texture models/texture/%s (%dx%d, slot %d)",
+							// Info, not Dev: one line per mesh at model build,
+							// permanent asset-diagnosis value (T2 build logs do
+							// the same).
+							CSZ_LogInfo( "studio", "%s: external texture models/texture/%s (%dx%d, slot %d)",
 								hdr->name, tex.name, extW, extH, extSlot );
 						}
 						else if( extTexWarned++ == 0 )
