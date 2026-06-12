@@ -36,7 +36,10 @@
 #include "csz_studio.h"
 #include "../core/csz_engine.h"
 #include "../core/csz_glstate.h"
+#include "../core/csz_log.h"
 #include "../core/csz_view.h"
+
+#include <string.h>
 
 namespace csz
 {
@@ -50,6 +53,52 @@ namespace
 cvar_t *s_drawViewModel;
 bool s_cvarQueried;
 
+// csz_dev_viewmodel (dev tool): render an arbitrary studio model in the
+// viewmodel slot, e.g. "models/v_frostblade.mdl". Lets headless sessions put
+// any texture.ini-mapped weapon on screen without server-side give support
+// (defect batch 3 #16 acceptance). Empty / "0" = off.
+cvar_t *s_devViewmodel;
+char s_devLoadedName[128];
+model_t *s_devModel;
+
+model_t *DevViewmodel()
+{
+	if( s_devViewmodel == NULL || s_devViewmodel->string == NULL )
+		return NULL;
+
+	const char *want = s_devViewmodel->string;
+
+	if( want[0] == '\0' || !strcmp( want, "0" ))
+	{
+		s_devLoadedName[0] = '\0';
+		s_devModel = NULL;
+		return NULL;
+	}
+
+	if( strcmp( want, s_devLoadedName ) != 0 )
+	{
+		strncpy( s_devLoadedName, want, sizeof( s_devLoadedName ) - 1 );
+		s_devLoadedName[sizeof( s_devLoadedName ) - 1] = '\0';
+
+		int index = 0;
+
+		s_devModel = gEngfuncs.CL_LoadModel( want, &index );
+
+		if( s_devModel == NULL )
+			CSZ_LogWarn( "studio", "csz_dev_viewmodel: cannot load '%s'", want );
+		else
+			CSZ_LogInfo( "studio", "csz_dev_viewmodel: substituting '%s'", want );
+	}
+
+	return s_devModel;
+}
+
+}
+
+void RegisterViewmodelDevCvars()
+{
+	if( s_devViewmodel == NULL )
+		s_devViewmodel = gEngfuncs.pfnRegisterVariable( "csz_dev_viewmodel", "", FCVAR_CLIENTDLL );
 }
 
 void DrawViewModelPass( const ViewSetup &mainView )
@@ -76,6 +125,24 @@ void DrawViewModelPass( const ViewSetup &mainView )
 
 	if( ent == NULL || ent->model == NULL )
 		return;
+
+	// Dev substitution (csz_dev_viewmodel): draw a stand-in model with the
+	// real viewmodel's transform. Sequence/body/skin reset to 0 (foreign
+	// indices would be meaningless; out-of-range is clamped anyway).
+	model_t *devModel = DevViewmodel();
+	static cl_entity_t s_devEnt;
+
+	if( devModel != NULL )
+	{
+		s_devEnt = *ent;
+		s_devEnt.model = devModel;
+		s_devEnt.curstate.sequence = 0;
+		s_devEnt.curstate.frame = 0.0f;
+		s_devEnt.curstate.body = 0;
+		s_devEnt.curstate.skin = 0;
+		s_devEnt.latched.prevsequence = 0;
+		ent = &s_devEnt;
+	}
 
 	// Dedicated projection: same fov as the main view, zNear=4 so the gun
 	// body never crosses the near plane, zFar=4096 (a viewmodel lives within

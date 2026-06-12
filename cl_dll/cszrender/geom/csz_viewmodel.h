@@ -40,4 +40,7 @@ struct ViewSetup;
 // dedicated projection (zNear=4, fov = main view fov). Runs LAST among 3D
 // passes; restores depth range before returning. No-op when viewmodel hidden.
 void DrawViewModelPass( const ViewSetup &mainView );
+// Registers csz_dev_viewmodel (dev stand-in model for the viewmodel slot).
+// Called once from Renderer::OnHudInit.
+void RegisterViewmodelDevCvars();
 }

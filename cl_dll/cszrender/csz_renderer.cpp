@@ -41,6 +41,7 @@
 #include "core/csz_view.h"
 #include "geom/csz_sprite.h"
 #include "geom/csz_studio.h"
+#include "geom/csz_studio_texture.h"
 #include "geom/csz_viewmodel.h"
 #include "geom/csz_world.h"
 #include "lighting/csz_light_pass.h"
@@ -142,6 +143,8 @@ void Renderer::OnHudInit()
 
 	RegisterSpriteCommands();	// csz_testsprite (T5)
 	RegisterLightingCommands();	// csz_testspot + csz_testlight (T6)
+	RegisterStudioTextureCvars();	// csz_dev_armskin (spec 4.3.1 layer 1 dev probe)
+	RegisterViewmodelDevCvars();	// csz_dev_viewmodel (dev stand-in model)
 }
 
 void Renderer::OnVidInit()
@@ -203,6 +206,7 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 
 	g_studio.BeginFrame( ClientTime());				// slot 7: studio begin-frame
 	g_lights.UpdateMatrices();					// slot 7: light matrix update
+	StudioTexturePollDevCvars();					// slot 7: csz_dev_armskin change check
 
 	EnterTakeover();						// slot 8
 
