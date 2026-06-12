@@ -47,9 +47,10 @@ struct BoneSetup
 	float gpuBones[kMaxGpuBones][12];   // per bone: 3 rows of vec4 (world-from-bone 3x4, row vectors)
 };
 // Main-sequence pose + player gait blending (bone-name boundary weights),
-// frame estimation from curstate(frame/animtime/framerate), sequence index
-// clamped to [0, numseq) (notes-mechanisms f-14). One evaluation per entity
-// per frame (stamp cached); multi-pass callers reuse the cache.
+// frame estimation from curstate(frame/animtime/framerate), out-of-range
+// sequence index resets to 0 (stock parity, notes-mechanisms f-14). One
+// evaluation per entity per frame (stamp cached); multi-pass callers reuse
+// the cache.
 bool SetupBones( cl_entity_s *ent, studiohdr_t *hdr, float time, const BoneSetup **out );
 
 // p_ weapon model riding a player skeleton: bones whose names match the

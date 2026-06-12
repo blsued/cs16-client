@@ -722,7 +722,18 @@ const mstudioanim_t *BlendAnim( const studiohdr_t *hdr, const mstudioanim_t *pan
 void EvaluatePose( cl_entity_s *ent, const studiohdr_t *hdr, float time )
 {
 	int numBones = NumBonesClamped( hdr );
-	int seq = ClampI( ent->curstate.sequence, 0, hdr->numseq - 1 );
+	int seq = ent->curstate.sequence;
+
+	// Out-of-range sequences reset to 0 -- engine parity (pinned
+	// ref/gl/gl_studio.c StudioSetupBones and this fork's GameStudio
+	// renderers all do `seq >= numseq -> 0`). Clamping to numseq-1 instead
+	// picked the LAST sequence, which on CS player models is 110
+	// "crouch_die": servers transiently network sequence=255 for live
+	// players, and the clamp rendered them lying flat with the gait leg
+	// overlay suppressed by the death-range gate below.
+	if( seq < 0 || seq >= hdr->numseq )
+		seq = 0;
+
 	const mstudioseqdesc_t *pseqdesc = SeqDesc( hdr, seq );
 	const mstudioanim_t *panim = GetAnim( hdr, pseqdesc );
 
@@ -1059,8 +1070,11 @@ bool SetupBonesMerged( cl_entity_s *ent, studiohdr_t *carrierHdr, const BoneSetu
 
 	// Weapon's own pose for any bone that does not exist on the carrier
 	// (adapted StudioMergeBones: carrier sequence index against the weapon's
-	// own sequence table).
-	int seq = ClampI( ent->curstate.sequence, 0, weaponHdr->numseq - 1 );
+	// own sequence table; out-of-range resets to 0, stock parity as above).
+	int seq = ent->curstate.sequence;
+
+	if( seq < 0 || seq >= weaponHdr->numseq )
+		seq = 0;
 	const mstudioseqdesc_t *pseqdesc = SeqDesc( weaponHdr, seq );
 	const mstudioanim_t *panim = GetAnim( weaponHdr, pseqdesc );
 
