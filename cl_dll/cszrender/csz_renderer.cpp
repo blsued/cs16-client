@@ -39,6 +39,7 @@
 #include "core/csz_log.h"
 #include "core/csz_fatal.h"
 #include "core/csz_view.h"
+#include "geom/csz_studio.h"
 #include "geom/csz_world.h"
 
 namespace csz
@@ -154,6 +155,7 @@ void Renderer::Shutdown()
 	if( m_glReady )
 	{
 		g_world.Destroy();
+		g_studio.DestroyAll();
 		m_glReady = false;
 	}
 
@@ -192,7 +194,8 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	g_world.EnsureBuilt( world );
 	g_world.BuildVisibleSet( view );
 
-	// pass slot: studio begin-frame + light matrix update (T3/T6)
+	g_studio.BeginFrame( ClientTime());				// slot 7: studio begin-frame
+	// pass slot: light matrix update (T6)
 
 	EnterTakeover();						// slot 8
 
@@ -205,7 +208,8 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 
 	g_world.DrawOpaque( view );					// slot 11: world opaque
 
-	// pass slot: studio opaque (T3)
+	g_studio.DrawOpaque( view, m_frame.studio, m_frame.numStudio );	// slot 12: studio opaque
+
 	// pass slot: additive light passes (T6)
 	// pass slot: sprites (T5)
 	// pass slot: viewmodel (T4; last, own depth range)
@@ -283,21 +287,68 @@ void Renderer::ProcessUserData( model_t *mod, qboolean create, const byte *buffe
 {
 	(void)buffer;
 
-	// T3 adds studio GPU caches here. T2 scope: tear the world down when the
-	// engine unloads the model we built from.
-	if( !create && mod != NULL && mod == s_worldModel )
+	// Tear down GPU caches when the engine unloads a model we built from.
+	if( !create && mod != NULL )
 	{
-		g_world.Destroy();
-		s_worldModel = NULL;
-		CSZ_LogDev( "core", "world model unloaded; world GPU data destroyed" );
+		if( mod == s_worldModel )
+		{
+			g_world.Destroy();
+			s_worldModel = NULL;
+			CSZ_LogDev( "core", "world model unloaded; world GPU data destroyed" );
+		}
+		else
+		{
+			g_studio.OnModelUnloaded( mod );	// no-op for non-cached models
+		}
 	}
 }
 
 void Renderer::AddEntity( int type, cl_entity_t *ent )
 {
-	// Entity ingest is wired and implemented in T3 (HUD_AddEntity hook).
+	// HUD_AddEntity hook: collect this frame's renderables by model type
+	// (entity type is irrelevant for the M1 draw lists). ClearScene resets
+	// the lists every frame (engine calls it first, notes-renderapi A 11).
 	(void)type;
-	(void)ent;
+
+	if( ent == NULL || ent->model == NULL )
+		return;
+
+	if( ent->model->type == mod_studio )
+	{
+		// Engine parity (pinned engine cl_frame.c CL_AddVisibleEntity): in
+		// firstperson the engine still dispatches the local player to
+		// HUD_AddEntity "for use in custom renderers" but never hands it to
+		// its own ref. Mirror that filter, or the camera sits inside its own
+		// skinned head (T3 live finding). The engine's extra check is
+		// "ent->index == cl.viewentity", which the client cannot read
+		// (IEngineStudio.GetViewEntity returns the VIEWMODEL: pinned
+		// cl_game.c wires it to CL_GetViewModel); M1 simplification: a
+		// trigger_camera view would hide the local body, accepted gap.
+		if( ent->player && ent == gEngfuncs.GetLocalPlayer() && !CL_IsThirdPerson())
+			return;
+
+		if( m_frame.numStudio < FrameEntities::kMaxEntities )
+		{
+			m_frame.studio[m_frame.numStudio++] = ent;
+		}
+		else
+		{
+			static float s_nextWarn;
+			float now = ClientTime();
+
+			if( now >= s_nextWarn )
+			{
+				s_nextWarn = now + 1.0f;
+				CSZ_LogWarn( "core", "studio entity list full (%d); dropping entities", FrameEntities::kMaxEntities );
+			}
+		}
+	}
+	else if( ent->model->type == mod_sprite )
+	{
+		// Collected now, drawn from T5 on.
+		if( m_frame.numSprites < FrameEntities::kMaxEntities )
+			m_frame.sprites[m_frame.numSprites++] = ent;
+	}
 }
 
 bool Renderer::EnsureGlReady()

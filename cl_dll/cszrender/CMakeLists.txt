@@ -15,6 +15,9 @@ set(CSZRENDER_SRC
 	core/csz_view.cpp
 	geom/csz_world.cpp
 	geom/csz_lightmap.cpp
+	geom/csz_studio.cpp
+	geom/csz_studio_bones.cpp
+	geom/csz_studio_mesh.cpp
 )
 add_library(cszrender STATIC ${CSZRENDER_SRC})
 target_include_directories(cszrender PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
