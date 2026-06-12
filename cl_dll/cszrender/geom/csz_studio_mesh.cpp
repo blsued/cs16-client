@@ -44,6 +44,7 @@
 #include "../core/csz_log.h"
 
 #include <new>
+#include <stdio.h>
 #include <string.h>
 
 namespace csz
@@ -158,6 +159,45 @@ void AppendVertex( float *dst, int slot, const VertexScratch &v )
 	f[6] = v.uv[0];
 	f[7] = v.uv[1];
 	memcpy( &f[8], &v.bone, sizeof( int ));	// int attribute aliased into the float stream
+}
+
+// CSO-lineage external studio texture ("#"-named placeholder). CSO/BTE
+// asset packs embed only a tiny placeholder (4x1 / 8x5 pixels) whose name
+// starts with '#' (e.g. "#256256balrog-11_p.bmp", "#M_S.bmp"); the real
+// pixels ship as models/texture/<name> and the mesh UV shorts are authored
+// against the REAL texture dimensions (verified against the deployed asset
+// pack: v_ak47 hands UVs span 0..509 while the embedded entry is 8x5).
+// The pinned engine has no such mechanism (ref/gl/gl_studio.c
+// R_StudioLoadTexture loads embedded pixels only), so the stock path tiles
+// the placeholder -- flat untextured-looking guns and black gloves. This is
+// a CSOZ extension; when the external file is absent the embedded
+// placeholder stays in use (stock behavior). Returns the engine texture
+// slot, or 0 when unavailable; *width/*height get the real dimensions.
+int ResolveExternalCsoTexture( const char *texName, int *width, int *height )
+{
+	if( gRenderAPI.GL_LoadTexture == NULL || gRenderAPI.RenderGetParm == NULL )
+		return 0;
+
+	char path[160];
+
+	snprintf( path, sizeof( path ), "models/texture/%s", texName );
+
+	// Engine texture manager dedups by name, so repeated resolves of the
+	// same sleeve/skin file across models return one shared slot.
+	int slot = gRenderAPI.GL_LoadTexture( path, NULL, 0, 0 );
+
+	if( slot == 0 )
+		return 0;
+
+	int w = (int)gRenderAPI.RenderGetParm( PARM_TEX_WIDTH, slot );
+	int h = (int)gRenderAPI.RenderGetParm( PARM_TEX_HEIGHT, slot );
+
+	if( w <= 0 || h <= 0 )
+		return 0;	// no queryable size: unusable as a UV basis
+
+	*width = w;
+	*height = h;
+	return slot;
 }
 
 // Counts triangles in one tricmd stream (strips and fans mixed).
@@ -361,6 +401,7 @@ StudioModelGpu *GetOrBuild( model_t *mod, studiohdr_t *hdr )
 	int meshCursor = 0;
 	int totalVerts = 0;
 	int badTexWarned = 0;
+	int extTexWarned = 0;
 
 	for( int bp = 0; bp < hdr->numbodyparts; bp++ )
 	{
@@ -399,6 +440,28 @@ StudioModelGpu *GetOrBuild( model_t *mod, studiohdr_t *hdr )
 					out.texFlags = tex.flags;
 					texW = ( tex.width > 0 ) ? tex.width : 64;
 					texH = ( tex.height > 0 ) ? tex.height : 64;
+
+					// '#'-named entry: prefer the CSO external real texture
+					// (defect batch 2 #11/#13; see ResolveExternalCsoTexture).
+					if( tex.name[0] == '#' )
+					{
+						int extW = 0, extH = 0;
+						int extSlot = ResolveExternalCsoTexture( tex.name, &extW, &extH );
+
+						if( extSlot != 0 )
+						{
+							out.texSlot = extSlot;
+							texW = extW;
+							texH = extH;
+							CSZ_LogDev( "studio", "%s: external texture models/texture/%s (%dx%d, slot %d)",
+								hdr->name, tex.name, extW, extH, extSlot );
+						}
+						else if( extTexWarned++ == 0 )
+						{
+							CSZ_LogWarn( "studio", "%s: '#' texture %s has no models/texture/ file; using embedded placeholder",
+								hdr->name, tex.name );
+						}
+					}
 				}
 
 				if( out.texSlot == 0 && badTexWarned++ == 0 )
