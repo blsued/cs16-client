@@ -172,3 +172,26 @@ void main()
 	fragColor = vec4( base.rgb * u_lightColor * ( atten * cone * ndotl * shadow ), 1.0 );
 }
 )GLSL";
+
+// Studio depth pass (T7 shadow map): skinned position only, empty FS
+// (plan 2.4 row 3: locations 0 a_pos + 3 a_bone, the mesh VAO layout keeps
+// normals/uv at 1/2 which this program simply does not read).
+static const char kStudioDepthVs[] = R"GLSL(#version 330 core
+layout(location = 0) in vec3 a_pos;
+layout(location = 3) in int a_bone;
+uniform mat4 u_viewProj;
+uniform vec4 u_bones[384];
+void main()
+{
+	int b = a_bone * 3;
+	vec4 p = vec4( a_pos, 1.0 );
+	vec3 worldPos = vec3( dot( u_bones[b], p ), dot( u_bones[b + 1], p ), dot( u_bones[b + 2], p ));
+	gl_Position = u_viewProj * vec4( worldPos, 1.0 );
+}
+)GLSL";
+
+static const char kStudioDepthFs[] = R"GLSL(#version 330 core
+void main()
+{
+}
+)GLSL";

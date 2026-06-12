@@ -99,6 +99,8 @@ struct WorldState
 	int litULightOrigin, litULightDir, litULightColor;
 	int litULightRadius, litUCosInner, litUCosOuter;
 	int litUMatShadow, litUHasShadow;
+	ShaderProgram depthProgram;	// shadow map depth pass (T7)
+	int depthUViewProj;
 
 	FaceRec *faces;			// [numFaces], indexed by local face index
 	int *opaque;			// sorted local indices (texture, lightmap page)
@@ -336,6 +338,14 @@ void WorldRenderer::Destroy()
 			DestroyProgram( s_world.litProgram );
 		else
 			s_world.litProgram.program = 0;
+	}
+
+	if( s_world.depthProgram.program != 0 )
+	{
+		if( sameContext )
+			DestroyProgram( s_world.depthProgram );
+		else
+			s_world.depthProgram.program = 0;
 	}
 
 	delete[] s_world.faces;
@@ -608,6 +618,10 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	glUniform1f( s_world.litUAlphaTest, 0.0f );
 	UseProgram( 0 );
 
+	// Depth program (T7 shadow map pass); init-time, so failure is FATAL.
+	BuildProgram( "csz_world_depth", kWorldDepthVs, kWorldDepthFs, true, s_world.depthProgram );
+	s_world.depthUViewProj = UniformLoc( s_world.depthProgram, "u_viewProj" );
+
 	int pages = maxPage + 1;
 
 	s_world.built = true;
@@ -726,16 +740,53 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 
 void WorldRenderer::DrawDepth( const ViewSetup &lightView, const Frustum &lightCull )
 {
-	// Filled by T7 (shadow depth pass); signature fixed by plan section 2.2.
-	(void)lightView;
-	(void)lightCull;
+	if( !s_world.built )
+		return;
 
-	static bool s_logged;
+	UseProgram( s_world.depthProgram.program );
+	glUniformMatrix4fv( s_world.depthUViewProj, 1, GL_FALSE, lightView.matViewProj.m );
+	BindVao( s_world.vao );
+	SetCull( false );	// plane-side selection below (triangle-fan winding is
+				// not GL-cull reliable; same policy as DrawOpaque)
 
-	if( !s_logged )
+	// All-visible iteration on purpose (shadow PVS open, notes-mechanisms f-8):
+	// s_world.visible is the CAMERA's set and must not gate shadow casters.
+	int drawn = 0;
+
+	for( int i = 0; i < s_world.numOpaque; i++ )
 	{
-		s_logged = true;
-		CSZ_LogDev( "world", "DrawDepth stub called (lands in T7)" );
+		const FaceRec &f = s_world.faces[s_world.opaque[i]];
+
+		if( f.firstVert < 0 )
+			continue;
+
+		// Far-side-only depth (the acne trick of notes-mechanisms e adapted to
+		// plane-side culling): keep ONLY faces whose front side faces AWAY
+		// from the light. Brushes are closed volumes, so every wall still
+		// occludes through its far face, while lit (light-facing) faces are
+		// never present to self-compare against.
+		float dl = lightView.origin[0] * f.planeNormal[0] + lightView.origin[1] * f.planeNormal[1] +
+			lightView.origin[2] * f.planeNormal[2] - f.planeDist;
+
+		if( f.planeBack ? ( dl < kBackfaceEpsilon ) : ( dl > -kBackfaceEpsilon ))
+			continue;
+
+		if( lightCull.CullBox( f.mins, f.maxs ))
+			continue;
+
+		glDrawArrays( GL_TRIANGLE_FAN, f.firstVert, f.numVerts );
+		drawn++;
+	}
+
+	// Per-frame stats at Dev level with 1s self-throttle (R8).
+	static float s_nextStatsTime;
+	float now = ClientTime();
+
+	if( now >= s_nextStatsTime )
+	{
+		s_nextStatsTime = now + 1.0f;
+		CSZ_LogDev( "world", "shadow depth: %d faces (light at %.0f %.0f %.0f)",
+			drawn, lightView.origin[0], lightView.origin[1], lightView.origin[2] );
 	}
 }
 

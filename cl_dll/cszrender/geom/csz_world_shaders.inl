@@ -131,3 +131,21 @@ void main()
 	fragColor = vec4( base.rgb * u_lightColor * ( atten * cone * ndotl * shadow ), 1.0 );
 }
 )GLSL";
+
+// World depth pass (T7 shadow map): position-only, empty FS (plan 2.4 row 3;
+// depth-only FBO has no color attachment, fence-texture alpha test is a
+// recorded M1 gap -- masked surfaces cast solid shadows).
+static const char kWorldDepthVs[] = R"GLSL(#version 330 core
+layout(location = 0) in vec3 a_pos;
+uniform mat4 u_viewProj;
+void main()
+{
+	gl_Position = u_viewProj * vec4( a_pos, 1.0 );
+}
+)GLSL";
+
+static const char kWorldDepthFs[] = R"GLSL(#version 330 core
+void main()
+{
+}
+)GLSL";

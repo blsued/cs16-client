@@ -46,6 +46,7 @@
 #include "geom/csz_world.h"
 #include "lighting/csz_light_pass.h"
 #include "lighting/csz_light_registry.h"
+#include "lighting/csz_shadowmap.h"
 
 namespace csz
 {
@@ -166,6 +167,7 @@ void Renderer::Shutdown()
 	{
 		g_world.Destroy();
 		g_studio.DestroyAll();
+		g_spotShadow.Destroy();
 		m_glReady = false;
 	}
 
@@ -210,7 +212,7 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 
 	EnterTakeover();						// slot 8
 
-	// pass slot: shadow map passes (T7; before main clear)
+	RenderShadowMaps( view, m_frame.studio, m_frame.numStudio );	// slot 9: shadow maps (before main clear)
 
 	// Dark gray-blue "no content here" clear: anything left this color is a
 	// known gap (sky in M1) or a regression tell (magenta retired with T1).

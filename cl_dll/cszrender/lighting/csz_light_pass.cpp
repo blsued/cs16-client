@@ -34,6 +34,7 @@
  */
 #include "csz_light_pass.h"
 #include "csz_light_registry.h"
+#include "csz_shadowmap.h"
 #include "../core/csz_engine.h"
 #include "../core/csz_engine_bsp.h"
 #include "../core/csz_log.h"
@@ -79,6 +80,7 @@ float s_viewAngles[3];
 bool s_haveView;
 
 cvar_t *s_cvarTestLight;	// csz_testlight (default 1: M1 demo light on)
+cvar_t *s_cvarShadow;		// csz_light_shadow (B-class quality seam, default 1)
 
 // T-spawn parse cache, keyed by map name (re-parsed on map change).
 char s_spawnMapName[64];
@@ -365,17 +367,61 @@ void TestSpotCommand()
 
 void RenderShadowMaps( const ViewSetup &mainView, cl_entity_s *const *studioEnts, int studioCount )
 {
-	// Filled by T7 (spot shadow map depth pass); signature fixed by plan 2.2.
-	(void)mainView;
-	(void)studioEnts;
-	(void)studioCount;
+	// B-class quality seam (plan section 10 step 2): csz_light_shadow 0 keeps
+	// every light shadowless this frame -- UpdateMatrices already reset all
+	// shadowTexSlot to 0, so returning here lands exactly on T6 behavior.
+	if( s_cvarShadow == NULL || s_cvarShadow->value == 0.0f )
+		return;
 
-	static bool s_logged;
+	float now = ClientTime();
+	int shadowed = 0;
+	int wanted = 0;
 
-	if( !s_logged )
+	for( int i = 0; i < LightRegistry::kMaxLights; i++ )
 	{
-		s_logged = true;
-		CSZ_LogDev( "lighting", "RenderShadowMaps stub called (lands in T7)" );
+		ActiveLight *light = g_lights.Slot( i );
+
+		if( !light->used )
+			continue;
+
+		if( light->desc.die > 0.0f && light->desc.die < now )
+			continue;	// expires this frame (RunLightPasses skips it too)
+
+		if( light->desc.type != kLightSpot || !light->desc.castShadow )
+			continue;
+
+		// Lights that cannot affect the main view get no depth pass (same
+		// conservative cone-bbox test RunLightPasses uses for drawing).
+		float mins[3], maxs[3];
+
+		SpotConeBounds( light->desc, mins, maxs );
+
+		if( mainView.frustum.CullBox( mins, maxs ))
+			continue;
+
+		wanted++;
+
+		// M1 budget: exactly one physical depth map (g_spotShadow). The first
+		// visible shadow-casting light claims it; the rest stay shadowless.
+		if( shadowed >= 1 )
+			continue;
+
+		g_spotShadow.RenderDepth( *light, mainView, studioEnts, studioCount );
+
+		if( light->shadowTexSlot != 0 )
+			shadowed++;
+	}
+
+	if( wanted > 1 )
+	{
+		// Per-frame condition at Dev level with 1s self-throttle (R8).
+		static float s_nextWarnTime;
+
+		if( now >= s_nextWarnTime )
+		{
+			s_nextWarnTime = now + 1.0f;
+			CSZ_LogDev( "lighting", "%d shadow casters visible; single M1 map serves the first only", wanted );
+		}
 	}
 }
 
@@ -444,6 +490,9 @@ void RegisterLightingCommands()
 
 	if( s_cvarTestLight == NULL )
 		s_cvarTestLight = gEngfuncs.pfnRegisterVariable( "csz_testlight", "1", FCVAR_CLIENTDLL );
+
+	if( s_cvarShadow == NULL )
+		s_cvarShadow = gEngfuncs.pfnRegisterVariable( "csz_light_shadow", "1", FCVAR_CLIENTDLL );
 }
 
 }

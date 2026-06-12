@@ -112,7 +112,8 @@
 	X( PFNGLFRAMEBUFFERTEXTURE2DPROC, glFramebufferTexture2D ) \
 	X( PFNGLCHECKFRAMEBUFFERSTATUSPROC, glCheckFramebufferStatus ) \
 	X( PFNGLDELETEFRAMEBUFFERSPROC, glDeleteFramebuffers ) \
-	X( PFNGLDRAWBUFFERSPROC, glDrawBuffers )
+	X( PFNGLDRAWBUFFERSPROC, glDrawBuffers ) \
+	X( PFNGLREADBUFFERPROC, glReadBuffer )
 
 #define CSZ_GL_DECLARE( type, name ) extern type name;
 CSZ_GL_FUNCTIONS( CSZ_GL_DECLARE )

@@ -76,9 +76,11 @@ struct StudioState
 	int shaderGeneration;
 	ShaderProgram program;		// base (opaque) pass
 	ShaderProgram litProgram;	// additive per-light pass (T6)
-	PassLocs baseLocs, litLocs;
+	ShaderProgram depthProgram;	// shadow map depth pass (T7)
+	PassLocs baseLocs, litLocs, depthLocs;
 	const PassLocs *locs;		// active pass locations (set by Begin*Pass)
 	bool litPass;			// true while DrawLitAdditive runs (skips LightVec)
+	bool depthPass;			// true while DrawDepth runs (skips LightVec + texture binds)
 	int whiteTexSlot;
 	float time;		// latched at BeginFrame
 	// per-draw uniform dedup
@@ -120,6 +122,7 @@ void EnsureShader()
 		// Stale generation: forget, never delete (T1 rule).
 		s_studio.program.program = 0;
 		s_studio.litProgram.program = 0;
+		s_studio.depthProgram.program = 0;
 	}
 
 	// Init-time shaders: compile failure is FATAL (spec 3.2).
@@ -141,6 +144,11 @@ void EnsureShader()
 	glUniform1i( UniformLoc( s_studio.litProgram, "u_texDiffuse" ), 0 );
 	glUniform1i( UniformLoc( s_studio.litProgram, "u_shadowMap" ), 2 );
 	UseProgram( 0 );
+
+	// Depth program (T7 shadow map pass): only u_viewProj/u_bones resolve,
+	// every other PassLocs member is -1 (glUniform* no-ops) by design.
+	BuildProgram( "csz_studio_depth", kStudioDepthVs, kStudioDepthFs, true, s_studio.depthProgram );
+	QueryPassLocs( s_studio.depthProgram, s_studio.depthLocs );
 
 	s_studio.locs = &s_studio.baseLocs;
 	s_studio.whiteTexSlot = ( gRenderAPI.GL_FindTexture != NULL )
@@ -325,15 +333,21 @@ void DrawModelMeshes( StudioModelGpu *gpu, const studiohdr_t *hdr, int body,
 		if( mesh.submodel != selected[mesh.bodypart] )
 			continue;
 
-		int texSlot = ( mesh.texSlot != 0 ) ? mesh.texSlot : s_studio.whiteTexSlot;
-
-		if( texSlot != curTex )
+		// Depth pass reads positions/bones only: no texture, no per-mesh
+		// uniforms (its program resolves none of them anyway).
+		if( !s_studio.depthPass )
 		{
-			BindTextureSlot( 0, texSlot );
-			curTex = texSlot;
+			int texSlot = ( mesh.texSlot != 0 ) ? mesh.texSlot : s_studio.whiteTexSlot;
+
+			if( texSlot != curTex )
+			{
+				BindTextureSlot( 0, texSlot );
+				curTex = texSlot;
+			}
+
+			SetMeshUniforms( mesh.texFlags, lightColor, false );
 		}
 
-		SetMeshUniforms( mesh.texFlags, lightColor, false );
 		BindVao( mesh.vao );
 		glDrawElements( GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, (const void *)0 );
 	}
@@ -389,9 +403,9 @@ bool DrawEntity( const ViewSetup &view, cl_entity_s *ent, bool doCull, const Spo
 
 	float lightColor[3] = { 0.5f, 0.5f, 0.5f };
 
-	// The lit pass ignores ambient/shade (locations -1); skip the LightVec
-	// trace there -- it would run once per entity per light otherwise.
-	if( !s_studio.litPass )
+	// The lit/depth passes ignore ambient/shade (locations -1); skip the
+	// LightVec trace there -- it would run once per entity per pass otherwise.
+	if( !s_studio.litPass && !s_studio.depthPass )
 		SampleEntityLight( ent, lightColor );
 
 	// Mirrored setups (right-hand viewmodel) have reversed triangle winding;
@@ -505,6 +519,26 @@ void EndStudioLitPass()
 	EndStudioPass();
 }
 
+// Shadow depth prologue: depth program + far-side-only facing. The base pass
+// culls GL_FRONT because .mdl outward triangles are CW wound (= GL back
+// facing, T3 step 4 verdict); from the light's viewpoint the away side is
+// therefore GL FRONT facing, so rendering ONLY it (the acne trick of
+// notes-mechanisms e) means culling GL_BACK here.
+void BeginStudioDepthPass( const ViewSetup &lightView )
+{
+	s_studio.depthPass = true;
+	BeginStudioPassWith( lightView, s_studio.depthProgram, s_studio.depthLocs );
+	SetCullFront( false );
+}
+
+void EndStudioDepthPass()
+{
+	SetCullFront( true );	// base-pass facing (BeginStudioPassWith default)
+	s_studio.depthPass = false;
+	s_studio.locs = &s_studio.baseLocs;
+	EndStudioPass();
+}
+
 }
 
 void StudioRenderer::OnModelUnloaded( model_t *mod )
@@ -530,6 +564,14 @@ void StudioRenderer::DestroyAll()
 			DestroyProgram( s_studio.litProgram );
 		else
 			s_studio.litProgram.program = 0;
+	}
+
+	if( s_studio.depthProgram.program != 0 )
+	{
+		if( s_studio.shaderGeneration == GpuGeneration())
+			DestroyProgram( s_studio.depthProgram );
+		else
+			s_studio.depthProgram.program = 0;
 	}
 
 	s_studio.shaderReady = false;
@@ -572,18 +614,35 @@ void StudioRenderer::DrawOpaque( const ViewSetup &view, cl_entity_s *const *ents
 void StudioRenderer::DrawDepth( const ViewSetup &lightView, const Frustum &lightCull,
 	cl_entity_s *const *ents, int count )
 {
-	// Filled by T7 (shadow depth pass); signature fixed by plan section 2.2.
-	(void)lightView;
-	(void)lightCull;
-	(void)ents;
-	(void)count;
+	if( count <= 0 )
+		return;
 
-	static bool s_logged;
+	// Per-entity culling runs against the LIGHT frustum (contract parameter;
+	// 5 planes, far disabled): route it through DrawEntity's view cull.
+	ViewSetup cullView = lightView;
 
-	if( !s_logged )
+	cullView.frustum = lightCull;
+
+	BeginStudioDepthPass( lightView );
+
+	int drawn = 0;
+
+	for( int i = 0; i < count; i++ )
 	{
-		s_logged = true;
-		CSZ_LogDev( "studio", "DrawDepth stub called (lands in T7)" );
+		if( ents[i] != NULL && DrawEntity( cullView, ents[i], true, NULL ))
+			drawn++;
+	}
+
+	EndStudioDepthPass();
+
+	// Per-frame stats at Dev level with 1s self-throttle (R8).
+	static float s_nextStatsTime;
+	float now = ClientTime();
+
+	if( now >= s_nextStatsTime )
+	{
+		s_nextStatsTime = now + 1.0f;
+		CSZ_LogDev( "studio", "shadow depth: %d / %d studio entities", drawn, count );
 	}
 }
 
