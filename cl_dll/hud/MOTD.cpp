@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include "draw_util.h"
 #include "build.h"
+#include "cszrender/csz_render_iface.h" // CSOZ hook: blank-MOTD suppression (defect #14)
 
 #if XASH_WIN32 == 1 || XASH_PSVITA == 1
 #define strcasestr strstr
@@ -155,7 +156,13 @@ int CHudMOTD :: MsgFunc_MOTD( const char *pszName, int iSize, void *pbuf )
 	if ( is_finished )
 	{
 		int length = 0;
-		
+
+		if( CSZ_MotdContentIsBlank( m_szMOTD.String() )) // CSOZ hook: empty motd.txt must not pop a window (defect #14)
+		{
+			Reset(); // CSOZ hook: drop blank MOTD instead of showing an empty frame
+			return 1; // CSOZ hook: see above
+		}
+
 		m_iMaxLength = 0;
 		m_iFlags |= HUD_DRAW;
 

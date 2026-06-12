@@ -51,4 +51,9 @@ void CSZ_HudInit( void );    // from HUD_Init: register cvars/commands; FATAL if
 void CSZ_VidInit( void );    // from HUD_VidInit: invalidate ALL GPU resources (vid_restart safety)
 void CSZ_Shutdown( void );   // from HUD_Shutdown: destroy GL objects and caches
 void CSZ_AddEntity( int type, struct cl_entity_s *ent );  // from HUD_AddEntity (wired in T3)
+// From CHudMOTD::MsgFunc_MOTD: CSOZ ships an empty motd.txt (no join
+// announcement window, M1 defect batch 2 #14); returns nonzero when the
+// assembled MOTD has no printable content so the HUD skips showing it
+// (an empty MOTD would still draw the window frame otherwise).
+int CSZ_MotdContentIsBlank( const char *text );
 }

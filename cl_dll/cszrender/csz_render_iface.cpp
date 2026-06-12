@@ -258,4 +258,20 @@ void CSZ_AddEntity( int type, struct cl_entity_s *ent )
 	csz::g_renderer.AddEntity( type, ent );
 }
 
+int CSZ_MotdContentIsBlank( const char *text )
+{
+	// Whitespace-only counts as blank: ReGameDLL appends a '\n' per sent
+	// chunk, so an empty motd.txt still arrives as "\n".
+	if( text == NULL )
+		return 1;
+
+	for( ; *text != '\0'; text++ )
+	{
+		if( *text != '\n' && *text != '\r' && *text != ' ' && *text != '\t' )
+			return 0;
+	}
+
+	return 1;
+}
+
 }
