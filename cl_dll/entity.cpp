@@ -26,6 +26,7 @@
 #include "ev_hldm.h"
 #include "particleman.h"
 #include "particleman_internal.h"
+#include "cszrender/csz_render_iface.h" // CSOZ hook: CSZ renderer entry points
 
 extern vec3_t v_origin;
 
@@ -70,6 +71,7 @@ int DLLEXPORT HUD_AddEntity( int type, struct cl_entity_s *ent, const char *mode
 
 	}
 
+	CSZ_AddEntity( type, ent ); // CSOZ hook: collect entities for CSZ renderer draw lists
 	return 1;
 }
 
