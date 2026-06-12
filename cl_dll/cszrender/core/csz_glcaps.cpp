@@ -130,4 +130,16 @@ const GlCaps &Caps()
 	return s_caps;
 }
 
+static int s_gpuGeneration = 0;
+
+int GpuGeneration()
+{
+	return s_gpuGeneration;
+}
+
+void BumpGpuGeneration()
+{
+	s_gpuGeneration++;
+}
+
 }

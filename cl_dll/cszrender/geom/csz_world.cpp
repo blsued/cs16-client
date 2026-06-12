@@ -1,0 +1,683 @@
+/*
+ * csz_world.cpp -- CSOZ renderer: BSP world rendering implementation
+ *
+ * Copyright (c) 2026 CSOZ project contributors
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This file is part of CSOZ (cs16-client fork). Original work written for
+ * CSOZ; no code in this file is copied or translated from PrimeXT, Paranoia,
+ * Trinity, retail/leaked sources, or any other license-tainted source
+ * (see csoz docs/provenance.md, section 6).
+ * Clean-room implementation. Mechanism studied from PrimeXT (see
+ * csoz docs/notes/primext-render-mechanisms.md); implemented by an agent
+ * that has not read that source.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the
+ * Free Software Foundation; either version 2 of the License, or (at your
+ * option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+ * Public License for more details.
+ *
+ * In addition, as a special exception, the author gives permission to link
+ * the code of this program with the Half-Life Game Engine ("HL Engine") and
+ * Modified Game Libraries ("MODs") developed by Valve, L.L.C ("Valve").
+ * You must obey the GNU General Public License in all respects for all of
+ * the code used other than the HL Engine and MODs from Valve. If you modify
+ * this file, you may extend this exception to your version of the file, but
+ * you are not obligated to do so. If you do not wish to do so, delete this
+ * exception statement from your version.
+ */
+#include "csz_world.h"
+#include "csz_lightmap.h"
+#include "../core/csz_engine.h"
+#include "../core/csz_engine_bsp.h"
+#include "../core/csz_glcaps.h"
+#include "../core/csz_glfuncs.h"
+#include "../core/csz_glstate.h"
+#include "../core/csz_log.h"
+#include "../core/csz_fatal.h"
+#include "../core/csz_shader.h"
+
+#include <math.h>
+#include <new>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+namespace csz
+{
+
+WorldRenderer g_world;
+
+#include "csz_world_shaders.inl"
+
+namespace
+{
+
+const float kBackfaceEpsilon = 0.01f;
+
+// Interleaved vertex layout (plan section 5 step 2.4): pos3 + uv2 + lmuv2 +
+// normal3 = 10 floats, 40 bytes. Attribute locations are the plan 2.4 contract.
+const int kVertexFloats = 10;
+const int kVertexStride = kVertexFloats * (int)sizeof( float );
+
+struct FaceRec
+{
+	int surfIndex;			// LOCAL index (surfaces[firstmodelsurface + i])
+	int firstVert, numVerts;	// into the world VBO; -1/0 for sky/turb
+	int texSlot;			// engine texture slot for unit 0
+	int lmPage, lmX, lmY;		// atlas block, luxel units; lmPage -1 = none
+	int smax, tmax;			// luxel block dimensions
+	float alphaTest;		// 0 = opaque, else '{' discard threshold
+	float planeNormal[3];
+	float planeDist;
+	bool planeBack;
+};
+
+// All persistent state lives here (single g_world instance; header stays
+// contract-exact with no private members, same pattern as the atlas).
+struct WorldState
+{
+	model_t *model;			// engine model identity for rebuild detection
+	char name[64];
+	const EngModel *bsp;
+	int gpuGeneration;		// generation our GL names belong to
+	bool built;
+	bool lightmapsDirty;
+
+	unsigned int vao, vbo;
+	ShaderProgram program;
+	int uViewProj, uAlphaTest;
+
+	FaceRec *faces;			// [numFaces], indexed by local face index
+	int *opaque;			// sorted local indices (texture, lightmap page)
+	unsigned char *visible;		// per local face, rebuilt by BuildVisibleSet
+	int numFaces, numOpaque;
+	int numSky, numTurb;
+	int whiteTexSlot;
+};
+
+WorldState s_world;
+
+// Conversion scratch for one lightmap block (engine standard maps: smax/tmax
+// <= 17; clamp guard in csz_lightmap.cpp covers exotic sample sizes).
+unsigned char s_blockScratch[128 * 128 * 3];
+
+// ---------------------------------------------------------------------------
+// Runtime ABI self-check: the static_asserts in csz_engine_bsp.h pin our
+// mirror's size, but only the live engine can prove the field offsets. The
+// info->surf back-pointer roundtrip fails loudly on any layout drift
+// (e.g. an engine rebuilt with HL25 extended structs).
+// ---------------------------------------------------------------------------
+void ValidateEngineAbi( const EngModel *bsp )
+{
+	char reason[192];
+
+	if( bsp->numsurfaces <= 0 || bsp->numleafs <= 0 || bsp->surfaces == NULL || bsp->leafs == NULL )
+		CSZ_FatalInit( "world", "world model has no surfaces/leafs (ABI or load failure)" );
+
+	int surfChecks = ( bsp->numsurfaces < 8 ) ? bsp->numsurfaces : 8;
+
+	for( int i = 0; i < surfChecks; i++ )
+	{
+		const EngSurface &s = bsp->surfaces[i];
+
+		if( s.plane < bsp->planes || s.plane >= bsp->planes + bsp->numplanes ||
+			s.texinfo < bsp->texinfo || s.texinfo >= bsp->texinfo + bsp->numtexinfo ||
+			s.numedges < 3 || s.numedges > 512 ||
+			s.info == NULL || s.info->surf != &s )
+		{
+			snprintf( reason, sizeof( reason ),
+				"engine BSP ABI mismatch at surface %d (plane/texinfo/info fields are garbage); "
+				"engine com_model.h layout differs from csz_engine_bsp.h", i );
+			CSZ_FatalInit( "world", reason );
+		}
+
+		const EngTexture *tex = s.texinfo->texture;
+
+		if( tex == NULL || tex->width == 0 || tex->width > 4096 || tex->height == 0 || tex->height > 4096 )
+		{
+			snprintf( reason, sizeof( reason ),
+				"engine BSP ABI mismatch at surface %d (texture pointer/size is garbage)", i );
+			CSZ_FatalInit( "world", reason );
+		}
+	}
+
+	int leafChecks = ( bsp->numleafs < 8 ) ? bsp->numleafs : 8;
+
+	for( int i = 1; i <= leafChecks; i++ )
+	{
+		const EngLeaf &leaf = bsp->leafs[i];
+
+		if( leaf.contents >= 0 || leaf.cluster < -1 || leaf.cluster >= bsp->numleafs ||
+			leaf.nummarksurfaces < 0 || leaf.nummarksurfaces > bsp->nummarksurfaces )
+		{
+			snprintf( reason, sizeof( reason ),
+				"engine BSP ABI mismatch at leaf %d (contents/cluster fields are garbage)", i );
+			CSZ_FatalInit( "world", reason );
+		}
+	}
+
+	CSZ_LogDev( "world", "engine BSP ABI self-check OK (%d surfaces, %d leafs probed)",
+		surfChecks, leafChecks );
+}
+
+int FetchEdgeVertex( const EngModel *bsp, int surfEdge )
+{
+	// surfedges sign selects edge direction (plan section 5 step 2.2).
+	if(( bsp->flags & kModelQbsp2 ) != 0 )
+	{
+		if( surfEdge >= 0 )
+			return (int)bsp->edges32[surfEdge].v[0];
+		return (int)bsp->edges32[-surfEdge].v[1];
+	}
+
+	if( surfEdge >= 0 )
+		return (int)bsp->edges16[surfEdge].v[0];
+	return (int)bsp->edges16[-surfEdge].v[1];
+}
+
+int FaceSampleSize( int globalSurfIndex )
+{
+	if( gRenderAPI.RenderGetParm == NULL )
+		return 16;
+
+	int sampleSize = (int)gRenderAPI.RenderGetParm( PARM_SURF_SAMPLESIZE, globalSurfIndex );
+
+	return ( sampleSize > 0 ) ? sampleSize : 16;
+}
+
+// Fills the conversion scratch with the face's style-0 block, or full white
+// when the face has no lightmap data (fullbright fallback, plan step 2.6).
+const unsigned char *FaceLightBlock( const EngSurface &surf, int smax, int tmax )
+{
+	int size = smax * tmax;
+
+	if( size > (int)( sizeof( s_blockScratch ) / 3 ))
+		size = (int)( sizeof( s_blockScratch ) / 3 );
+
+	if( surf.samples == NULL || surf.styles[0] == 255 )
+	{
+		memset( s_blockScratch, 255, (size_t)size * 3 );
+		return s_blockScratch;
+	}
+
+	// color24 is packed RGB888; style 0 is the first smax*tmax block.
+	memcpy( s_blockScratch, surf.samples, (size_t)size * 3 );
+	return s_blockScratch;
+}
+
+struct OpaqueSortKey
+{
+	int faceIndex;
+	int texSlot;
+	int lmPage;
+};
+
+int CompareOpaque( const void *a, const void *b )
+{
+	const OpaqueSortKey *ka = (const OpaqueSortKey *)a;
+	const OpaqueSortKey *kb = (const OpaqueSortKey *)b;
+
+	if( ka->texSlot != kb->texSlot )
+		return ( ka->texSlot < kb->texSlot ) ? -1 : 1;
+	if( ka->lmPage != kb->lmPage )
+		return ( ka->lmPage < kb->lmPage ) ? -1 : 1;
+	return ( ka->faceIndex < kb->faceIndex ) ? -1 : ( ka->faceIndex > kb->faceIndex );
+}
+
+void ReuploadLightmaps()
+{
+	for( int i = 0; i < s_world.numFaces; i++ )
+	{
+		const FaceRec &f = s_world.faces[i];
+
+		if( f.lmPage < 0 || f.smax <= 0 )
+			continue;
+
+		const EngSurface &surf = s_world.bsp->surfaces[s_world.bsp->firstmodelsurface + f.surfIndex];
+
+		g_lightmaps.UploadBlock( f.lmPage, f.lmX, f.lmY, f.smax, f.tmax,
+			FaceLightBlock( surf, f.smax, f.tmax ));
+	}
+
+	CSZ_LogDev( "world", "lightmaps re-uploaded (%d faces)", s_world.numFaces );
+}
+
+}
+
+bool WorldRenderer::IsBuilt() const
+{
+	return s_world.built;
+}
+
+void WorldRenderer::MarkLightmapsDirty()
+{
+	s_world.lightmapsDirty = true;
+}
+
+void WorldRenderer::Destroy()
+{
+	// Generation rule (T1 calibration): names from an older GPU generation
+	// must be forgotten, never deleted -- glDelete* on a fresh context could
+	// hit foreign objects that reused the name.
+	bool sameContext = ( s_world.gpuGeneration == GpuGeneration());
+
+	if( s_world.vao != 0 || s_world.vbo != 0 )
+	{
+		if( sameContext )
+		{
+			if( s_world.vao != 0 )
+				glDeleteVertexArrays( 1, &s_world.vao );
+			if( s_world.vbo != 0 )
+				glDeleteBuffers( 1, &s_world.vbo );
+		}
+
+		s_world.vao = 0;
+		s_world.vbo = 0;
+	}
+
+	if( s_world.program.program != 0 )
+	{
+		if( sameContext )
+			DestroyProgram( s_world.program );
+		else
+			s_world.program.program = 0;
+	}
+
+	delete[] s_world.faces;
+	delete[] s_world.opaque;
+	delete[] s_world.visible;
+	s_world.faces = NULL;
+	s_world.opaque = NULL;
+	s_world.visible = NULL;
+	s_world.numFaces = s_world.numOpaque = 0;
+	s_world.model = NULL;
+	s_world.bsp = NULL;
+	s_world.built = false;
+	s_world.lightmapsDirty = false;
+
+	g_lightmaps.Reset();	// atlas slots are engine textures (context-safe free)
+}
+
+void WorldRenderer::EnsureBuilt( model_t *world )
+{
+	if( world == NULL )
+		return;
+
+	const EngModel *bsp = EngBsp( world );
+
+	if( s_world.built && s_world.model == world &&
+		s_world.gpuGeneration == GpuGeneration() &&
+		strncmp( s_world.name, bsp->name, sizeof( s_world.name )) == 0 )
+		return;
+
+	Destroy();
+
+	ValidateEngineAbi( bsp );
+
+	s_world.model = world;
+	s_world.bsp = bsp;
+	s_world.gpuGeneration = GpuGeneration();
+	memcpy( s_world.name, bsp->name, sizeof( s_world.name ));
+	s_world.name[sizeof( s_world.name ) - 1] = '\0';
+
+	s_world.whiteTexSlot = ( gRenderAPI.GL_FindTexture != NULL )
+		? gRenderAPI.GL_FindTexture( "*white" ) : 0;
+
+	int numFaces = bsp->nummodelsurfaces;
+	s_world.numFaces = numFaces;
+	s_world.faces = new( std::nothrow ) FaceRec[numFaces];
+	s_world.opaque = new( std::nothrow ) int[numFaces];
+	s_world.visible = new( std::nothrow ) unsigned char[numFaces];
+	OpaqueSortKey *sortKeys = new( std::nothrow ) OpaqueSortKey[numFaces];
+
+	if( s_world.faces == NULL || s_world.opaque == NULL || s_world.visible == NULL || sortKeys == NULL )
+		CSZ_FatalInit( "world", "out of memory building world face tables" );
+
+	// First pass: count drawable vertices (sky/turb faces emit none).
+	int totalVerts = 0;
+
+	for( int i = 0; i < numFaces; i++ )
+	{
+		const EngSurface &surf = bsp->surfaces[bsp->firstmodelsurface + i];
+
+		if(( surf.flags & ( kSurfDrawSky | kSurfDrawTurb )) == 0 )
+			totalVerts += surf.numedges;
+	}
+
+	float *verts = new( std::nothrow ) float[(size_t)totalVerts * kVertexFloats];
+
+	if( verts == NULL )
+		CSZ_FatalInit( "world", "out of memory building world vertex buffer" );
+
+	int vertCursor = 0;
+	int badTexWarned = 0;
+	int atlasFullWarned = 0;
+	int maxPage = -1;
+
+	s_world.numSky = s_world.numTurb = 0;
+	s_world.numOpaque = 0;
+
+	for( int i = 0; i < numFaces; i++ )
+	{
+		int globalIndex = bsp->firstmodelsurface + i;
+		const EngSurface &surf = bsp->surfaces[globalIndex];
+		FaceRec &f = s_world.faces[i];
+
+		memset( &f, 0, sizeof( f ));
+		f.surfIndex = i;
+		f.firstVert = -1;
+		f.lmPage = -1;
+
+		const mplane_t *plane = surf.plane;
+
+		f.planeBack = ( surf.flags & kSurfPlaneBack ) != 0;
+		f.planeNormal[0] = plane->normal[0];
+		f.planeNormal[1] = plane->normal[1];
+		f.planeNormal[2] = plane->normal[2];
+		f.planeDist = plane->dist;
+
+		if( surf.flags & kSurfDrawSky )
+		{
+			s_world.numSky++;
+			continue;
+		}
+
+		if( surf.flags & kSurfDrawTurb )
+		{
+			s_world.numTurb++;
+			continue;
+		}
+
+		const EngTexinfo *ti = surf.texinfo;
+		const EngTexture *tex = ti->texture;
+
+		f.texSlot = ( tex != NULL ) ? tex->gl_texturenum : 0;
+
+		if( f.texSlot == 0 )
+		{
+			f.texSlot = s_world.whiteTexSlot;
+
+			if( badTexWarned++ == 0 )
+				CSZ_LogWarn( "world", "surface %d has no engine texture slot; using *white", globalIndex );
+		}
+
+		f.alphaTest = ( tex != NULL && tex->name[0] == '{' ) ? 0.25f : 0.0f;
+
+		// Lightmap block (engine-authoritative lightmap matrix: lmvecs/
+		// lightmapmins/lightextents equal texinfo vecs/texturemins/extents on
+		// standard maps, verified against pinned mod_bmodel.c).
+		const EngExtraSurf *info = surf.info;
+		int sampleSize = FaceSampleSize( globalIndex );
+		int smax = ( info->lightextents[0] / sampleSize ) + 1;
+		int tmax = ( info->lightextents[1] / sampleSize ) + 1;
+		int page = 0, bx = 0, by = 0;
+
+		if( g_lightmaps.Allocate( smax, tmax, &page, &bx, &by ))
+		{
+			f.lmPage = page;
+			f.lmX = bx;
+			f.lmY = by;
+			f.smax = smax;
+			f.tmax = tmax;
+			g_lightmaps.UploadBlock( page, bx, by, smax, tmax, FaceLightBlock( surf, smax, tmax ));
+
+			if( page > maxPage )
+				maxPage = page;
+		}
+		else if( atlasFullWarned++ == 0 )
+		{
+			CSZ_LogError( "world", "lightmap atlas full at surface %d (%dx%d); face samples page 0 origin",
+				globalIndex, smax, tmax );
+		}
+
+		// Vertices in original polygon winding (triangle fan at draw time).
+		f.firstVert = vertCursor;
+		f.numVerts = surf.numedges;
+
+		float nx = f.planeBack ? -f.planeNormal[0] : f.planeNormal[0];
+		float ny = f.planeBack ? -f.planeNormal[1] : f.planeNormal[1];
+		float nz = f.planeBack ? -f.planeNormal[2] : f.planeNormal[2];
+
+		for( int e = 0; e < surf.numedges; e++ )
+		{
+			int vi = FetchEdgeVertex( bsp, bsp->surfedges[surf.firstedge + e] );
+			const float *pos = bsp->vertexes[vi].position;
+			float *out = &verts[(size_t)( vertCursor + e ) * kVertexFloats];
+
+			out[0] = pos[0];
+			out[1] = pos[1];
+			out[2] = pos[2];
+
+			float su = pos[0] * ti->vecs[0][0] + pos[1] * ti->vecs[0][1] + pos[2] * ti->vecs[0][2] + ti->vecs[0][3];
+			float tv = pos[0] * ti->vecs[1][0] + pos[1] * ti->vecs[1][1] + pos[2] * ti->vecs[1][2] + ti->vecs[1][3];
+
+			out[3] = ( tex != NULL ) ? su / (float)tex->width : 0.0f;
+			out[4] = ( tex != NULL ) ? tv / (float)tex->height : 0.0f;
+
+			if( f.lmPage >= 0 )
+			{
+				float ls = pos[0] * info->lmvecs[0][0] + pos[1] * info->lmvecs[0][1] +
+					pos[2] * info->lmvecs[0][2] + info->lmvecs[0][3] - (float)info->lightmapmins[0];
+				float lt = pos[0] * info->lmvecs[1][0] + pos[1] * info->lmvecs[1][1] +
+					pos[2] * info->lmvecs[1][2] + info->lmvecs[1][3] - (float)info->lightmapmins[1];
+
+				// (block offset + luxel + half-luxel center) / page, in
+				// world units divided by (pageSize * sampleSize).
+				out[5] = ((float)f.lmX * sampleSize + ls + 0.5f * sampleSize ) /
+					(float)( LightmapAtlas::kPageSize * sampleSize );
+				out[6] = ((float)f.lmY * sampleSize + lt + 0.5f * sampleSize ) /
+					(float)( LightmapAtlas::kPageSize * sampleSize );
+			}
+			else
+			{
+				out[5] = 0.0f;
+				out[6] = 0.0f;
+			}
+
+			out[7] = nx;
+			out[8] = ny;
+			out[9] = nz;
+		}
+
+		vertCursor += surf.numedges;
+
+		sortKeys[s_world.numOpaque].faceIndex = i;
+		sortKeys[s_world.numOpaque].texSlot = f.texSlot;
+		sortKeys[s_world.numOpaque].lmPage = f.lmPage;
+		s_world.numOpaque++;
+	}
+
+	// Opaque list sorted by texture then lightmap page (bind-switch economy).
+	qsort( sortKeys, (size_t)s_world.numOpaque, sizeof( OpaqueSortKey ), CompareOpaque );
+
+	for( int i = 0; i < s_world.numOpaque; i++ )
+		s_world.opaque[i] = sortKeys[i].faceIndex;
+
+	delete[] sortKeys;
+
+	// GPU objects. Build happens outside the takeover window (slot 6), so
+	// leave VAO/VBO unbound for the engine afterwards.
+	glGenVertexArrays( 1, &s_world.vao );
+	BindVao( s_world.vao );
+	glGenBuffers( 1, &s_world.vbo );
+	glBindBuffer( GL_ARRAY_BUFFER, s_world.vbo );
+	glBufferData( GL_ARRAY_BUFFER, (GLsizeiptr)( (size_t)totalVerts * kVertexStride ), verts, GL_STATIC_DRAW );
+
+	glEnableVertexAttribArray( 0 );
+	glVertexAttribPointer( 0, 3, GL_FLOAT, GL_FALSE, kVertexStride, (const void *)0 );
+	glEnableVertexAttribArray( 1 );
+	glVertexAttribPointer( 1, 2, GL_FLOAT, GL_FALSE, kVertexStride, (const void *)( 3 * sizeof( float )));
+	glEnableVertexAttribArray( 2 );
+	glVertexAttribPointer( 2, 2, GL_FLOAT, GL_FALSE, kVertexStride, (const void *)( 5 * sizeof( float )));
+	glEnableVertexAttribArray( 3 );
+	glVertexAttribPointer( 3, 3, GL_FLOAT, GL_FALSE, kVertexStride, (const void *)( 7 * sizeof( float )));
+
+	BindVao( 0 );
+	glBindBuffer( GL_ARRAY_BUFFER, 0 );
+	delete[] verts;
+
+	// World shader: init-time, so a compile failure is FATAL (spec 3.2).
+	BuildProgram( "csz_world", kWorldVs, kWorldFs, true, s_world.program );
+	s_world.uViewProj = UniformLoc( s_world.program, "u_viewProj" );
+	s_world.uAlphaTest = UniformLoc( s_world.program, "u_alphaTest" );
+
+	UseProgram( s_world.program.program );
+	glUniform1i( UniformLoc( s_world.program, "u_texDiffuse" ), 0 );
+	glUniform1i( UniformLoc( s_world.program, "u_texLightmap" ), 1 );
+	glUniform1f( s_world.uAlphaTest, 0.0f );
+	UseProgram( 0 );
+
+	int pages = maxPage + 1;
+
+	s_world.built = true;
+	s_world.lightmapsDirty = false;
+
+	CSZ_LogInfo( "world", "built %s: %d surfaces (%d sky, %d water skipped), %d verts, %d lightmap pages",
+		s_world.name, numFaces, s_world.numSky, s_world.numTurb, totalVerts, pages );
+}
+
+void WorldRenderer::BuildVisibleSet( const ViewSetup &view )
+{
+	if( !s_world.built )
+		return;
+
+	memset( s_world.visible, 0, (size_t)s_world.numFaces );
+
+	const EngModel *bsp = s_world.bsp;
+
+	// Linear leaf scan instead of recursive node walk (notes-mechanisms b):
+	// leafs[0] is the solid leaf, real leafs are 1..numleafs inclusive.
+	for( int i = 1; i <= bsp->numleafs; i++ )
+	{
+		const EngLeaf &leaf = bsp->leafs[i];
+		int cluster = leaf.cluster;
+
+		if( cluster < 0 )
+			continue;
+
+		if( view.pvs != NULL && !( view.pvs[cluster >> 3] & ( 1 << ( cluster & 7 ))))
+			continue;
+
+		if( view.frustum.CullBox( &leaf.minmaxs[0], &leaf.minmaxs[3] ))
+			continue;
+
+		for( int j = 0; j < leaf.nummarksurfaces; j++ )
+		{
+			int local = (int)( leaf.firstmarksurface[j] - bsp->surfaces ) - bsp->firstmodelsurface;
+
+			if( local >= 0 && local < s_world.numFaces )
+				s_world.visible[local] = 1;
+		}
+	}
+}
+
+void WorldRenderer::DrawOpaque( const ViewSetup &view )
+{
+	if( !s_world.built )
+		return;
+
+	if( s_world.lightmapsDirty )
+	{
+		ReuploadLightmaps();
+		s_world.lightmapsDirty = false;
+	}
+
+	UseProgram( s_world.program.program );
+	glUniformMatrix4fv( s_world.uViewProj, 1, GL_FALSE, view.matViewProj.m );
+	BindVao( s_world.vao );
+	SetCull( false );	// BSP faces are culled per-face below (plan step 3)
+
+	// The program object remembers the last frame's alpha-test value; pin a
+	// known state so the per-face uniform dedup below stays truthful.
+	glUniform1f( s_world.uAlphaTest, 0.0f );
+
+	int curTex = -1;
+	int curPage = -1;
+	float curAlpha = 0.0f;
+	int drawn = 0;
+
+	for( int i = 0; i < s_world.numOpaque; i++ )
+	{
+		const FaceRec &f = s_world.faces[s_world.opaque[i]];
+
+		if( !s_world.visible[f.surfIndex] || f.firstVert < 0 )
+			continue;
+
+		// Plane-side backface cull (sign XOR SURF_PLANEBACK, plan step 3).
+		float d = view.origin[0] * f.planeNormal[0] + view.origin[1] * f.planeNormal[1] +
+			view.origin[2] * f.planeNormal[2] - f.planeDist;
+
+		if( f.planeBack ? ( d > -kBackfaceEpsilon ) : ( d < kBackfaceEpsilon ))
+			continue;
+
+		if( f.texSlot != curTex )
+		{
+			BindTextureSlot( 0, f.texSlot );
+			curTex = f.texSlot;
+		}
+
+		if( f.lmPage != curPage )
+		{
+			BindTextureSlot( 1, g_lightmaps.PageTexSlot(( f.lmPage >= 0 ) ? f.lmPage : 0 ));
+			curPage = f.lmPage;
+		}
+
+		if( f.alphaTest != curAlpha )
+		{
+			glUniform1f( s_world.uAlphaTest, f.alphaTest );
+			curAlpha = f.alphaTest;
+		}
+
+		glDrawArrays( GL_TRIANGLE_FAN, f.firstVert, f.numVerts );
+		drawn++;
+	}
+
+	// Per-frame stats at Dev level with 1s self-throttle (R8).
+	static float s_nextStatsTime;
+	float now = ClientTime();
+
+	if( now >= s_nextStatsTime )
+	{
+		s_nextStatsTime = now + 1.0f;
+		CSZ_LogDev( "world", "drawn %d / %d opaque faces", drawn, s_world.numOpaque );
+	}
+}
+
+void WorldRenderer::DrawDepth( const ViewSetup &lightView, const Frustum &lightCull )
+{
+	// Filled by T7 (shadow depth pass); signature fixed by plan section 2.2.
+	(void)lightView;
+	(void)lightCull;
+
+	static bool s_logged;
+
+	if( !s_logged )
+	{
+		s_logged = true;
+		CSZ_LogDev( "world", "DrawDepth stub called (lands in T7)" );
+	}
+}
+
+void WorldRenderer::DrawLitAdditive( const ViewSetup &view, const SpotLightParams &light )
+{
+	// Filled by T6 (additive spot light pass); signature fixed by plan 2.2.
+	(void)view;
+	(void)light;
+
+	static bool s_logged;
+
+	if( !s_logged )
+	{
+		s_logged = true;
+		CSZ_LogDev( "world", "DrawLitAdditive stub called (lands in T6)" );
+	}
+}
+
+}

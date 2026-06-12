@@ -1,5 +1,5 @@
 /*
- * csz_glcaps.h -- CSOZ renderer: GL capability probing (the one feature-probe spot)
+ * csz_light_types.h -- CSOZ renderer: light parameter PODs shared with geom
  *
  * Copyright (c) 2026 CSOZ project contributors
  *
@@ -33,30 +33,20 @@
  * exception statement from your version.
  */
 #pragma once
+#include "csz_math.h"
 namespace csz
 {
-struct GlCaps
+// POD consumed by geom lit-additive draws; produced by lighting/.
+// Lives in core so geom never includes lighting headers (spec 4.6 one-way rule).
+struct SpotLightParams
 {
-	char versionString[128];
-	char rendererString[128];
-	int major, minor;
-	int profileMask;               // GL_CONTEXT_PROFILE_MASK (0 on pre-3.2 contexts)
-	int maxTextureSize;
-	int maxVertexUniformComponents;
+	float origin[3];
+	float dir[3];           // normalized forward
+	float color[3];         // linear 0..1, intensity premultiplied
+	float radius;           // attenuation end distance (world units)
+	float cosInner;         // cone falloff start (cos of half angle)
+	float cosOuter;         // cone cutoff (cos of half angle)
+	Mat4 matShadow;         // bias*proj*view; valid only when shadowTexSlot != 0
+	int shadowTexSlot;      // engine texture slot for GL_Bind; 0 = shadowless
 };
-// Loads functions (csz_glfuncs) then probes. Logs exactly one Info summary line:
-// "[CSZ:glcaps] GL <version> | <renderer> | profile=0x<mask> | maxtex=<n> | maxvtxuniform=<n>"
-// Unmet hard requirements (any required function missing, maxtex < 1024,
-// maxVertexUniformComponents < 1664) -> CSZ_FatalInit. Idempotent.
-bool ProbeGlCaps();
-const GlCaps &Caps();
-
-// GPU object generation, owned by core so geom/lighting caches can key their
-// GL objects without including the composition root (one-way include rule).
-// Bumped on HUD_VidInit (potential GL context loss). Owners stamp creations
-// with the current generation; on mismatch they must FORGET names instead of
-// glDelete*-ing them (stale names may collide with foreign objects in a fresh
-// context -- T1 calibration finding).
-int GpuGeneration();
-void BumpGpuGeneration();
 }

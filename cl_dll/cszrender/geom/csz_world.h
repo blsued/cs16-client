@@ -1,5 +1,5 @@
 /*
- * csz_glcaps.h -- CSOZ renderer: GL capability probing (the one feature-probe spot)
+ * csz_world.h -- CSOZ renderer: BSP world rendering (faces + lightmap)
  *
  * Copyright (c) 2026 CSOZ project contributors
  *
@@ -33,30 +33,22 @@
  * exception statement from your version.
  */
 #pragma once
+#include "../core/csz_view.h"
+#include "../core/csz_light_types.h"
+typedef struct model_s model_t;
 namespace csz
 {
-struct GlCaps
+class WorldRenderer
 {
-	char versionString[128];
-	char rendererString[128];
-	int major, minor;
-	int profileMask;               // GL_CONTEXT_PROFILE_MASK (0 on pre-3.2 contexts)
-	int maxTextureSize;
-	int maxVertexUniformComponents;
+public:
+	void EnsureBuilt( model_t *world );  // no-op when already built for this model + GPU generation
+	void Destroy();
+	void MarkLightmapsDirty();           // GL_BuildLightmaps / gamma change
+	void BuildVisibleSet( const ViewSetup &view );   // fat-PVS leaf scan + frustum cull -> visible surface list
+	void DrawOpaque( const ViewSetup &view );        // diffuse * lightmap(style 0); '{' alpha-test; sky/turb skipped
+	void DrawDepth( const ViewSetup &lightView, const Frustum &lightCull );
+	void DrawLitAdditive( const ViewSetup &view, const SpotLightParams &light );
+	bool IsBuilt() const;
 };
-// Loads functions (csz_glfuncs) then probes. Logs exactly one Info summary line:
-// "[CSZ:glcaps] GL <version> | <renderer> | profile=0x<mask> | maxtex=<n> | maxvtxuniform=<n>"
-// Unmet hard requirements (any required function missing, maxtex < 1024,
-// maxVertexUniformComponents < 1664) -> CSZ_FatalInit. Idempotent.
-bool ProbeGlCaps();
-const GlCaps &Caps();
-
-// GPU object generation, owned by core so geom/lighting caches can key their
-// GL objects without including the composition root (one-way include rule).
-// Bumped on HUD_VidInit (potential GL context loss). Owners stamp creations
-// with the current generation; on mismatch they must FORGET names instead of
-// glDelete*-ing them (stale names may collide with foreign objects in a fresh
-// context -- T1 calibration finding).
-int GpuGeneration();
-void BumpGpuGeneration();
+extern WorldRenderer g_world;
 }

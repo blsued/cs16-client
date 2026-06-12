@@ -1,5 +1,5 @@
 /*
- * csz_renderer.cpp -- CSOZ renderer: frame orchestration (T0 lifecycle stub)
+ * csz_renderer.cpp -- CSOZ renderer: frame orchestration (composition root)
  *
  * Copyright (c) 2026 CSOZ project contributors
  *
@@ -36,9 +36,10 @@
 #include "core/csz_glcaps.h"
 #include "core/csz_glfuncs.h"
 #include "core/csz_glstate.h"
-#include "core/csz_shader.h"
 #include "core/csz_log.h"
 #include "core/csz_fatal.h"
+#include "core/csz_view.h"
+#include "geom/csz_world.h"
 
 namespace csz
 {
@@ -48,45 +49,11 @@ Renderer g_renderer;	// zero-initialized (static storage duration)
 namespace
 {
 
-// ---------------------------------------------------------------------------
-// T1 spike pipeline -- proves GLSL 330 compile/link/draw works inside the
-// engine GL context (UNKNOWN-1). The whole block (sources, objects, draw
-// call) is DELETED in T2 when the world pass lands (plan R18).
-// The triangle is gl_VertexID-generated (no VBO/attributes; core profile
-// still requires a bound VAO) and intentionally covers only part of the
-// viewport so the magenta feature-color clear stays visible around it:
-// takeover evidence needs BOTH the clear and the shader-drawn gradient.
-// ---------------------------------------------------------------------------
-const char kSpikeVs[] =
-	"#version 330 core\n"
-	"out vec2 v_uv;\n"
-	"void main()\n"
-	"{\n"
-	"	const vec2 verts[3] = vec2[3]( vec2( -0.8, -0.8 ), vec2( 0.8, -0.8 ), vec2( 0.0, 0.8 ) );\n"
-	"	vec2 pos = verts[gl_VertexID];\n"
-	"	v_uv = pos * 0.5 + 0.5;\n"
-	"	gl_Position = vec4( pos, 0.0, 1.0 );\n"
-	"}\n";
-
-const char kSpikeFs[] =
-	"#version 330 core\n"
-	"in vec2 v_uv;\n"
-	"out vec4 fragColor;\n"
-	"void main()\n"
-	"{\n"
-	"	fragColor = vec4( v_uv, 0.0, 1.0 );\n"
-	"}\n";
-
-ShaderProgram s_spikeProgram;	// T1 spike only (deleted in T2)
-GLuint s_spikeVao;		// T1 spike only (deleted in T2)
 bool s_takeoverLogged;
 
-void DrawSpikeTriangle()
-{
-	UseProgram( s_spikeProgram.program );
-	BindVao( s_spikeVao );
-	glDrawArrays( GL_TRIANGLES, 0, 3 );
-}
+// The world model we last handed to g_world (identity for the
+// Mod_ProcessUserData create=false teardown path).
+model_t *s_worldModel;
 
 // ---------------------------------------------------------------------------
 // Standard-load fps sampling (plan amendment 2 / spec 8.6): aggregates the
@@ -171,15 +138,12 @@ void Renderer::OnHudInit()
 
 void Renderer::OnVidInit()
 {
-	// All GPU objects die with the GL context on vid_restart; later tasks
-	// key their caches off GpuGeneration() and rebuild lazily.
-	m_gpuGeneration++;
+	// GPU objects may have died with the GL context; GL-object owners key
+	// their caches off the core generation counter and rebuild lazily,
+	// FORGETTING stale names instead of deleting them (T1 finding).
+	BumpGpuGeneration();
+	m_gpuGeneration = GpuGeneration();
 	m_glReady = false;
-
-	// Old GL object names died with the context: forget them (deleting in
-	// the NEW context would touch unrelated objects); EnsureGlReady rebuilds.
-	s_spikeProgram.program = 0;
-	s_spikeVao = 0;
 
 	CSZ_LogDev( "core", "vid init: GPU generation now %d", m_gpuGeneration );
 }
@@ -189,17 +153,11 @@ void Renderer::Shutdown()
 	// GL context is still current during HUD_Shutdown; destroy our objects.
 	if( m_glReady )
 	{
-		DestroyProgram( s_spikeProgram );
-
-		if( s_spikeVao != 0 )
-		{
-			glDeleteVertexArrays( 1, &s_spikeVao );
-			s_spikeVao = 0;
-		}
-
+		g_world.Destroy();
 		m_glReady = false;
 	}
 
+	s_worldModel = NULL;
 	CSZ_LogDev( "core", "shutdown" );
 }
 
@@ -225,24 +183,32 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	if( !EnsureGlReady() )						// slot 4 (FATAL inside on hard failure)
 		return 0;
 
-	// pass slot: view setup + fat PVS update (T2)
-	// pass slot: world ensure-built + visible set (T2)
+	ViewSetup view;							// slot 5: view + fat PVS
+	BuildViewFromPass( rvp, view );
+	view.pvs = UpdateFatPvs( view.origin );
+
+	model_t *world = WorldModel();					// slot 6: world build + visible set
+	s_worldModel = world;
+	g_world.EnsureBuilt( world );
+	g_world.BuildVisibleSet( view );
+
 	// pass slot: studio begin-frame + light matrix update (T3/T6)
 
 	EnterTakeover();						// slot 8
 
 	// pass slot: shadow map passes (T7; before main clear)
 
-	static const float kClearMagenta[4] = { 1.0f, 0.0f, 1.0f, 1.0f };	// takeover feature color (notes-mechanisms f-1)
-	ApplyMainViewport( rvp, kClearMagenta );			// slot 10
+	// Dark gray-blue "no content here" clear: anything left this color is a
+	// known gap (sky in M1) or a regression tell (magenta retired with T1).
+	static const float kClearNoContent[4] = { 0.05f, 0.05f, 0.08f, 1.0f };
+	ApplyMainViewport( rvp, kClearNoContent );			// slot 10
 
-	// pass slot: world opaque (T2)
+	g_world.DrawOpaque( view );					// slot 11: world opaque
+
 	// pass slot: studio opaque (T3)
 	// pass slot: additive light passes (T6)
 	// pass slot: sprites (T5)
 	// pass slot: viewmodel (T4; last, own depth range)
-
-	DrawSpikeTriangle();	// T1 spike only; deleted in T2 (R18)
 
 	LeaveTakeover();						// slot 16
 
@@ -278,29 +244,53 @@ void Renderer::ClearScene()
 
 void Renderer::NewMap()
 {
-	// T2 adds the eager world build here.
-	CSZ_LogDev( "core", "R_NewMap callback (T0 stub)" );
+	// Old world data (and any cached cross-map PVS) is invalid now. The GL
+	// context is alive at R_NewMap, so Destroy frees properly; the rebuild
+	// happens eagerly when GL is ready, else lazily in frame slot 6.
+	ResetFatPvs();
+	g_world.Destroy();
+	s_worldModel = NULL;
+
+	CSZ_LogDev( "core", "R_NewMap: world invalidated" );
+
+	if( m_glReady )
+	{
+		model_t *world = WorldModel();
+
+		if( world != NULL )
+		{
+			s_worldModel = world;
+			g_world.EnsureBuilt( world );	// eager build (plan 2.2)
+		}
+	}
 }
 
 void Renderer::BuildLightmapsCallback()
 {
-	// T2 forwards this to WorldRenderer::MarkLightmapsDirty.
-	CSZ_LogDev( "core", "GL_BuildLightmaps callback (T0 stub)" );
+	// Gamma or lightstyle config changed engine-side: re-upload our atlas.
+	g_world.MarkLightmapsDirty();
+	CSZ_LogDev( "core", "GL_BuildLightmaps: lightmaps marked dirty" );
 }
 
 byte *Renderer::GetCurrentVis()
 {
-	// T0: no own PVS yet (csz_view lands in T2). The engine consults this
-	// only for frames we actually took over, which never happens at T0.
-	return NULL;
+	// Feeds engine tempent/beam culling while we own the frame
+	// (notes-renderapi A table row 9).
+	return (byte *)CurrentFatPvs();
 }
 
 void Renderer::ProcessUserData( model_t *mod, qboolean create, const byte *buffer )
 {
-	// T3 builds/destroys per-model GPU resources here.
 	(void)buffer;
-	CSZ_LogDev( "core", "Mod_ProcessUserData %s (create=%d)",
-		( mod != NULL ) ? mod->name : "<null>", (int)create );
+
+	// T3 adds studio GPU caches here. T2 scope: tear the world down when the
+	// engine unloads the model we built from.
+	if( !create && mod != NULL && mod == s_worldModel )
+	{
+		g_world.Destroy();
+		s_worldModel = NULL;
+		CSZ_LogDev( "core", "world model unloaded; world GPU data destroyed" );
+	}
 }
 
 void Renderer::AddEntity( int type, cl_entity_t *ent )
@@ -318,14 +308,8 @@ bool Renderer::EnsureGlReady()
 	if( !ProbeGlCaps() )	// loads all GL functions first; FATAL inside on any hard failure
 		return false;
 
-	// T1 spike pipeline (deleted in T2, R18). failFatal: an init-time shader
-	// that cannot compile means the takeover route is dead (spec 3.2).
-	if( !BuildProgram( "csz_spike", kSpikeVs, kSpikeFs, true, s_spikeProgram ))
-		return false;
-
-	if( s_spikeVao == 0 )
-		glGenVertexArrays( 1, &s_spikeVao );	// core profile has no default VAO; bind our own before drawing
-
+	// World/studio GPU resources (shaders included) build lazily inside
+	// their owners, keyed by model + GpuGeneration().
 	m_glReady = true;
 	return true;
 }

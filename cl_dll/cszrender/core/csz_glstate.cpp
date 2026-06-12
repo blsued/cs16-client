@@ -47,6 +47,10 @@ namespace
 // invalidate the cache because the engine owns GL outside that window.
 const unsigned int kUnknownHandle = 0xffffffffu;
 
+// Highest texture unit any CSZ pass binds (unit 0 diffuse, 1 lightmap,
+// 2 shadow map in T6/T7); LeaveTakeover must clean down from here.
+const int kMaxUsedTmu = 3;
+
 struct GlShadowState
 {
 	int blend;              // BlendMode or -1 = unknown
@@ -147,7 +151,14 @@ void LeaveTakeover()
 	glDisable( GL_POLYGON_OFFSET_FILL );
 	glDisable( GL_SCISSOR_TEST );
 	// TMU hygiene STRICTLY via engine wrappers (calibration showed raw
-	// glActiveTexture desync against ref glState is unrecoverable):
+	// glActiveTexture desync against ref glState is unrecoverable).
+	// CRITICAL (T2 finding): the engine's CleanUpTextureUnits loop walks
+	// DOWN from glState.activeTMU only -- if our last GL_Bind ended on unit
+	// 0, a unit-1 bind from the world lightmap pass would stay ENABLED in
+	// the fixed-function state and persistently poison the engine renderer
+	// (ref path world went black). Select the highest unit we ever touch
+	// first, exactly like the ref's own GL_CleanupAllTextureUnits.
+	gRenderAPI.GL_SelectTexture( kMaxUsedTmu );
 	gRenderAPI.GL_CleanUpTextureUnits( 0 );
 	gRenderAPI.GL_SelectTexture( 0 );
 	glPixelStorei( GL_UNPACK_ALIGNMENT, 4 );
