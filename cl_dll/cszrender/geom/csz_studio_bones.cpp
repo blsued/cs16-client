@@ -866,11 +866,43 @@ void EvaluatePose( cl_entity_s *ent, const studiohdr_t *hdr, float time )
 	}
 }
 
+// Right-hand viewmodel mirror decision. CS v_ models are authored
+// left-handed; with cl_righthand > 0 (the CS default) the stock client
+// mirrors the viewmodel across the entity XZ plane by negating the Y row of
+// the ROOT bone matrix (adapted from this fork's StudioModelRenderer.cpp
+// StudioSetupBones, HLSDK lineage). Knife and shield viewmodels are authored
+// the opposite way, so the stock client inverts the flip for them
+// (StudioModelRenderer.cpp StudioDrawModel; the CZERO game-type exception is
+// skipped here -- M1 assumes CS 1.6 content). The mirror reverses triangle
+// winding; the draw side renders mirrored setups with culling off.
+bool ViewModelMirror( const cl_entity_s *ent, const studiohdr_t *hdr )
+{
+	if( ent != gEngfuncs.GetViewModel())
+		return false;
+
+	static cvar_t *s_rightHand;
+	static bool s_queried;
+
+	if( !s_queried )
+	{
+		s_queried = true;
+		s_rightHand = gEngfuncs.pfnGetCvarPointer( "cl_righthand" );
+	}
+
+	bool mirror = ( s_rightHand != NULL && s_rightHand->value > 0.0f );
+
+	if( g_bHoldingKnife || strstr( hdr->name, "shield" ) != NULL )
+		mirror = !mirror;
+
+	return mirror;
+}
+
 // Local pose (s_pos/s_q) -> world 3x4 chain (s_world) -> BoneSetup rows.
 void BuildWorldBones( const cl_entity_s *ent, const studiohdr_t *hdr, BoneSetup &out )
 {
 	int numBones = NumBonesClamped( hdr );
 	const mstudiobone_t *pbones = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex );
+	bool mirror = ViewModelMirror( ent, hdr );
 	float anglesDeg[3];
 	float rot[3][4];
 
@@ -890,12 +922,27 @@ void BuildWorldBones( const cl_entity_s *ent, const studiohdr_t *hdr, BoneSetup 
 		bonematrix[2][3] = s_pos[i][2];
 
 		if( pbones[i].parent < 0 || pbones[i].parent >= numBones )
+		{
+			if( mirror )
+			{
+				// Root-bone Y-row negation = mirror across the entity
+				// XZ plane (right-hand flip, see ViewModelMirror).
+				bonematrix[1][0] = -bonematrix[1][0];
+				bonematrix[1][1] = -bonematrix[1][1];
+				bonematrix[1][2] = -bonematrix[1][2];
+				bonematrix[1][3] = -bonematrix[1][3];
+			}
+
 			ConcatTransformsLocal( rot, bonematrix, s_world[i] );
+		}
 		else
+		{
 			ConcatTransformsLocal( s_world[pbones[i].parent], bonematrix, s_world[i] );
+		}
 	}
 
 	out.numBones = numBones;
+	out.mirrored = mirror;
 
 	for( int i = 0; i < numBones; i++ )
 	{
@@ -1077,6 +1124,7 @@ bool SetupBonesMerged( cl_entity_s *ent, studiohdr_t *carrierHdr, const BoneSetu
 	BoneSetup *setup = CacheInsert( ent, weaponHdr );
 
 	setup->numBones = numBones;
+	setup->mirrored = false;	// p_ weapons ride world players, never mirrored
 
 	for( int i = 0; i < numBones; i++ )
 	{

@@ -1,5 +1,5 @@
 /*
- * csz_engine.h -- CSOZ renderer: upstream SDK/engine type aggregation point
+ * csz_viewmodel.h -- CSOZ renderer: first-person viewmodel pass
  *
  * Copyright (c) 2026 CSOZ project contributors
  *
@@ -33,26 +33,11 @@
  * exception statement from your version.
  */
 #pragma once
-// Single aggregation point for upstream SDK types and globals used by cszrender.
-// Include order is HLSDK-sensitive; adjust ONLY here if compilation requires.
-#include "wrect.h"
-#include "cl_dll.h"        // gEngfuncs / gRenderAPI externs (cl_dll/include/cl_dll.h:100-105)
-#include "const.h"
-#include "entity_state.h"
-#include "cl_entity.h"
-#include "com_model.h"
-#include "studio.h"
-#include "r_studioint.h"
-#include "ref_params.h"    // ref_viewpass_t, RF_DRAW_WORLD...
-#include "render_api.h"    // render_api_t / render_interface_t / PARM_* / TF_*
-#include "cvardef.h"
-
-extern engine_studio_api_t IEngineStudio;  // defined in GameStudioModelRenderer.cpp
-extern bool g_bHoldingKnife;               // defined in cs_wpn/cs_weapons.cpp (viewmodel right-hand flip quirk)
-
 namespace csz
 {
-model_t *WorldModel();                  // gRenderAPI.pfnGetModel( 1 ); NULL when no map
-int TexSlotToGlName( int texSlot );     // RenderGetParm( PARM_TEX_TEXNUM, texSlot ); 0 on failure
-float ClientTime();                     // gEngfuncs.GetClientTime()
+struct ViewSetup;
+// Draws gEngfuncs.GetViewModel() with compressed depth range [0.0, 0.3] and a
+// dedicated projection (zNear=4, fov = main view fov). Runs LAST among 3D
+// passes; restores depth range before returning. No-op when viewmodel hidden.
+void DrawViewModelPass( const ViewSetup &mainView );
 }

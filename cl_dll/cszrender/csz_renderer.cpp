@@ -40,6 +40,7 @@
 #include "core/csz_fatal.h"
 #include "core/csz_view.h"
 #include "geom/csz_studio.h"
+#include "geom/csz_viewmodel.h"
 #include "geom/csz_world.h"
 
 namespace csz
@@ -212,7 +213,8 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 
 	// pass slot: additive light passes (T6)
 	// pass slot: sprites (T5)
-	// pass slot: viewmodel (T4; last, own depth range)
+
+	DrawViewModelPass( view );					// slot 15: viewmodel (last; own depth range)
 
 	LeaveTakeover();						// slot 16
 

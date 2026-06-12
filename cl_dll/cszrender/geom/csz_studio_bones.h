@@ -43,6 +43,7 @@ const int kMaxGpuBones = 128;
 struct BoneSetup
 {
 	int numBones;
+	bool mirrored;                      // viewmodel right-hand flip applied (winding reversed; draw cull-off)
 	float gpuBones[kMaxGpuBones][12];   // per bone: 3 rows of vec4 (world-from-bone 3x4, row vectors)
 };
 // Main-sequence pose + player gait blending (bone-name boundary weights),

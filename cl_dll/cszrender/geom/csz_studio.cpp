@@ -323,7 +323,17 @@ bool DrawEntity( const ViewSetup &view, cl_entity_s *ent, bool doCull )
 	float lightColor[3];
 
 	SampleEntityLight( ent, lightColor );
+
+	// Mirrored setups (right-hand viewmodel) have reversed triangle winding;
+	// the stock path solves this by drawing the flipped viewmodel with
+	// culling off (pinned ref/gl/gl_studio.c R_StudioDrawPoints) -- same here.
+	if( bones->mirrored )
+		SetCull( false );
+
 	DrawModelMeshes( gpu, hdr, ent->curstate.body, bones, lightColor );
+
+	if( bones->mirrored )
+		SetCull( true );
 
 	// p_ weapon model riding the player skeleton (visual A/B parity).
 	if( ent->player && ent->curstate.weaponmodel != 0 && IEngineStudio.GetModelByIndex != NULL )
