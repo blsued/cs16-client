@@ -39,6 +39,7 @@
 #include "core/csz_log.h"
 #include "core/csz_fatal.h"
 #include "core/csz_view.h"
+#include "fog/csz_fog.h"
 #include "geom/csz_sprite.h"
 #include "geom/csz_studio.h"
 #include "geom/csz_studio_texture.h"
@@ -61,6 +62,33 @@ bool s_takeoverLogged;
 // The world model we last handed to g_world (identity for the
 // Mod_ProcessUserData create=false teardown path).
 model_t *s_worldModel;
+
+// ---------------------------------------------------------------------------
+// Per-pass CPU ms accounting (M2 plan 2.7; composition-root internal, not a
+// public interface). Clock = gRenderAPI.pfnTime, the engine's QPC-backed
+// high-resolution timer (same source as SampleFps). CPU side only: GPU work
+// is asynchronous, so suspicious numbers must be re-checked with feature
+// on/off A/B (plan 2.7 caveat). Slots without an owner pass yet (brush/decal/
+// volume/delegate/triapi; sky until A3) simply accumulate zero.
+// ---------------------------------------------------------------------------
+enum PassTimer { kTmShadow, kTmSky, kTmWorld, kTmBrush, kTmDecal, kTmStudio,
+                 kTmLights, kTmVolume, kTmTrans, kTmDelegate, kTmTriapi,
+                 kTmViewmodel, kTmCount };
+
+double s_passAccumMs[kTmCount];
+double s_passBeginTime[kTmCount];
+
+void BeginPass( PassTimer t )
+{
+	if( gRenderAPI.pfnTime != NULL )
+		s_passBeginTime[t] = gRenderAPI.pfnTime();
+}
+
+void EndPass( PassTimer t )
+{
+	if( gRenderAPI.pfnTime != NULL )
+		s_passAccumMs[t] += ( gRenderAPI.pfnTime() - s_passBeginTime[t] ) * 1000.0;
+}
 
 // ---------------------------------------------------------------------------
 // Standard-load fps sampling (plan amendment 2 / spec 8.6): aggregates the
@@ -102,9 +130,25 @@ void SampleFps()
 
 		if( s_frames > 0 )
 		{
+			// Existing line format frozen (M1 recompute scripts parse it);
+			// the pass breakdown is a SEPARATE appended line (plan 2.7).
 			CSZ_LogDev( "fps", "fps=%.1f avg_ms=%.2f worst_ms=%.2f frames=%d",
 				(double)s_frames / span, span * 1000.0 / (double)s_frames, s_worstMs, s_frames );
+
+			double inv = 1.0 / (double)s_frames;
+
+			CSZ_LogDev( "fps", "pass-ms avg: shadow=%.2f sky=%.2f world=%.2f brush=%.2f decal=%.2f "
+				"studio=%.2f lights=%.2f volume=%.2f trans=%.2f delegate=%.2f triapi=%.2f viewmodel=%.2f",
+				s_passAccumMs[kTmShadow] * inv, s_passAccumMs[kTmSky] * inv,
+				s_passAccumMs[kTmWorld] * inv, s_passAccumMs[kTmBrush] * inv,
+				s_passAccumMs[kTmDecal] * inv, s_passAccumMs[kTmStudio] * inv,
+				s_passAccumMs[kTmLights] * inv, s_passAccumMs[kTmVolume] * inv,
+				s_passAccumMs[kTmTrans] * inv, s_passAccumMs[kTmDelegate] * inv,
+				s_passAccumMs[kTmTriapi] * inv, s_passAccumMs[kTmViewmodel] * inv );
 		}
+
+		for( int i = 0; i < kTmCount; i++ )
+			s_passAccumMs[i] = 0.0;
 
 		s_windowStart = now;
 		s_frames = 0;
@@ -146,6 +190,7 @@ void Renderer::OnHudInit()
 	RegisterLightingCommands();	// csz_testspot + csz_testlight (T6)
 	RegisterStudioTextureCvars();	// csz_dev_armskin (spec 4.3.1 layer 1 dev probe)
 	RegisterViewmodelDevCvars();	// csz_dev_viewmodel (dev stand-in model)
+	g_fog.RegisterDevCommands();	// csz_devfog/csz_devtint/csz_devmoon (A1; CSZ_DEV_TOOLS only)
 }
 
 void Renderer::OnVidInit()
@@ -207,27 +252,60 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	g_world.BuildVisibleSet( view );
 
 	g_studio.BeginFrame( ClientTime());				// slot 7: studio begin-frame
-	g_lights.UpdateMatrices();					// slot 7: light matrix update
 	StudioTexturePollDevCvars();					// slot 7: csz_dev_armskin change check
+
+	view.ambience = g_fog.Current();				// slot 7.2: ambience snapshot (A1)
+
+	g_lights.UpdateMatrices();					// slot 7.6: light matrix update
 
 	EnterTakeover();						// slot 8
 
+	BeginPass( kTmShadow );
 	RenderShadowMaps( view, m_frame.studio, m_frame.numStudio );	// slot 9: shadow maps (before main clear)
+	EndPass( kTmShadow );
 
-	// Dark gray-blue "no content here" clear: anything left this color is a
-	// known gap (sky in M1) or a regression tell (magenta retired with T1).
+	// Slot 10 clear: with fog on, the clear color IS the fog color -- the sky
+	// region is still an M1 gap, and a fog-colored backdrop is the correct
+	// intermediate state until A3 lands the sky pass. Without fog keep the
+	// dark gray-blue "no content here" tell (anything left this color is a
+	// known gap or a regression; magenta retired with T1).
 	static const float kClearNoContent[4] = { 0.05f, 0.05f, 0.08f, 1.0f };
-	ApplyMainViewport( rvp, kClearNoContent );			// slot 10
+	const float *clearColor = kClearNoContent;
+	float fogClear[4];
 
+	if( view.ambience.fogDensity > 0.0f )
+	{
+		fogClear[0] = view.ambience.fogColor[0];
+		fogClear[1] = view.ambience.fogColor[1];
+		fogClear[2] = view.ambience.fogColor[2];
+		fogClear[3] = 1.0f;
+		clearColor = fogClear;
+	}
+
+	ApplyMainViewport( rvp, clearColor );				// slot 10
+
+	BeginPass( kTmSky );						// slot 10.5 placeholder: sky pass lands in A3
+	EndPass( kTmSky );
+
+	BeginPass( kTmWorld );
 	g_world.DrawOpaque( view );					// slot 11: world opaque
+	EndPass( kTmWorld );
 
+	BeginPass( kTmStudio );
 	g_studio.DrawOpaque( view, m_frame.studio, m_frame.numStudio );	// slot 12: studio opaque
+	EndPass( kTmStudio );
 
+	BeginPass( kTmLights );
 	RunLightPasses( view, m_frame.studio, m_frame.numStudio );	// slot 13: additive light passes
+	EndPass( kTmLights );
 
+	BeginPass( kTmTrans );
 	DrawSprites( view, m_frame.sprites, m_frame.numSprites );	// slot 14: sprites
+	EndPass( kTmTrans );
 
+	BeginPass( kTmViewmodel );
 	DrawViewModelPass( view );					// slot 15: viewmodel (last; own depth range)
+	EndPass( kTmViewmodel );
 
 	LeaveTakeover();						// slot 16
 
@@ -268,6 +346,7 @@ void Renderer::NewMap()
 	// context is alive at R_NewMap, so Destroy frees properly; the rebuild
 	// happens eagerly when GL is ready, else lazily in frame slot 6.
 	ResetFatPvs();
+	g_fog.Reset();		// never carry one map's ambience into the next (A1)
 	g_world.Destroy();
 	s_worldModel = NULL;
 

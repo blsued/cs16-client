@@ -140,6 +140,7 @@ struct SpriteState
 	int gpuGeneration;
 	ShaderProgram program;
 	int uViewProj;
+	int uFog, uFogAdditive;		// M2a fog (no tint: sprites are emitters, plan 2.6)
 	unsigned int vao, vbo, ibo;
 };
 
@@ -290,9 +291,16 @@ void EnsureGpuObjects()
 	// Init-time shader: compile failure is FATAL (spec 3.2).
 	BuildProgram( "csz_sprite", kSpriteVs, kSpriteFs, true, s_sprite.program );
 	s_sprite.uViewProj = UniformLoc( s_sprite.program, "u_viewProj" );
+	s_sprite.uFog = UniformLoc( s_sprite.program, "u_fog" );
+	s_sprite.uFogAdditive = UniformLoc( s_sprite.program, "u_fogAdditive" );
 
 	UseProgram( s_sprite.program.program );
 	glUniform1i( UniformLoc( s_sprite.program, "u_texDiffuse" ), 0 );
+
+	const float kFogOff[4] = { 0.0f, 0.0f, 0.0f, 0.0f };	// fog off until fed (DrawSprites)
+
+	glUniform4fv( s_sprite.uFog, 1, kFogOff );
+	glUniform1i( s_sprite.uFogAdditive, 0 );
 	UseProgram( 0 );
 
 	glGenVertexArrays( 1, &s_sprite.vao );
@@ -572,6 +580,14 @@ void DrawSprites( const ViewSetup &view, cl_entity_s *const *ents, int count )
 
 	UseProgram( s_sprite.program.program );
 	glUniformMatrix4fv( s_sprite.uViewProj, 1, GL_FALSE, view.matViewProj.m );
+
+	// Ambience feed (M2a A1): fog only -- sprites are emitters, so no night
+	// tint (plan 2.6). The additive/alpha fog form is selected per item below.
+	const AmbienceParams &amb = view.ambience;
+	const float fogVec[4] = { amb.fogColor[0], amb.fogColor[1], amb.fogColor[2], amb.fogDensity };
+
+	glUniform4fv( s_sprite.uFog, 1, fogVec );
+
 	BindVao( s_sprite.vao );
 
 	glBindBuffer( GL_ARRAY_BUFFER, s_sprite.vbo );
@@ -581,25 +597,31 @@ void DrawSprites( const ViewSetup &view, cl_entity_s *const *ents, int count )
 
 	SetCull( false );	// billboards always face the camera; no winding games
 
+	int curFogAdditive = -1;	// force the first item to set it
+
 	for( int i = 0; i < numItems; i++ )
 	{
 		const SpriteItem &it = s_items[i];
+		int fogAdditive = 0;
 
 		// Blend state by rendermode (engine-parity, pinned gl_sprite.c
 		// R_DrawSpriteModel:404; plan section 8 step 1). Depth TEST stays on
 		// for everything except glow; depth WRITE is off for every blended
-		// mode so sprites never occlude later passes.
+		// mode so sprites never occlude later passes. Additive modes take the
+		// fade-to-black fog form (u_fogAdditive, plan 2.6).
 		switch( it.rendermode )
 		{
 		case kRenderGlow:
 			SetBlend( kBlendAdditive );
 			SetDepthWrite( false );
 			SetDepthTest( false );	// glow: no Z checks (engine parity)
+			fogAdditive = 1;
 			break;
 		case kRenderTransAdd:
 			SetBlend( kBlendAdditive );
 			SetDepthWrite( false );
 			SetDepthTest( true );
+			fogAdditive = 1;
 			break;
 		case kRenderTransAlpha:
 		case kRenderTransTexture:
@@ -617,6 +639,12 @@ void DrawSprites( const ViewSetup &view, cl_entity_s *const *ents, int count )
 			SetDepthWrite( true );
 			SetDepthTest( true );
 			break;
+		}
+
+		if( fogAdditive != curFogAdditive )
+		{
+			glUniform1i( s_sprite.uFogAdditive, fogAdditive );
+			curFogAdditive = fogAdditive;
 		}
 
 		BindTextureSlot( 0, it.frame->gl_texturenum );

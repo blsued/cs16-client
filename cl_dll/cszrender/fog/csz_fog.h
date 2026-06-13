@@ -1,5 +1,5 @@
 /*
- * csz_view.h -- CSOZ renderer: view setup and fat PVS cache
+ * csz_fog.h -- CSOZ renderer: client-side ambience state (fog/night/moon)
  *
  * Copyright (c) 2026 CSOZ project contributors
  *
@@ -10,7 +10,7 @@
  * Trinity, retail/leaked sources, or any other license-tainted source
  * (see csoz docs/provenance.md, section 6).
  * Clean-room implementation. Mechanism studied from PrimeXT (see
- * csoz docs/notes/primext-render-mechanisms.md); implemented by an agent
+ * csoz docs/notes/primext-render-mechanisms-m2.md); implemented by an agent
  * that has not read that source.
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -33,28 +33,22 @@
  * exception statement from your version.
  */
 #pragma once
-#include "csz_math.h"
-#include "csz_ambience_types.h"
-struct ref_viewpass_s;
+#include "../core/csz_ambience_types.h"
 namespace csz
 {
-struct ViewSetup
+// Client-side ambience state. The ONLY production writer is the server "CSZ"
+// envelope (spec 3.2); there is no enable/disable cvar (A-class, spec 4.1).
+// csz_devfog/csz_devtint/csz_devmoon (A1) and csz_devmoonlight (A4) exist
+// solely in CSZ_DEV_TOOLS builds for pre-A5 verification (compiled out via C9).
+class FogController
 {
-	float origin[3];
-	float angles[3];
-	int viewport[4];               // x, y, w, h
-	float fovX, fovY;              // degrees
-	float zNear, zFar;
-	Mat4 matView, matProj, matViewProj;
-	Frustum frustum;
-	const unsigned char *pvs;      // fat PVS bytes; NULL = everything visible (shadow passes)
-	AmbienceParams ambience;       // BuildViewFromPass sets AmbienceNeutral();
-	                               // composition root overwrites from g_fog each frame
+public:
+	void Reset();                          // map change / disconnect -> Neutral
+	// payload = AMBIENCE cmd body (45 bytes, layout 2.6), cmd/version already
+	// stripped by the dispatcher. Logs decoded values once at Info level.
+	void OnAmbienceEnvelope( const unsigned char *payload, int size );
+	const AmbienceParams &Current() const;
+	void RegisterDevCommands();            // no-op unless CSZ_DEV_TOOLS
 };
-void BuildViewFromPass( const struct ref_viewpass_s *rvp, ViewSetup &out );  // main view: zNear=4, zFar=16384
-void BuildSpotLightView( const float origin[3], const float anglesDeg[3],
-                         float fovDeg, float radius, int resolution, ViewSetup &out ); // pvs=NULL (all-visible, notes-mechanisms f-8)
-const unsigned char *UpdateFatPvs( const float origin[3] );  // gRenderAPI.R_FatPVS(org, 2.0, buf, false, false)
-const unsigned char *CurrentFatPvs();                        // last result or NULL; feeds Mod_GetCurrentVis
-void ResetFatPvs();                                          // map change: never serve a stale cross-map PVS
+extern FogController g_fog;
 }

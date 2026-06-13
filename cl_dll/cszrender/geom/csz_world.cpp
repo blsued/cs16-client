@@ -94,6 +94,7 @@ struct WorldState
 	unsigned int vao, vbo;
 	ShaderProgram program;
 	int uViewProj, uAlphaTest;
+	int uFog, uAmbTint;		// base pass only (M2a fog/night; lit/depth stay fog-free, pitfall 23)
 	ShaderProgram litProgram;	// additive per-light pass (T6)
 	int litUViewProj, litUAlphaTest;
 	int litULightOrigin, litULightDir, litULightColor;
@@ -592,11 +593,19 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	BuildProgram( "csz_world", kWorldVs, kWorldFs, true, s_world.program );
 	s_world.uViewProj = UniformLoc( s_world.program, "u_viewProj" );
 	s_world.uAlphaTest = UniformLoc( s_world.program, "u_alphaTest" );
+	s_world.uFog = UniformLoc( s_world.program, "u_fog" );
+	s_world.uAmbTint = UniformLoc( s_world.program, "u_ambTint" );
 
 	UseProgram( s_world.program.program );
 	glUniform1i( UniformLoc( s_world.program, "u_texDiffuse" ), 0 );
 	glUniform1i( UniformLoc( s_world.program, "u_texLightmap" ), 1 );
 	glUniform1f( s_world.uAlphaTest, 0.0f );
+
+	const float kFogOff[4] = { 0.0f, 0.0f, 0.0f, 0.0f };	// fog off until fed (DrawOpaque)
+	const float kTintNeutral[3] = { 1.0f, 1.0f, 1.0f };	// neutral until fed (never tint-black)
+
+	glUniform4fv( s_world.uFog, 1, kFogOff );
+	glUniform3fv( s_world.uAmbTint, 1, kTintNeutral );
 	UseProgram( 0 );
 
 	// Lit-additive program (T6 spot pass); init-time, so failure is FATAL.
@@ -679,6 +688,15 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 
 	UseProgram( s_world.program.program );
 	glUniformMatrix4fv( s_world.uViewProj, 1, GL_FALSE, view.matViewProj.m );
+
+	// Ambience feed (M2a A1): server-authoritative snapshot rides in on the
+	// view (plan 2.5 slot 7.2); base pass only, pitfall 23.
+	const AmbienceParams &amb = view.ambience;
+	const float fogVec[4] = { amb.fogColor[0], amb.fogColor[1], amb.fogColor[2], amb.fogDensity };
+
+	glUniform4fv( s_world.uFog, 1, fogVec );
+	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
+
 	BindVao( s_world.vao );
 	SetCull( false );	// BSP faces are culled per-face below (plan step 3)
 

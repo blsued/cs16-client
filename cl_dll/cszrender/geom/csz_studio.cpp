@@ -66,6 +66,7 @@ struct PassLocs
 {
 	int uViewProj, uBones, uAlphaTest, uChrome, uViewRight, uViewUp;
 	int uAmbient, uShadeColor;					// base program only
+	int uFog, uAmbTint;						// base program only (M2a fog/night; lit/depth fog-free, pitfall 23)
 	int uLightOrigin, uLightDir, uLightColor;			// lit program only
 	int uLightRadius, uCosInner, uCosOuter, uMatShadow, uHasShadow;	// lit program only
 };
@@ -102,6 +103,8 @@ void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 	out.uViewUp = UniformLoc( prog, "u_viewUp" );
 	out.uAmbient = UniformLoc( prog, "u_ambient" );
 	out.uShadeColor = UniformLoc( prog, "u_shadeColor" );
+	out.uFog = UniformLoc( prog, "u_fog" );
+	out.uAmbTint = UniformLoc( prog, "u_ambTint" );
 	out.uLightOrigin = UniformLoc( prog, "u_lightOrigin" );
 	out.uLightDir = UniformLoc( prog, "u_lightDir" );
 	out.uLightColor = UniformLoc( prog, "u_lightColor" );
@@ -136,6 +139,14 @@ void EnsureShader()
 	const float kShadeDir[3] = { 0.0f, 0.0f, 1.0f };
 
 	glUniform3fv( UniformLoc( s_studio.program, "u_shadeDir" ), 1, kShadeDir );
+
+	// Ambience defaults until the per-pass feed (fog off, tint neutral --
+	// a zeroed u_ambTint would render everything black).
+	const float kFogOff[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	const float kTintNeutral[3] = { 1.0f, 1.0f, 1.0f };
+
+	glUniform4fv( s_studio.baseLocs.uFog, 1, kFogOff );
+	glUniform3fv( s_studio.baseLocs.uAmbTint, 1, kTintNeutral );
 
 	BuildProgram( "csz_studio_lit", kStudioLitVs, kStudioLitFs, true, s_studio.litProgram );
 	QueryPassLocs( s_studio.litProgram, s_studio.litLocs );
@@ -453,6 +464,15 @@ void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, cons
 	s_studio.locs = &locs;
 	UseProgram( prog.program );
 	glUniformMatrix4fv( locs.uViewProj, 1, GL_FALSE, view.matViewProj.m );
+
+	// Ambience feed (M2a A1, plan 2.5 slot 7.2 snapshot riding on the view).
+	// Only the base program has these uniforms; lit/depth locations are -1
+	// (glUniform* no-op), keeping those passes fog-free (pitfall 23).
+	const AmbienceParams &amb = view.ambience;
+	const float fogVec[4] = { amb.fogColor[0], amb.fogColor[1], amb.fogColor[2], amb.fogDensity };
+
+	glUniform4fv( locs.uFog, 1, fogVec );
+	glUniform3fv( locs.uAmbTint, 1, amb.tint );
 
 	float fwd[3], right[3], up[3];
 

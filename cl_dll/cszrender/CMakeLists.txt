@@ -13,6 +13,7 @@ set(CSZRENDER_SRC
 	core/csz_shader.cpp
 	core/csz_math.cpp
 	core/csz_view.cpp
+	fog/csz_fog.cpp
 	geom/csz_world.cpp
 	geom/csz_lightmap.cpp
 	geom/csz_sprite.cpp
@@ -27,3 +28,7 @@ set(CSZRENDER_SRC
 )
 add_library(cszrender STATIC ${CSZRENDER_SRC})
 target_include_directories(cszrender PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# Dev-only ambience commands (csz_devfog/csz_devtint/csz_devmoon): always on
+# during M2a bring-up; C9 turns this into a CMake option compiled out of
+# release builds (M2 plan A1 step 3).
+target_compile_definitions(cszrender PRIVATE CSZ_DEV_TOOLS)

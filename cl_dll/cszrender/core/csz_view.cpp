@@ -78,6 +78,7 @@ void BuildViewFromPass( const struct ref_viewpass_s *rvp, ViewSetup &out )
 	Mat4Multiply( out.matProj, out.matView, out.matViewProj );
 	FrustumFromMatrix( out.matViewProj, false, out.frustum );
 	out.pvs = NULL;		// caller decides (main view: UpdateFatPvs result)
+	out.ambience = AmbienceNeutral();	// composition root overwrites from g_fog (slot 7.2)
 }
 
 void BuildSpotLightView( const float origin[3], const float anglesDeg[3],
@@ -105,6 +106,7 @@ void BuildSpotLightView( const float origin[3], const float anglesDeg[3],
 	// hard far clip would pop shadow casters (notes-mechanisms e).
 	FrustumFromMatrix( out.matViewProj, true, out.frustum );
 	out.pvs = NULL;		// shadow passes render all-visible (notes-mechanisms f-8)
+	out.ambience = AmbienceNeutral();	// depth passes never read it; keep the struct fully defined
 }
 
 const unsigned char *UpdateFatPvs( const float origin[3] )

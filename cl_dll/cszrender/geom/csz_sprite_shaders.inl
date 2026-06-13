@@ -54,13 +54,25 @@ void main()
 
 // Plain modulate: blending (additive / alpha) is fixed-function state chosen
 // per rendermode on the CPU side (engine-parity, see csz_sprite.cpp).
+// Fog block (plan 2.6 contract, M2a A1): sprites are emitters, so NO
+// u_ambTint here; u_fogAdditive selects between the alpha-blended mix and the
+// additive fade-to-black form (never add fog color into an additive draw).
 static const char kSpriteFs[] = R"GLSL(#version 330 core
 in vec2 v_uv;
 in vec4 v_color;
 uniform sampler2D u_texDiffuse;   // unit 0
+uniform vec4 u_fog;               // rgb = fog color (linear), w = density; w<=0 -> off
+uniform int u_fogAdditive;        // 1 on additive blend modes (CPU-selected)
 out vec4 fragColor;
 void main()
 {
-	fragColor = texture( u_texDiffuse, v_uv ) * v_color;
+	vec4 col = texture( u_texDiffuse, v_uv ) * v_color;
+	float fogDepth = gl_FragCoord.z / gl_FragCoord.w;      // cheap view depth (clean-room f)
+	float fogF = ( u_fog.w > 0.0 ) ? clamp( exp2( -u_fog.w * fogDepth ), 0.0, 1.0 ) : 1.0;
+	if( u_fogAdditive != 0 )
+		col.rgb *= fogF;                                   // fade to black, never add fog color
+	else
+		col.rgb = mix( u_fog.rgb, col.rgb, fogF );
+	fragColor = col;
 }
 )GLSL";

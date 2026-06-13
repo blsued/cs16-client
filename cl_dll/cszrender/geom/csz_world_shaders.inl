@@ -60,12 +60,18 @@ void main()
 }
 )GLSL";
 
+// Fog + night-tint block (plan 2.6 contract, M2a A1): per-pixel exp2 fog on
+// cheap view depth, tint multiplier before the fog mix. Base pass ONLY: the
+// lit-additive and depth programs below stay fog-free (clean-room pitfall 23,
+// whole-pipeline ruling).
 static const char kWorldFs[] = R"GLSL(#version 330 core
 in vec2 v_uv;
 in vec2 v_lmuv;
 uniform sampler2D u_texDiffuse;   // unit 0
 uniform sampler2D u_texLightmap;  // unit 1
 uniform float u_alphaTest;        // 0 = off, else discard threshold (0.25)
+uniform vec4 u_fog;               // rgb = fog color (linear), w = density; w<=0 -> off
+uniform vec3 u_ambTint;           // night tint; (1,1,1) neutral
 out vec4 fragColor;
 void main()
 {
@@ -73,7 +79,11 @@ void main()
 	if( u_alphaTest > 0.0 && base.a < u_alphaTest )
 		discard;
 	vec3 lm = texture( u_texLightmap, v_lmuv ).rgb;
-	fragColor = vec4( base.rgb * lm * ( 2.0 * 128.0 / 192.0 ), base.a );
+	vec3 col = base.rgb * lm * ( 2.0 * 128.0 / 192.0 );
+	col *= u_ambTint;
+	float fogDepth = gl_FragCoord.z / gl_FragCoord.w;      // cheap view depth (clean-room f)
+	float fogF = ( u_fog.w > 0.0 ) ? clamp( exp2( -u_fog.w * fogDepth ), 0.0, 1.0 ) : 1.0;
+	fragColor = vec4( mix( u_fog.rgb, col, fogF ), base.a );
 }
 )GLSL";
 

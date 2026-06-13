@@ -1,5 +1,5 @@
 /*
- * csz_view.h -- CSOZ renderer: view setup and fat PVS cache
+ * csz_ambience_types.h -- CSOZ renderer: server-authoritative ambience POD
  *
  * Copyright (c) 2026 CSOZ project contributors
  *
@@ -10,7 +10,7 @@
  * Trinity, retail/leaked sources, or any other license-tainted source
  * (see csoz docs/provenance.md, section 6).
  * Clean-room implementation. Mechanism studied from PrimeXT (see
- * csoz docs/notes/primext-render-mechanisms.md); implemented by an agent
+ * csoz docs/notes/primext-render-mechanisms-m2.md); implemented by an agent
  * that has not read that source.
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -33,28 +33,36 @@
  * exception statement from your version.
  */
 #pragma once
-#include "csz_math.h"
-#include "csz_ambience_types.h"
-struct ref_viewpass_s;
 namespace csz
 {
-struct ViewSetup
+// Server-authoritative ambience snapshot (spec 3.2). Produced by fog/
+// (envelope decode), consumed by geom + lighting through ViewSetup.ambience.
+// Lives in core so fog/ never includes (and is never included by) lighting
+// or geom (spec 4.6 one-way rule). All colors linear 0..1, premultiplied by
+// their intensity; directions are normalized world-space unit vectors
+// pointing FROM the scene TOWARD the sky object (see 2.6 angle convention).
+struct AmbienceParams
 {
-	float origin[3];
-	float angles[3];
-	int viewport[4];               // x, y, w, h
-	float fovX, fovY;              // degrees
-	float zNear, zFar;
-	Mat4 matView, matProj, matViewProj;
-	Frustum frustum;
-	const unsigned char *pvs;      // fat PVS bytes; NULL = everything visible (shadow passes)
-	AmbienceParams ambience;       // BuildViewFromPass sets AmbienceNeutral();
-	                               // composition root overwrites from g_fog each frame
+	float fogColor[3];
+	float fogDensity;       // exp2 fog, 1/units; <= 0 disables fog entirely
+	float tint[3];          // night tint multiplier; (1,1,1) = neutral
+	bool  moonEnabled;
+	float moonDir[3];
+	float moonCosRadius;    // cos(angular radius); disc test threshold
+	float moonColor[3];
+	float moonHalo;         // halo intensity 0..1
+	bool  moonlightEnabled;
+	float moonlightDir[3];  // surface -> moon (shader L vector, constant)
+	float moonlightColor[3];
 };
-void BuildViewFromPass( const struct ref_viewpass_s *rvp, ViewSetup &out );  // main view: zNear=4, zFar=16384
-void BuildSpotLightView( const float origin[3], const float anglesDeg[3],
-                         float fovDeg, float radius, int resolution, ViewSetup &out ); // pvs=NULL (all-visible, notes-mechanisms f-8)
-const unsigned char *UpdateFatPvs( const float origin[3] );  // gRenderAPI.R_FatPVS(org, 2.0, buf, false, false)
-const unsigned char *CurrentFatPvs();                        // last result or NULL; feeds Mod_GetCurrentVis
-void ResetFatPvs();                                          // map change: never serve a stale cross-map PVS
+// (0,0,0,0)/(1,1,1)/disabled everything -- the vanilla daylight look.
+inline AmbienceParams AmbienceNeutral()
+{
+	AmbienceParams p = AmbienceParams();	// value-initialized: every float 0, bools false
+
+	p.tint[0] = 1.0f;
+	p.tint[1] = 1.0f;
+	p.tint[2] = 1.0f;
+	return p;
+}
 }

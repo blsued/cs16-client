@@ -79,6 +79,10 @@ void main()
 // Fullbright meshes are drawn with u_ambient=1 / u_shadeColor=0 (no extra
 // uniform). Light color already carries the world-parity gamma + overbright
 // factor (see csz_studio.cpp SampleEntityLight).
+// Fog + night-tint block (plan 2.6 contract, M2a A1) on the base pass ONLY:
+// the lit-additive and depth programs below stay fog-free (clean-room pitfall
+// 23, whole-pipeline ruling). The viewmodel rides this same program and gets
+// fog for free (fogDepth ~ 0 -> visually fog-free at arm's reach).
 static const char kStudioFs[] = R"GLSL(#version 330 core
 in vec2 v_uv;
 in vec3 v_normal;
@@ -87,6 +91,8 @@ uniform float u_alphaTest;        // 0 = off, else discard threshold (0.25)
 uniform vec3 u_ambient;
 uniform vec3 u_shadeColor;
 uniform vec3 u_shadeDir;
+uniform vec4 u_fog;               // rgb = fog color (linear), w = density; w<=0 -> off
+uniform vec3 u_ambTint;           // night tint; (1,1,1) neutral
 out vec4 fragColor;
 void main()
 {
@@ -95,7 +101,11 @@ void main()
 		discard;
 	vec3 n = normalize( v_normal );
 	float ndl = max( dot( n, u_shadeDir ), 0.0 );
-	fragColor = vec4( base.rgb * ( u_ambient + u_shadeColor * ndl ), 1.0 );
+	vec3 col = base.rgb * ( u_ambient + u_shadeColor * ndl );
+	col *= u_ambTint;
+	float fogDepth = gl_FragCoord.z / gl_FragCoord.w;      // cheap view depth (clean-room f)
+	float fogF = ( u_fog.w > 0.0 ) ? clamp( exp2( -u_fog.w * fogDepth ), 0.0, 1.0 ) : 1.0;
+	fragColor = vec4( mix( u_fog.rgb, col, fogF ), 1.0 );
 }
 )GLSL";
 
