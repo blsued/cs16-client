@@ -97,9 +97,10 @@ float hash13( vec3 p )
 // space; the renderer is not gamma-managed past this point (matches world FS).
 void skyColors( float ph, out vec3 zenith, out vec3 horizon )
 {
-	// Sunset / round start (warm horizon glow, deep blue-violet zenith).
-	vec3 ssZen = vec3( 0.090, 0.105, 0.230 );
-	vec3 ssHor = vec3( 0.820, 0.380, 0.180 );
+	// Sunset / round start: COOL twilight base. The warm sunset is a DIRECTIONAL
+	// sun-side glow added in main(), NOT a 360-degree horizon ring.
+	vec3 ssZen = vec3( 0.060, 0.075, 0.175 );
+	vec3 ssHor = vec3( 0.120, 0.115, 0.195 );
 	// Night (cool blue moonlit): the warm sunset is gone by ~phase 0.18, so the
 	// night reads blue/moonlit, not a lingering orange dusk.
 	vec3 ntZen = vec3( 0.012, 0.022, 0.060 );
@@ -107,9 +108,10 @@ void skyColors( float ph, out vec3 zenith, out vec3 horizon )
 	// Midnight (darkest, cold blue).
 	vec3 mnZen = vec3( 0.005, 0.008, 0.024 );
 	vec3 mnHor = vec3( 0.014, 0.020, 0.045 );
-	// Dawn / daylight (warm gold horizon, brightening zenith blue).
+	// Dawn / daylight: COOL brightening blue base. The warm sunrise is the same
+	// directional sun-side glow in main(), NOT a 360-degree gold ring.
 	vec3 dwZen = vec3( 0.230, 0.330, 0.520 );
-	vec3 dwHor = vec3( 0.900, 0.560, 0.300 );
+	vec3 dwHor = vec3( 0.380, 0.470, 0.640 );
 
 	if( ph < 0.18 )                              // sunset -> cool night (fast handoff)
 	{
@@ -142,14 +144,23 @@ void main()
 	float grad = pow( up, 0.55 );               // pull the ramp toward the horizon
 	vec3 col = mix( horizon, zenith, grad );
 
-	// --- Dawn warm horizon glow concentrated around the sun azimuth. ---
-	float dawn = smoothstep( 0.78, 1.0, u_phase );
-	if( dawn > 0.0 )
+	// --- Warm horizon glow that FOLLOWS THE SUN (sunset in the west, sunrise in the
+	// east), active ONLY while the sun is near the horizon. Concentrated toward the
+	// sun azimuth (pow(toSun,3)) and hugging the horizon, so the anti-sun sky stays
+	// cool/dark -- a directional sunset/dawn with a clear sunset|night boundary as
+	// the moon rises opposite, NOT a 360-degree warm ring. ---
+	float sunLow = 1.0 - smoothstep( 0.04, 0.34, abs( u_sunDir.z ) );  // 1 on horizon, 0 high/deep
+	if( sunLow > 0.0 )
 	{
 		float toSun = max( dot( dir, u_sunDir ), 0.0 );
-		float lowBand = 1.0 - smoothstep( 0.0, 0.32, up );  // strongest near horizon
-		vec3 warm = vec3( 1.00, 0.62, 0.28 );
-		col += warm * dawn * lowBand * ( 0.35 + 0.65 * pow( toSun, 4.0 ));
+		float lowBand = 1.0 - smoothstep( 0.0, 0.40, up );  // hug the horizon
+		// Sunset (evening) is a deeper red-orange; dawn (morning) is cooler and
+		// PINKER -- real atmospheric difference (dusty dusk air vs clean dawn air;
+		// sunrise-sunset.org / ScienceDaily). Distinct glow color at each end.
+		vec3 sunsetGlow = vec3( 1.00, 0.45, 0.18 );   // evening: deep red-orange
+		vec3 dawnGlow   = vec3( 1.00, 0.62, 0.52 );   // morning: cooler pink/peach
+		vec3 warm = ( u_phase < 0.5 ) ? sunsetGlow : dawnGlow;
+		col += warm * sunLow * lowBand * pow( toSun, 3.0 ) * 1.1;
 	}
 
 	// --- Hash star field: world-direction cells, twinkle-free, faded by dawn. ---
