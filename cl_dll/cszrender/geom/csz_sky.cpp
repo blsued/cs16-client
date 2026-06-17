@@ -85,6 +85,7 @@ SkyGpu s_sky;
 cvar_t *s_phaseCvar;	// csz_sky_phase: < 0 = live off ClientTime, [0,1] = frozen
 
 #if defined( CSZ_DEV_TOOLS )
+cvar_t *s_fullscreenCvar;	// csz_sky_fullscreen: dev overlay, draw the sky over the whole frame
 // csz_devsun <elev yaw r g b>: manual sun override, mirrors fog's csz_devmoon.
 // Stored here and applied by DrawSky/PublishLighting when armed.
 bool s_devSunOn;
@@ -194,6 +195,8 @@ void SkyRenderer::RegisterDevCvars()
 
 #if defined( CSZ_DEV_TOOLS )
 	gEngfuncs.pfnAddCommand( "csz_devsun", DevSunCommand );	// mirror csz_devmoon (csz_fog.cpp)
+	if( s_fullscreenCvar == NULL )
+		s_fullscreenCvar = gEngfuncs.pfnRegisterVariable( "csz_sky_fullscreen", "0", FCVAR_CLIENTDLL );
 	CSZ_LogDev( "sky", "dev sky commands registered (CSZ_DEV_TOOLS build)" );
 #endif
 }
@@ -328,6 +331,20 @@ void SkyRenderer::DrawSky( const ViewSetup &view )
 	// Restore the takeover baseline for the world pass (depth test+write ON).
 	SetDepthTest( true );
 	SetDepthWrite( true );
+}
+
+void SkyRenderer::DrawDebugFullscreen( const ViewSetup &view )
+{
+#if defined( CSZ_DEV_TOOLS )
+	// Dev proof/showcase: redraw the sky on top of the finished frame so it is
+	// visible from any camera angle (normal play shows the sky only through the
+	// map's sky surfaces). DrawSky runs with depth test/write OFF, so it paints
+	// over everything already drawn this frame.
+	if( s_fullscreenCvar != NULL && s_fullscreenCvar->value != 0.0f )
+		DrawSky( view );
+#else
+	(void)view;
+#endif
 }
 
 void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )

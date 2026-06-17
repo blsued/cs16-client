@@ -50,6 +50,7 @@ public:
 	float ComputePhase();                        // live off ClientTime(); csz_sky_phase >= 0 freezes
 	void PublishLighting( AmbienceParams &amb, float phase );  // overwrite tint + dominant light dir/color
 	void RegisterDevCvars();                     // csz_sky_phase + csz_devsun (CSZ_DEV_TOOLS only)
+	void DrawDebugFullscreen( const ViewSetup &view );  // csz_sky_fullscreen: draw sky over the whole frame (dev proof)
 };
 extern SkyRenderer g_sky;
 }

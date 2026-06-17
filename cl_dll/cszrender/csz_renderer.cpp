@@ -323,6 +323,8 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	DrawViewModelPass( view );					// slot 15: viewmodel (last; own depth range)
 	EndPass( kTmViewmodel );
 
+	g_sky.DrawDebugFullscreen( view );				// dev: csz_sky_fullscreen overlay (proof/showcase)
+
 	LeaveTakeover();						// slot 16
 
 	if( !s_takeoverLogged )
