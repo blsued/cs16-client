@@ -63,4 +63,21 @@ bool SetupBonesMerged( cl_entity_s *ent, studiohdr_t *carrierHdr, const BoneSetu
 
 // Resets the per-frame bone cache; called once per frame (StudioRenderer::BeginFrame).
 void ResetBoneCache( float time );
+
+// ---------------------------------------------------------------------------
+// Sequence-frame helpers shared between the draw path (EvaluatePose) and the
+// viewmodel studio-event dispatch pass (csz_viewmodel.cpp). Promoted to the
+// public surface so the event pass reuses the EXACT frame/seqdesc math the
+// draw path uses -- a second formula would drift the event window off the
+// drawn pose (W1 fix, PT-02/G-P8).
+// ---------------------------------------------------------------------------
+
+// pseqdesc pointer for sequence index seq (NO clamp: callers must clamp seq to
+// [0, hdr->numseq) first, mirroring the draw path's `seq >= numseq -> 0` rule).
+const mstudioseqdesc_t *SeqDesc( const studiohdr_t *hdr, int seq );
+
+// Frame estimation from networked state (adapted StudioEstimateFrame with
+// interpolation enabled; no latched state). Same evaluation the draw path
+// feeds to the pose; the event pass uses it as the window high endpoint.
+float EstimateFrame( const mstudioseqdesc_t *pseqdesc, const cl_entity_s *ent, float time );
 }

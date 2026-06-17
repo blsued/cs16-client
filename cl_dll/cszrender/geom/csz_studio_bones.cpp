@@ -429,43 +429,6 @@ void SlerpBones( int numBones, float q1[][4], float pos1[][3],
 	}
 }
 
-// Frame estimation from networked state (adapted StudioEstimateFrame with
-// interpolation enabled; no latched state).
-float EstimateFrame( const mstudioseqdesc_t *pseqdesc, const cl_entity_s *ent, float time )
-{
-	double dfdt = 0.0;
-	double f;
-
-	if( time >= ent->curstate.animtime )
-		dfdt = ( time - ent->curstate.animtime ) * ent->curstate.framerate * pseqdesc->fps;
-
-	if( pseqdesc->numframes <= 1 )
-		f = 0.0;
-	else
-		f = ( ent->curstate.frame * ( pseqdesc->numframes - 1 )) / 256.0;
-
-	f += dfdt;
-
-	if( pseqdesc->flags & STUDIO_LOOPING )
-	{
-		if( pseqdesc->numframes > 1 )
-			f -= (int)( f / ( pseqdesc->numframes - 1 )) * ( pseqdesc->numframes - 1 );
-
-		if( f < 0.0 )
-			f += ( pseqdesc->numframes - 1 );
-	}
-	else
-	{
-		if( f >= pseqdesc->numframes - 1.001 )
-			f = pseqdesc->numframes - 1.001;
-
-		if( f < 0.0 )
-			f = 0.0;
-	}
-
-	return (float)f;
-}
-
 // Sequence group 0 only (all CS content); demand-loaded groups are an M2 gap
 // (progress-t3.md decision 1). NULL means "use bind pose".
 const mstudioanim_t *GetAnim( const studiohdr_t *hdr, const mstudioseqdesc_t *pseqdesc )
@@ -485,11 +448,6 @@ const mstudioanim_t *GetAnim( const studiohdr_t *hdr, const mstudioseqdesc_t *ps
 	}
 
 	return (const mstudioanim_t *)((const byte *)hdr + pseqdesc->animindex );
-}
-
-const mstudioseqdesc_t *SeqDesc( const studiohdr_t *hdr, int seq )
-{
-	return (const mstudioseqdesc_t *)((const byte *)hdr + hdr->seqindex ) + seq;
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,6 +977,52 @@ BoneSetup *CacheInsert( const void *ent, const void *hdr )
 	return &e.setup;
 }
 
+}
+
+// ---------------------------------------------------------------------------
+// Public sequence-frame helpers (declared in csz_studio_bones.h). The draw
+// path (EvaluatePose, this file) and the viewmodel studio-event dispatch pass
+// (csz_viewmodel.cpp) BOTH call these, so the event window is computed from the
+// identical frame/seqdesc math that produces the drawn pose (W1, PT-02/G-P8).
+// ---------------------------------------------------------------------------
+const mstudioseqdesc_t *SeqDesc( const studiohdr_t *hdr, int seq )
+{
+	return (const mstudioseqdesc_t *)((const byte *)hdr + hdr->seqindex ) + seq;
+}
+
+float EstimateFrame( const mstudioseqdesc_t *pseqdesc, const cl_entity_s *ent, float time )
+{
+	double dfdt = 0.0;
+	double f;
+
+	if( time >= ent->curstate.animtime )
+		dfdt = ( time - ent->curstate.animtime ) * ent->curstate.framerate * pseqdesc->fps;
+
+	if( pseqdesc->numframes <= 1 )
+		f = 0.0;
+	else
+		f = ( ent->curstate.frame * ( pseqdesc->numframes - 1 )) / 256.0;
+
+	f += dfdt;
+
+	if( pseqdesc->flags & STUDIO_LOOPING )
+	{
+		if( pseqdesc->numframes > 1 )
+			f -= (int)( f / ( pseqdesc->numframes - 1 )) * ( pseqdesc->numframes - 1 );
+
+		if( f < 0.0 )
+			f += ( pseqdesc->numframes - 1 );
+	}
+	else
+	{
+		if( f >= pseqdesc->numframes - 1.001 )
+			f = pseqdesc->numframes - 1.001;
+
+		if( f < 0.0 )
+			f = 0.0;
+	}
+
+	return (float)f;
 }
 
 void ResetBoneCache( float time )
