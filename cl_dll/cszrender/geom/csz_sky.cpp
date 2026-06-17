@@ -118,34 +118,36 @@ void ElevYawDir( float elevDeg, float yawDeg, float out[3] )
 }
 
 // --- Phase -> body arc (shared by DrawSky and PublishLighting) -------------
-// Moon rides a smooth arc peaking near midnight; the sun stays below the
-// horizon until the dawn window then rises. Azimuths sweep slowly so the
-// G3/G8 azimuth-tracking checks have something to move.
+// Round day-cycle: 0.00 = SUNSET (sun low and setting; round start), the moon
+// rises as the sun goes down, 0.50 = MIDNIGHT (moon high, darkest), 0.80..1.00
+// = DAWN (sun rises again; round ending). Azimuths drift so the disc moves.
 
 float MoonElev( float ph )
 {
-	// Peaks (~75 deg) near phase 0.5, dips below the horizon outside the night.
-	float t = sinf( 3.14159265f * clampf01( ph / 0.85f ) );
-	return -8.0f + 83.0f * t;
+	// Below the horizon at sunset, peaks (~74 deg) near midnight, sets by dawn.
+	float t = sinf( 3.14159265f * clampf01( ( ph - 0.04f ) / 0.84f ) );
+	return -10.0f + 84.0f * t;
 }
 
 float MoonYaw( float ph )
 {
-	return 200.0f + 80.0f * ph;	// slow east-to-west drift
+	return 210.0f + 70.0f * ph;	// slow drift across the night sky
 }
 
 float SunElev( float ph )
 {
-	// Below the horizon until ~0.80, then climbs to high daylight at phase 1.
+	// Sunset at round start (+13 -> below over the first 18%), down through the
+	// night, then rising again at dawn (round ending).
+	if( ph < 0.18f )
+		return 13.0f - 30.0f * ( ph / 0.18f );			// +13 -> -17 (sun setting)
 	if( ph < 0.80f )
-		return -20.0f;
-	float t = ( ph - 0.80f ) / 0.20f;	// 0..1 across the dawn window
-	return -20.0f + 70.0f * t;
+		return -17.0f;						// below the horizon (night)
+	return -17.0f + 62.0f * ( ( ph - 0.80f ) / 0.20f );		// -17 -> +45 (dawn)
 }
 
 float SunYaw( float ph )
 {
-	return 95.0f + 20.0f * ph;	// rises roughly opposite the setting moon
+	return ( ph < 0.5f ) ? 285.0f : 95.0f;	// sets in the west, dawns in the east
 }
 
 // Blood-moon factor: a triangular pulse centered on midnight (phase 0.5). Kept
@@ -349,48 +351,63 @@ void SkyRenderer::DrawDebugFullscreen( const ViewSetup &view )
 
 void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 {
-	// --- Phase-driven night tint (was static). Multiplied by the world/studio
-	// base passes (u_ambTint). Cold+dark at midnight, neutral by daylight; the
-	// blue lives HERE, not in the directional light color. ---
-	float tNight = Smooth01( 0.0f, 0.5f, phase );	// 0 nightfall .. 1 midnight
-	float tDay = Smooth01( 0.55f, 1.0f, phase );	// 0 .. 1 toward daylight
+	// --- Ambient tint (multiplies the baked lightmap in the world/studio base
+	// pass). The map's OVERALL brightness lives HERE: warm + bright at sunset
+	// (round start), darkening to a cold, dim midnight, back to neutral by day.
+	// Net brightness DECREASES from sunset to midnight -- as the moon rises the
+	// map gets DARKER, not brighter (the moonlight below is only a faint accent). ---
+	float sunsetR = 0.98f, sunsetG = 0.80f, sunsetB = 0.60f;	// sunset: warm, bright
+	float midR = 0.16f, midG = 0.19f, midB = 0.30f;			// midnight: cold, dark
+	float dayR = 1.00f, dayG = 1.00f, dayB = 1.00f;			// daylight: neutral
+	if( phase < 0.5f )
+	{
+		float t = Smooth01( 0.0f, 0.5f, phase );		// sunset -> midnight
+		amb.tint[0] = sunsetR + ( midR - sunsetR ) * t;
+		amb.tint[1] = sunsetG + ( midG - sunsetG ) * t;
+		amb.tint[2] = sunsetB + ( midB - sunsetB ) * t;
+	}
+	else
+	{
+		float t = Smooth01( 0.5f, 1.0f, phase );		// midnight -> daylight
+		amb.tint[0] = midR + ( dayR - midR ) * t;
+		amb.tint[1] = midG + ( dayG - midG ) * t;
+		amb.tint[2] = midB + ( dayB - midB ) * t;
+	}
 
-	// Nightfall -> midnight: drift toward a cold, dim multiplier.
-	float midR = 0.34f, midG = 0.40f, midB = 0.58f;
-	float nfR = 0.55f, nfG = 0.60f, nfB = 0.78f;
-	float r = nfR + ( midR - nfR ) * tNight;
-	float g = nfG + ( midG - nfG ) * tNight;
-	float b = nfB + ( midB - nfB ) * tNight;
-	// Midnight -> daylight: lerp back to neutral (1,1,1).
-	amb.tint[0] = r + ( 1.0f - r ) * tDay;
-	amb.tint[1] = g + ( 1.0f - g ) * tDay;
-	amb.tint[2] = b + ( 1.0f - b ) * tDay;
-
-	// --- Dominant celestial directional light (CROSS-FILE contract): moon at
-	// night, sun across the dawn window. Cross-fade so the lit side does not
-	// pop. Written into moonlightDir/Color (the world+studio base pass L). ---
-	float sunWeight = Smooth01( 0.80f, 0.95f, phase );	// 0 = moon, 1 = sun
+	// --- Dominant celestial directional light (CROSS-FILE contract: the world +
+	// studio base passes add base*moonlightColor*max(N.L,0)). The setting/rising
+	// SUN is warm and moderate; the MOON is cool and FAINT -- moonlight gives
+	// directional SHAPE to a dark night, it must never brighten the scene past the
+	// dimmed ambient (that was the round-start "moon makes the map brighter" bug). ---
+	float sElev = SunElev( phase );
+	float mElev = MoonElev( phase );
 	float sunDir[3], moonDir[3];
 
-	ElevYawDir( SunElev( phase ), SunYaw( phase ), sunDir );
-	ElevYawDir( MoonElev( phase ), MoonYaw( phase ), moonDir );
+	ElevYawDir( sElev, SunYaw( phase ), sunDir );
+	ElevYawDir( mElev, MoonYaw( phase ), moonDir );
 
 #if defined( CSZ_DEV_TOOLS )
 	if( s_devSunOn )
 		ElevYawDir( s_devSunElev, s_devSunYaw, sunDir );
 #endif
 
-	// Moonlight intensity rides the night arc (brightest at midnight, gone by
-	// day); sunlight ramps in over the dawn window. Cool-neutral moon color.
-	float moonLit = ( 1.0f - sunWeight ) * ( 0.25f + 0.55f * Smooth01( 0.05f, 0.5f, phase ));
-	float sunLit = sunWeight * 1.0f;
+	// Each light is gated by how far its body is ABOVE the horizon: the sun lights
+	// the scene only at sunset/dawn, the moon only through the night. The moon cap
+	// (0.13) is deliberately tiny -- a faint cool fill, not a second sun.
+	float sunLit = clampf01( ( sElev + 4.0f ) / 14.0f ) * 0.42f;	// warm sun (sunset/dawn)
+	float moonLit = clampf01( mElev / 28.0f ) * 0.13f;		// faint cool moonlight
 
+	const float moonRGB[3] = { 0.55f, 0.63f, 0.82f };	// cool (blue also lives in the tint)
+	const float sunRGB[3] = { 1.00f, 0.78f, 0.50f };	// warm
+
+	// Blend the two by intensity into the single published directional light.
+	float wSum = sunLit + moonLit + 1e-5f;
 	float lmDir[3];
 	float lmColor[3];
 
-	lmDir[0] = moonDir[0] + ( sunDir[0] - moonDir[0] ) * sunWeight;
-	lmDir[1] = moonDir[1] + ( sunDir[1] - moonDir[1] ) * sunWeight;
-	lmDir[2] = moonDir[2] + ( sunDir[2] - moonDir[2] ) * sunWeight;
+	lmDir[0] = ( sunDir[0] * sunLit + moonDir[0] * moonLit ) / wSum;
+	lmDir[1] = ( sunDir[1] * sunLit + moonDir[1] * moonLit ) / wSum;
+	lmDir[2] = ( sunDir[2] * sunLit + moonDir[2] * moonLit ) / wSum;
 
 	float len = sqrtf( lmDir[0] * lmDir[0] + lmDir[1] * lmDir[1] + lmDir[2] * lmDir[2] );
 	if( len > 1e-5f )
@@ -399,14 +416,12 @@ void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 		lmDir[0] *= inv; lmDir[1] *= inv; lmDir[2] *= inv;
 	}
 
-	// Color premultiplied by intensity (the world FS does col += base*lmColor*N.L
-	// with no separate strength term, matching AmbienceParams' premul convention).
-	const float moonRGB[3] = { 0.72f, 0.78f, 0.90f };
-	const float sunRGB[3] = { 1.0f, 0.88f, 0.66f };
+	// Color premultiplied by intensity (world FS adds base*lmColor*N.L, no separate
+	// strength term -- matches the AmbienceParams premul convention).
 	for( int i = 0; i < 3; i++ )
-		lmColor[i] = moonRGB[i] * moonLit + sunRGB[i] * sunLit;
+		lmColor[i] = sunRGB[i] * sunLit + moonRGB[i] * moonLit;
 
-	amb.moonlightEnabled = ( moonLit + sunLit ) > 0.001f;
+	amb.moonlightEnabled = ( sunLit + moonLit ) > 0.001f;
 	amb.moonlightDir[0] = lmDir[0];
 	amb.moonlightDir[1] = lmDir[1];
 	amb.moonlightDir[2] = lmDir[2];
@@ -414,10 +429,9 @@ void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 	amb.moonlightColor[1] = lmColor[1];
 	amb.moonlightColor[2] = lmColor[2];
 
-	// --- Also drive the sky-object moon fields for any consumer that reads
-	// them (the sky FS computes its own body positions from phase, so these are
-	// informational/parity only). Visible when the moon is above the horizon. ---
-	amb.moonEnabled = moonDir[2] > -0.05f && sunWeight < 0.999f;
+	// --- Informational moon-object fields (the sky FS computes its own body
+	// positions from phase, so these are parity only). Moon up = above horizon. ---
+	amb.moonEnabled = mElev > -2.0f;
 	amb.moonDir[0] = moonDir[0];
 	amb.moonDir[1] = moonDir[1];
 	amb.moonDir[2] = moonDir[2];

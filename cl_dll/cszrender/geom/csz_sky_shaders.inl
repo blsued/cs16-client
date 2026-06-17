@@ -97,9 +97,9 @@ float hash13( vec3 p )
 // space; the renderer is not gamma-managed past this point (matches world FS).
 void skyColors( float ph, out vec3 zenith, out vec3 horizon )
 {
-	// Nightfall (deep blue, dusk band low on the horizon).
-	vec3 nfZen = vec3( 0.020, 0.035, 0.075 );
-	vec3 nfHor = vec3( 0.060, 0.065, 0.110 );
+	// Sunset / round start (warm horizon glow, deep blue-violet zenith).
+	vec3 nfZen = vec3( 0.090, 0.105, 0.230 );
+	vec3 nfHor = vec3( 0.820, 0.380, 0.180 );
 	// Midnight (darkest, cold).
 	vec3 mnZen = vec3( 0.006, 0.010, 0.028 );
 	vec3 mnHor = vec3( 0.018, 0.024, 0.050 );
