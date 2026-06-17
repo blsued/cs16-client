@@ -57,10 +57,10 @@ namespace
 
 const float kDegToRad = 3.14159265358979323846f / 180.0f;
 
-// One full nightfall->midnight->dawn->daylight cycle, in seconds. Long enough
-// that the cycle is a slow ambience drift, not a strobe; the dev cvar freezes
-// it for the G1/G2 phase checks.
-const float kCycleSeconds = 600.0f;
+// One full sunset->midnight->dawn cycle, in seconds. Free-running off ClientTime
+// (round-synced start is M5 gameplay wiring, deferred); ~300s lets a single round
+// show a fuller arc. The dev cvar csz_sky_phase freezes it for checks.
+const float kCycleSeconds = 300.0f;
 
 // Angular radii (degrees) of the two discs. Real sun/moon are ~0.5deg; bumped
 // a touch so the body reads at gameplay FOV without a telescope.
@@ -150,12 +150,13 @@ float SunYaw( float ph )
 	return ( ph < 0.5f ) ? 285.0f : 95.0f;	// sets in the west, dawns in the east
 }
 
-// Blood-moon factor: a triangular pulse centered on midnight (phase 0.5). Kept
-// as a curve (not a binary) so it eases in/out; G-soft "ominous not broken".
+// Blood-moon factor: a triangular pulse centered TIGHTLY on midnight (0.5 +/-
+// 0.08). Outside that the moon stays its normal cool white -- blood moon is a
+// midnight-only event, it must not tint the ordinary night moon pink/red.
 float BloodMoonFactor( float ph )
 {
 	float d = fabsf( ph - 0.5f );
-	return clampf01( 1.0f - d * ( 1.0f / 0.18f ) );
+	return clampf01( 1.0f - d * ( 1.0f / 0.08f ) );
 }
 
 #if defined( CSZ_DEV_TOOLS )
@@ -356,15 +357,22 @@ void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 	// (round start), darkening to a cold, dim midnight, back to neutral by day.
 	// Net brightness DECREASES from sunset to midnight -- as the moon rises the
 	// map gets DARKER, not brighter (the moonlight below is only a faint accent). ---
-	float sunsetR = 0.98f, sunsetG = 0.80f, sunsetB = 0.60f;	// sunset: warm, bright
-	float midR = 0.16f, midG = 0.19f, midB = 0.30f;			// midnight: cold, dark
+	float sunsetR = 0.95f, sunsetG = 0.76f, sunsetB = 0.55f;	// sunset: warm, 2nd-brightest (below dawn)
+	float midR = 0.07f, midG = 0.10f, midB = 0.19f;			// midnight: cold, very dark
 	float dayR = 1.00f, dayG = 1.00f, dayB = 1.00f;			// daylight: neutral
-	if( phase < 0.5f )
+	if( phase < 0.18f )		// sunset -> cool blue night (fast handoff; the dusk-lingers fix)
 	{
-		float t = Smooth01( 0.0f, 0.5f, phase );		// sunset -> midnight
-		amb.tint[0] = sunsetR + ( midR - sunsetR ) * t;
-		amb.tint[1] = sunsetG + ( midG - sunsetG ) * t;
-		amb.tint[2] = sunsetB + ( midB - sunsetB ) * t;
+		float t = Smooth01( 0.0f, 0.18f, phase );
+		amb.tint[0] = sunsetR + ( 0.17f - sunsetR ) * t;
+		amb.tint[1] = sunsetG + ( 0.23f - sunsetG ) * t;
+		amb.tint[2] = sunsetB + ( 0.37f - sunsetB ) * t;
+	}
+	else if( phase < 0.5f )		// cool night -> midnight (stays blue, keeps darkening)
+	{
+		float t = Smooth01( 0.18f, 0.5f, phase );
+		amb.tint[0] = 0.17f + ( midR - 0.17f ) * t;
+		amb.tint[1] = 0.23f + ( midG - 0.23f ) * t;
+		amb.tint[2] = 0.37f + ( midB - 0.37f ) * t;
 	}
 	else
 	{
@@ -393,9 +401,10 @@ void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 
 	// Each light is gated by how far its body is ABOVE the horizon: the sun lights
 	// the scene only at sunset/dawn, the moon only through the night. The moon cap
-	// (0.13) is deliberately tiny -- a faint cool fill, not a second sun.
+	// (0.10) is deliberately tiny -- a faint cool fill, not a second sun; night must
+	// stay darker than both sunset and dawn.
 	float sunLit = clampf01( ( sElev + 4.0f ) / 14.0f ) * 0.42f;	// warm sun (sunset/dawn)
-	float moonLit = clampf01( mElev / 28.0f ) * 0.13f;		// faint cool moonlight
+	float moonLit = clampf01( mElev / 28.0f ) * 0.10f;		// faint cool moonlight
 
 	const float moonRGB[3] = { 0.55f, 0.63f, 0.82f };	// cool (blue also lives in the tint)
 	const float sunRGB[3] = { 1.00f, 0.78f, 0.50f };	// warm

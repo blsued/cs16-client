@@ -98,24 +98,34 @@ float hash13( vec3 p )
 void skyColors( float ph, out vec3 zenith, out vec3 horizon )
 {
 	// Sunset / round start (warm horizon glow, deep blue-violet zenith).
-	vec3 nfZen = vec3( 0.090, 0.105, 0.230 );
-	vec3 nfHor = vec3( 0.820, 0.380, 0.180 );
-	// Midnight (darkest, cold).
-	vec3 mnZen = vec3( 0.006, 0.010, 0.028 );
-	vec3 mnHor = vec3( 0.018, 0.024, 0.050 );
+	vec3 ssZen = vec3( 0.090, 0.105, 0.230 );
+	vec3 ssHor = vec3( 0.820, 0.380, 0.180 );
+	// Night (cool blue moonlit): the warm sunset is gone by ~phase 0.18, so the
+	// night reads blue/moonlit, not a lingering orange dusk.
+	vec3 ntZen = vec3( 0.012, 0.022, 0.060 );
+	vec3 ntHor = vec3( 0.035, 0.055, 0.115 );
+	// Midnight (darkest, cold blue).
+	vec3 mnZen = vec3( 0.005, 0.008, 0.024 );
+	vec3 mnHor = vec3( 0.014, 0.020, 0.045 );
 	// Dawn / daylight (warm gold horizon, brightening zenith blue).
 	vec3 dwZen = vec3( 0.230, 0.330, 0.520 );
 	vec3 dwHor = vec3( 0.900, 0.560, 0.300 );
 
-	if( ph < 0.5 )
+	if( ph < 0.18 )                              // sunset -> cool night (fast handoff)
 	{
-		float t = smoothstep( 0.0, 0.5, ph );   // nightfall -> midnight
-		zenith  = mix( nfZen, mnZen, t );
-		horizon = mix( nfHor, mnHor, t );
+		float t = smoothstep( 0.0, 0.18, ph );
+		zenith  = mix( ssZen, ntZen, t );
+		horizon = mix( ssHor, ntHor, t );
 	}
-	else
+	else if( ph < 0.5 )                          // night -> midnight (darkening, stays cool)
 	{
-		float t = smoothstep( 0.5, 1.0, ph );   // midnight -> dawn/day
+		float t = smoothstep( 0.18, 0.5, ph );
+		zenith  = mix( ntZen, mnZen, t );
+		horizon = mix( ntHor, mnHor, t );
+	}
+	else                                         // midnight -> dawn/day
+	{
+		float t = smoothstep( 0.5, 1.0, ph );
 		zenith  = mix( mnZen, dwZen, t );
 		horizon = mix( mnHor, dwHor, t );
 	}
