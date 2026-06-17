@@ -79,7 +79,7 @@ float s_viewOrigin[3];
 float s_viewAngles[3];
 bool s_haveView;
 
-cvar_t *s_cvarTestLight;	// csz_testlight (default 1: M1 demo light on)
+cvar_t *s_cvarTestLight;	// csz_testlight (default 0: opt-in M1/M2 test fixture, off by default)
 cvar_t *s_cvarShadow;		// csz_light_shadow (B-class quality seam, default 1)
 
 // T-spawn parse cache, keyed by map name (re-parsed on map change).
@@ -489,7 +489,7 @@ void RegisterLightingCommands()
 	gEngfuncs.pfnAddCommand( "csz_testspot", TestSpotCommand );
 
 	if( s_cvarTestLight == NULL )
-		s_cvarTestLight = gEngfuncs.pfnRegisterVariable( "csz_testlight", "1", FCVAR_CLIENTDLL );
+		s_cvarTestLight = gEngfuncs.pfnRegisterVariable( "csz_testlight", "0", FCVAR_CLIENTDLL );
 
 	if( s_cvarShadow == NULL )
 		s_cvarShadow = gEngfuncs.pfnRegisterVariable( "csz_light_shadow", "1", FCVAR_CLIENTDLL );
