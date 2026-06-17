@@ -16,6 +16,7 @@ set(CSZRENDER_SRC
 	fog/csz_fog.cpp
 	geom/csz_world.cpp
 	geom/csz_lightmap.cpp
+	geom/csz_sky.cpp
 	geom/csz_sprite.cpp
 	geom/csz_studio.cpp
 	geom/csz_studio_bones.cpp

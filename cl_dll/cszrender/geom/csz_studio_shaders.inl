@@ -93,6 +93,8 @@ uniform vec3 u_shadeColor;
 uniform vec3 u_shadeDir;
 uniform vec4 u_fog;               // rgb = fog color (linear), w = density; w<=0 -> off
 uniform vec3 u_ambTint;           // night tint; (1,1,1) neutral
+uniform vec3 u_sunDir;            // surface -> dominant body, normalized; base pass only
+uniform vec3 u_sunColor;          // intensity-premultiplied light color; (0,0,0) = off
 out vec4 fragColor;
 void main()
 {
@@ -103,6 +105,11 @@ void main()
 	float ndl = max( dot( n, u_shadeDir ), 0.0 );
 	vec3 col = base.rgb * ( u_ambient + u_shadeColor * ndl );
 	col *= u_ambTint;
+	// Shadowless directional sun/moon (Option A, base pass only, pitfall 23):
+	// add N.L on top of the model's own lambert before the fog mix. v_normal is
+	// bone-transformed to world space (kStudioVs), same space as u_sunDir.
+	// u_sunColor is 0 when the body light is off, so the term vanishes.
+	col += base.rgb * u_sunColor * max( dot( n, u_sunDir ), 0.0 );
 	float fogDepth = gl_FragCoord.z / gl_FragCoord.w;      // cheap view depth (clean-room f)
 	float fogF = ( u_fog.w > 0.0 ) ? clamp( exp2( -u_fog.w * fogDepth ), 0.0, 1.0 ) : 1.0;
 	fragColor = vec4( mix( u_fog.rgb, col, fogF ), 1.0 );

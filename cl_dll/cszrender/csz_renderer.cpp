@@ -40,6 +40,7 @@
 #include "core/csz_fatal.h"
 #include "core/csz_view.h"
 #include "fog/csz_fog.h"
+#include "geom/csz_sky.h"
 #include "geom/csz_sprite.h"
 #include "geom/csz_studio.h"
 #include "geom/csz_studio_texture.h"
@@ -192,6 +193,7 @@ void Renderer::OnHudInit()
 	RegisterStudioTextureCvars();	// csz_dev_armskin (spec 4.3.1 layer 1 dev probe)
 	RegisterViewmodelDevCvars();	// csz_dev_viewmodel (dev stand-in model)
 	g_fog.RegisterDevCommands();	// csz_devfog/csz_devtint/csz_devmoon (A1; CSZ_DEV_TOOLS only)
+	g_sky.RegisterDevCvars();	// csz_sky_phase (always) + csz_devsun (CSZ_DEV_TOOLS only)
 }
 
 void Renderer::OnVidInit()
@@ -257,6 +259,12 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 
 	view.ambience = g_fog.Current();				// slot 7.2: ambience snapshot (A1)
 
+	// Sky overwrites the snapshot with the phase-driven night tint + dominant
+	// celestial light dir/color BEFORE any pass uploads it (A3): the world/
+	// studio base passes consume amb.tint + amb.moonlightDir/Color.
+	float ph = g_sky.ComputePhase();
+	g_sky.PublishLighting( view.ambience, ph );
+
 	g_lights.UpdateMatrices();					// slot 7.6: light matrix update
 
 	EnterTakeover();						// slot 8
@@ -285,7 +293,9 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 
 	ApplyMainViewport( rvp, clearColor );				// slot 10
 
-	BeginPass( kTmSky );						// slot 10.5 placeholder: sky pass lands in A3
+	BeginPass( kTmSky );						// slot 10.5: procedural day/night sky (A3)
+	g_sky.EnsureBuilt();
+	g_sky.DrawSky( view );
 	EndPass( kTmSky );
 
 	BeginPass( kTmWorld );

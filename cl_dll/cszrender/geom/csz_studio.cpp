@@ -67,6 +67,7 @@ struct PassLocs
 	int uViewProj, uBones, uAlphaTest, uChrome, uViewRight, uViewUp;
 	int uAmbient, uShadeColor;					// base program only
 	int uFog, uAmbTint;						// base program only (M2a fog/night; lit/depth fog-free, pitfall 23)
+	int uSunDir, uSunColor;						// base program only (sky 档1 directional N.L; lit/depth exempt, pitfall 23)
 	int uLightOrigin, uLightDir, uLightColor;			// lit program only
 	int uLightRadius, uCosInner, uCosOuter, uMatShadow, uHasShadow;	// lit program only
 };
@@ -105,6 +106,8 @@ void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 	out.uShadeColor = UniformLoc( prog, "u_shadeColor" );
 	out.uFog = UniformLoc( prog, "u_fog" );
 	out.uAmbTint = UniformLoc( prog, "u_ambTint" );
+	out.uSunDir = UniformLoc( prog, "u_sunDir" );
+	out.uSunColor = UniformLoc( prog, "u_sunColor" );
 	out.uLightOrigin = UniformLoc( prog, "u_lightOrigin" );
 	out.uLightDir = UniformLoc( prog, "u_lightDir" );
 	out.uLightColor = UniformLoc( prog, "u_lightColor" );
@@ -473,6 +476,10 @@ void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, cons
 
 	glUniform4fv( locs.uFog, 1, fogVec );
 	glUniform3fv( locs.uAmbTint, 1, amb.tint );
+	// Directional N.L (sky 档1): only the base program declares u_sunDir/u_sunColor;
+	// lit/depth locs are -1 (glUniform* no-op), so those passes stay exempt (pitfall 23).
+	glUniform3fv( locs.uSunDir, 1, amb.moonlightDir );
+	glUniform3fv( locs.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
 
 	float fwd[3], right[3], up[3];
 

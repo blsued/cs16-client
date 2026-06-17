@@ -59,10 +59,16 @@ uniform mat4 u_viewProj;
 uniform mat4 u_model;
 out vec2 v_uv;
 out vec2 v_lmuv;
+out vec3 v_normal;
 void main()
 {
 	v_uv = a_uv;
 	v_lmuv = a_lmuv;
+	// World-space normal forwarded raw (BSP face plane normal, baked world-space
+	// at build time, csz_world.cpp:330). u_model is not applied: the lit VS
+	// (kWorldLitVs) likewise forwards a_normal unrotated, so the base directional
+	// term matches the lit pass for moving brush submodels (parity choice).
+	v_normal = a_normal;
 	gl_Position = u_viewProj * ( u_model * vec4( a_pos, 1.0 ));
 }
 )GLSL";
@@ -74,11 +80,14 @@ void main()
 static const char kWorldFs[] = R"GLSL(#version 330 core
 in vec2 v_uv;
 in vec2 v_lmuv;
+in vec3 v_normal;
 uniform sampler2D u_texDiffuse;   // unit 0
 uniform sampler2D u_texLightmap;  // unit 1
 uniform float u_alphaTest;        // 0 = off, else discard threshold (0.25)
 uniform vec4 u_fog;               // rgb = fog color (linear), w = density; w<=0 -> off
 uniform vec3 u_ambTint;           // night tint; (1,1,1) neutral
+uniform vec3 u_sunDir;            // surface -> dominant body, normalized; base pass only
+uniform vec3 u_sunColor;          // intensity-premultiplied light color; (0,0,0) = off
 uniform float u_brushAlpha;       // per-entity translucency (curstate.renderamt/255); 1.0 = opaque/world
 out vec4 fragColor;
 void main()
@@ -89,6 +98,10 @@ void main()
 	vec3 lm = texture( u_texLightmap, v_lmuv ).rgb;
 	vec3 col = base.rgb * lm * ( 2.0 * 128.0 / 192.0 );
 	col *= u_ambTint;
+	// Shadowless directional sun/moon (Option A, base pass only, pitfall 23):
+	// add N.L on top of the baked lightmap before the fog mix. u_sunColor is 0
+	// when the publisher hasn't enabled the light, so the term vanishes.
+	col += base.rgb * u_sunColor * max( dot( normalize( v_normal ), u_sunDir ), 0.0 );
 	float fogDepth = gl_FragCoord.z / gl_FragCoord.w;      // cheap view depth (clean-room f)
 	float fogF = ( u_fog.w > 0.0 ) ? clamp( exp2( -u_fog.w * fogDepth ), 0.0, 1.0 ) : 1.0;
 	fragColor = vec4( mix( u_fog.rgb, col, fogF ), base.a * u_brushAlpha );

@@ -96,6 +96,7 @@ struct WorldState
 	int uViewProj, uAlphaTest;
 	int uModel;			// base-pass model->world transform (identity for world; per-entity for brush, E1)
 	int uFog, uAmbTint;		// base pass only (M2a fog/night; lit/depth stay fog-free, pitfall 23)
+	int uSunDir, uSunColor;		// base pass only (sky 档1 directional N.L; lit/depth exempt, pitfall 23)
 	int uBrushAlpha;		// per-entity translucency for blended brush modes (renderamt); 1.0 = opaque/world
 	ShaderProgram litProgram;	// additive per-light pass (T6)
 	int litUViewProj, litUAlphaTest;
@@ -770,6 +771,8 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.uModel = UniformLoc( s_world.program, "u_model" );
 	s_world.uFog = UniformLoc( s_world.program, "u_fog" );
 	s_world.uAmbTint = UniformLoc( s_world.program, "u_ambTint" );
+	s_world.uSunDir = UniformLoc( s_world.program, "u_sunDir" );
+	s_world.uSunColor = UniformLoc( s_world.program, "u_sunColor" );
 	s_world.uBrushAlpha = UniformLoc( s_world.program, "u_brushAlpha" );
 
 	UseProgram( s_world.program.program );
@@ -883,6 +886,8 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 
 	glUniform4fv( s_world.uFog, 1, fogVec );
 	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
+	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
+	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
 
 	BindVao( s_world.vao );
 	SetCull( false );	// BSP faces are culled per-face below (plan step 3)
@@ -1069,6 +1074,8 @@ void WorldRenderer::DrawBrushOpaque( const ViewSetup &view, cl_entity_s *const *
 
 	glUniform4fv( s_world.uFog, 1, fogVec );
 	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
+	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
+	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
 
 	BindVao( s_world.vao );
 	SetCull( false );		// per-face plane-side cull (model space) below
@@ -1180,6 +1187,8 @@ void WorldRenderer::DrawBrushTransparent( const ViewSetup &view, cl_entity_s *co
 
 	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
 	glUniform4fv( s_world.uFog, 1, fogVec );	// fog on baseline (per-mode toggles off below)
+	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
+	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
 
 	BindVao( s_world.vao );
 	SetCull( false );
