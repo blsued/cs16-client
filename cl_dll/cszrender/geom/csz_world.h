@@ -36,6 +36,7 @@
 #include "../core/csz_view.h"
 #include "../core/csz_light_types.h"
 typedef struct model_s model_t;
+struct cl_entity_s;
 namespace csz
 {
 class WorldRenderer
@@ -46,6 +47,12 @@ public:
 	void MarkLightmapsDirty();           // GL_BuildLightmaps / gamma change
 	void BuildVisibleSet( const ViewSetup &view );   // fat-PVS leaf scan + frustum cull -> visible surface list
 	void DrawOpaque( const ViewSetup &view );        // diffuse * lightmap(style 0); '{' alpha-test; sky/turb skipped
+	// Brush submodels (func_*, doors) drawn from the SAME static VBO via a
+	// per-entity model matrix (E1). Opaque ones go in the opaque domain right
+	// after the world; transparent ones (resolved rendermode != kRenderNormal)
+	// share the trans domain with sprites, sorted back-to-front internally.
+	void DrawBrushOpaque( const ViewSetup &view, cl_entity_s *const *ents, int count );
+	void DrawBrushTransparent( const ViewSetup &view, cl_entity_s *const *ents, int count );
 	void DrawDepth( const ViewSetup &lightView, const Frustum &lightCull );
 	void DrawLitAdditive( const ViewSetup &view, const SpotLightParams &light );
 	bool IsBuilt() const;

@@ -94,7 +94,9 @@ struct WorldState
 	unsigned int vao, vbo;
 	ShaderProgram program;
 	int uViewProj, uAlphaTest;
+	int uModel;			// base-pass model->world transform (identity for world; per-entity for brush, E1)
 	int uFog, uAmbTint;		// base pass only (M2a fog/night; lit/depth stay fog-free, pitfall 23)
+	int uBrushAlpha;		// per-entity translucency for blended brush modes (renderamt); 1.0 = opaque/world
 	ShaderProgram litProgram;	// additive per-light pass (T6)
 	int litUViewProj, litUAlphaTest;
 	int litULightOrigin, litULightDir, litULightColor;
@@ -109,6 +111,16 @@ struct WorldState
 	int numFaces, numOpaque;
 	int numSky, numTurb;
 	int whiteTexSlot;
+
+	// Brush submodels (E1): every BSP surface NOT owned by worldmodel
+	// submodel 0, built into the SAME VBO. brushFaces[] is dense and ordered
+	// by global surface index; brushForGlobal[] maps a global surface index to
+	// its brushFaces[] slot (-1 for world surfaces), so a brush entity's
+	// contiguous [firstmodelsurface, +nummodelsurfaces) range resolves to a
+	// contiguous brushFaces[] run.
+	FaceRec *brushFaces;
+	int *brushForGlobal;		// [bsp->numsurfaces]; -1 = world surface
+	int numBrushFaces;
 };
 
 WorldState s_world;
@@ -221,6 +233,146 @@ const unsigned char *FaceLightBlock( const EngSurface &surf, int smax, int tmax 
 	return s_blockScratch;
 }
 
+// Fills a FaceRec from one BSP surface (plane/bounds/texture/alpha-test +
+// lightmap atlas allocation/upload). Returns false for sky/turb surfaces (no
+// geometry emitted). Shared by the world (submodel 0) and brush (E1) builds so
+// neither path duplicates the per-surface setup. globalIndex indexes into
+// bsp->surfaces[]; localSlot is the value stored in FaceRec.surfIndex (the
+// world uses its local face index for visible[]; brush stores globalIndex).
+// maxPage tracks the highest atlas page touched across both builds.
+bool BuildFaceRec( const EngModel *bsp, int globalIndex, int localSlot, FaceRec &f,
+	int *badTexWarned, int *atlasFullWarned, int *maxPage )
+{
+	const EngSurface &surf = bsp->surfaces[globalIndex];
+
+	memset( &f, 0, sizeof( f ));
+	f.surfIndex = localSlot;
+	f.firstVert = -1;
+	f.lmPage = -1;
+
+	const mplane_t *plane = surf.plane;
+
+	f.planeBack = ( surf.flags & kSurfPlaneBack ) != 0;
+	f.planeNormal[0] = plane->normal[0];
+	f.planeNormal[1] = plane->normal[1];
+	f.planeNormal[2] = plane->normal[2];
+	f.planeDist = plane->dist;
+
+	for( int j = 0; j < 3; j++ )
+	{
+		f.mins[j] = surf.info->mins[j];
+		f.maxs[j] = surf.info->maxs[j];
+	}
+
+	if( surf.flags & kSurfDrawSky )
+		return false;
+
+	if( surf.flags & kSurfDrawTurb )
+		return false;
+
+	const EngTexinfo *ti = surf.texinfo;
+	const EngTexture *tex = ti->texture;
+
+	f.texSlot = ( tex != NULL ) ? tex->gl_texturenum : 0;
+
+	if( f.texSlot == 0 )
+	{
+		f.texSlot = s_world.whiteTexSlot;
+
+		if( badTexWarned != NULL && (*badTexWarned)++ == 0 )
+			CSZ_LogWarn( "world", "surface %d has no engine texture slot; using *white", globalIndex );
+	}
+
+	f.alphaTest = ( tex != NULL && tex->name[0] == '{' ) ? 0.25f : 0.0f;
+
+	const EngExtraSurf *info = surf.info;
+	int sampleSize = FaceSampleSize( globalIndex );
+	int smax = ( info->lightextents[0] / sampleSize ) + 1;
+	int tmax = ( info->lightextents[1] / sampleSize ) + 1;
+	int page = 0, bx = 0, by = 0;
+
+	if( g_lightmaps.Allocate( smax, tmax, &page, &bx, &by ))
+	{
+		f.lmPage = page;
+		f.lmX = bx;
+		f.lmY = by;
+		f.smax = smax;
+		f.tmax = tmax;
+		g_lightmaps.UploadBlock( page, bx, by, smax, tmax, FaceLightBlock( surf, smax, tmax ));
+
+		if( maxPage != NULL && page > *maxPage )
+			*maxPage = page;
+	}
+	else if( atlasFullWarned != NULL && (*atlasFullWarned)++ == 0 )
+	{
+		CSZ_LogError( "world", "lightmap atlas full at surface %d (%dx%d); face samples page 0 origin",
+			globalIndex, smax, tmax );
+	}
+
+	return true;
+}
+
+// Packs one face's vertices (10-float interleaved layout) into verts[] at
+// vertCursor and stamps f.firstVert/f.numVerts. Vertices are emitted in the
+// surface's local model space; the world's submodel-0 origin is (0,0,0) so its
+// faces are effectively world-space, while brush submodels carry their offset
+// in the per-draw u_model matrix.
+void EmitFaceVerts( const EngModel *bsp, int globalIndex, FaceRec &f, float *verts, int vertCursor )
+{
+	const EngSurface &surf = bsp->surfaces[globalIndex];
+	const EngTexinfo *ti = surf.texinfo;
+	const EngTexture *tex = ti->texture;
+	const EngExtraSurf *info = surf.info;
+
+	f.firstVert = vertCursor;
+	f.numVerts = surf.numedges;
+
+	float nx = f.planeBack ? -f.planeNormal[0] : f.planeNormal[0];
+	float ny = f.planeBack ? -f.planeNormal[1] : f.planeNormal[1];
+	float nz = f.planeBack ? -f.planeNormal[2] : f.planeNormal[2];
+
+	for( int e = 0; e < surf.numedges; e++ )
+	{
+		int vi = FetchEdgeVertex( bsp, bsp->surfedges[surf.firstedge + e] );
+		const float *pos = bsp->vertexes[vi].position;
+		float *out = &verts[(size_t)( vertCursor + e ) * kVertexFloats];
+
+		out[0] = pos[0];
+		out[1] = pos[1];
+		out[2] = pos[2];
+
+		float su = pos[0] * ti->vecs[0][0] + pos[1] * ti->vecs[0][1] + pos[2] * ti->vecs[0][2] + ti->vecs[0][3];
+		float tv = pos[0] * ti->vecs[1][0] + pos[1] * ti->vecs[1][1] + pos[2] * ti->vecs[1][2] + ti->vecs[1][3];
+
+		out[3] = ( tex != NULL ) ? su / (float)tex->width : 0.0f;
+		out[4] = ( tex != NULL ) ? tv / (float)tex->height : 0.0f;
+
+		if( f.lmPage >= 0 )
+		{
+			float ls = pos[0] * info->lmvecs[0][0] + pos[1] * info->lmvecs[0][1] +
+				pos[2] * info->lmvecs[0][2] + info->lmvecs[0][3] - (float)info->lightmapmins[0];
+			float lt = pos[0] * info->lmvecs[1][0] + pos[1] * info->lmvecs[1][1] +
+				pos[2] * info->lmvecs[1][2] + info->lmvecs[1][3] - (float)info->lightmapmins[1];
+
+			int sampleSize = FaceSampleSize( globalIndex );
+
+			out[5] = ((float)f.lmX * sampleSize + ls + 0.5f * sampleSize ) /
+				(float)( LightmapAtlas::kPageSize * sampleSize );
+			out[6] = ((float)f.lmY * sampleSize + lt + 0.5f * sampleSize ) /
+				(float)( LightmapAtlas::kPageSize * sampleSize );
+		}
+		else
+		{
+			out[5] = 0.0f;
+			out[6] = 0.0f;
+		}
+
+		out[7] = nx;
+		out[8] = ny;
+		out[9] = nz;
+	}
+}
+
 struct OpaqueSortKey
 {
 	int faceIndex;
@@ -289,7 +441,91 @@ void ReuploadLightmaps()
 			FaceLightBlock( surf, f.smax, f.tmax ));
 	}
 
-	CSZ_LogDev( "world", "lightmaps re-uploaded (%d faces)", s_world.numFaces );
+	// Brush submodel faces share the atlas; surfIndex holds the GLOBAL index.
+	for( int i = 0; i < s_world.numBrushFaces; i++ )
+	{
+		const FaceRec &f = s_world.brushFaces[i];
+
+		if( f.lmPage < 0 || f.smax <= 0 )
+			continue;
+
+		const EngSurface &surf = s_world.bsp->surfaces[f.surfIndex];
+
+		g_lightmaps.UploadBlock( f.lmPage, f.lmX, f.lmY, f.smax, f.tmax,
+			FaceLightBlock( surf, f.smax, f.tmax ));
+	}
+
+	CSZ_LogDev( "world", "lightmaps re-uploaded (%d world + %d brush faces)",
+		s_world.numFaces, s_world.numBrushFaces );
+}
+
+// ---------------------------------------------------------------------------
+// Brush entity helpers (E1). A brush submodel's geometry is baked in its local
+// model space; the entity carries an origin/angles transform that the engine's
+// R_DrawBrushModel would apply. We rebuild that transform as a per-draw model
+// matrix (translate * rotate), default identity for entities sitting at the
+// origin with no angles (the common func_wall / static brush case).
+// ---------------------------------------------------------------------------
+
+// Column-major model->world matrix: basis columns forward / -right / up
+// (GoldSrc brush orientation; right is negated because Quake's right vector
+// points to the entity's right while the +Y model axis points left), column 3
+// = entity origin. Identity falls out for zero origin/angles.
+void BuildBrushModelMatrix( const cl_entity_t *ent, Mat4 &out )
+{
+	float fwd[3], right[3], up[3];
+
+	AngleVectors( ent->angles, fwd, right, up );
+
+	out.m[0] = fwd[0];   out.m[1] = fwd[1];   out.m[2] = fwd[2];   out.m[3] = 0.0f;
+	out.m[4] = -right[0]; out.m[5] = -right[1]; out.m[6] = -right[2]; out.m[7] = 0.0f;
+	out.m[8] = up[0];    out.m[9] = up[1];    out.m[10] = up[2];   out.m[11] = 0.0f;
+	out.m[12] = ent->origin[0]; out.m[13] = ent->origin[1]; out.m[14] = ent->origin[2]; out.m[15] = 1.0f;
+}
+
+// The only two real FWGS R_GetEntityRenderMode overrides that matter to brush
+// models (clean-room, pitfall: do NOT invent EF_*/renderamt/brightness rules,
+// they cause csz_renderer 0/1 A/B drift, R3):
+//   - a model flagged MODEL_TRANSPARENT in kRenderNormal renders as
+//     kRenderTransAlpha (cutout glass-style brushes);
+//   - studio-additive -> kRenderTransAdd (not a brush concern).
+// MODEL_TRANSPARENT is model_s::flags bit 3 (engine ABI fact; this fork's
+// com_model.h predates the constant, so it is named here at point of use).
+const int kModelTransparent = ( 1 << 3 );
+
+int ResolveBrushRenderMode( const cl_entity_t *ent )
+{
+	int mode = ent->curstate.rendermode;
+	const EngModel *bmod = EngBsp( ent->model );
+
+	if( mode == kRenderNormal && ( bmod->flags & kModelTransparent ) != 0 )
+		return kRenderTransAlpha;
+
+	return mode;
+}
+
+// Upper bound on transparent brush entities sorted in one frame; matches the
+// composition root's FrameEntities::kMaxEntities cap (csz_renderer.h) without
+// pulling that header into the geom layer.
+const int kMaxBrushItems = 1024;
+
+struct BrushDrawItem
+{
+	cl_entity_t *ent;
+	float distSq;		// sort key: AABB-center dist^2, kRenderTransAlpha forced to 1e9 (drawn first)
+};
+
+int CompareBrushItems( const void *a, const void *b )
+{
+	const BrushDrawItem *ia = (const BrushDrawItem *)a;
+	const BrushDrawItem *ib = (const BrushDrawItem *)b;
+
+	// Back-to-front (descending distSq); blended brush composites correctly.
+	if( ia->distSq > ib->distSq )
+		return -1;
+	if( ia->distSq < ib->distSq )
+		return 1;
+	return 0;
 }
 
 }
@@ -352,10 +588,15 @@ void WorldRenderer::Destroy()
 	delete[] s_world.faces;
 	delete[] s_world.opaque;
 	delete[] s_world.visible;
+	delete[] s_world.brushFaces;
+	delete[] s_world.brushForGlobal;
 	s_world.faces = NULL;
 	s_world.opaque = NULL;
 	s_world.visible = NULL;
+	s_world.brushFaces = NULL;
+	s_world.brushForGlobal = NULL;
 	s_world.numFaces = s_world.numOpaque = 0;
+	s_world.numBrushFaces = 0;
 	s_world.model = NULL;
 	s_world.bsp = NULL;
 	s_world.built = false;
@@ -399,12 +640,33 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	if( s_world.faces == NULL || s_world.opaque == NULL || s_world.visible == NULL || sortKeys == NULL )
 		CSZ_FatalInit( "world", "out of memory building world face tables" );
 
-	// First pass: count drawable vertices (sky/turb faces emit none).
+	// Brush submodels (E1): every BSP surface not owned by worldmodel
+	// submodel 0. The worldmodel's own range is [firstmodelsurface,
+	// +nummodelsurfaces); everything else belongs to inline submodels (*1..)
+	// referenced by brush entities. Allocate worst-case (all are brush) and
+	// fill densely.
+	int totalSurfaces = bsp->numsurfaces;
+	int worldFirst = bsp->firstmodelsurface;
+	int worldLast = worldFirst + numFaces;	// exclusive
+	int maxBrushFaces = ( totalSurfaces > numFaces ) ? ( totalSurfaces - numFaces ) : 0;
+
+	s_world.brushForGlobal = new( std::nothrow ) int[totalSurfaces];
+	s_world.brushFaces = ( maxBrushFaces > 0 ) ? new( std::nothrow ) FaceRec[maxBrushFaces] : NULL;
+
+	if( s_world.brushForGlobal == NULL || ( maxBrushFaces > 0 && s_world.brushFaces == NULL ))
+		CSZ_FatalInit( "world", "out of memory building brush face tables" );
+
+	for( int i = 0; i < totalSurfaces; i++ )
+		s_world.brushForGlobal[i] = -1;
+
+	// First pass: count drawable vertices (sky/turb faces emit none) across
+	// both the world range and every brush surface, so the shared VBO is sized
+	// once.
 	int totalVerts = 0;
 
-	for( int i = 0; i < numFaces; i++ )
+	for( int g = 0; g < totalSurfaces; g++ )
 	{
-		const EngSurface &surf = bsp->surfaces[bsp->firstmodelsurface + i];
+		const EngSurface &surf = bsp->surfaces[g];
 
 		if(( surf.flags & ( kSurfDrawSky | kSurfDrawTurb )) == 0 )
 			totalVerts += surf.numedges;
@@ -422,136 +684,25 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 
 	s_world.numSky = s_world.numTurb = 0;
 	s_world.numOpaque = 0;
+	s_world.numBrushFaces = 0;
 
+	// --- World pass (submodel 0): local-indexed faces[], camera visible[]. ---
 	for( int i = 0; i < numFaces; i++ )
 	{
-		int globalIndex = bsp->firstmodelsurface + i;
+		int globalIndex = worldFirst + i;
 		const EngSurface &surf = bsp->surfaces[globalIndex];
 		FaceRec &f = s_world.faces[i];
 
-		memset( &f, 0, sizeof( f ));
-		f.surfIndex = i;
-		f.firstVert = -1;
-		f.lmPage = -1;
-
-		const mplane_t *plane = surf.plane;
-
-		f.planeBack = ( surf.flags & kSurfPlaneBack ) != 0;
-		f.planeNormal[0] = plane->normal[0];
-		f.planeNormal[1] = plane->normal[1];
-		f.planeNormal[2] = plane->normal[2];
-		f.planeDist = plane->dist;
-
-		// Surface bounds for per-light culling (engine-filled mextrasurf).
-		for( int j = 0; j < 3; j++ )
+		if( !BuildFaceRec( bsp, globalIndex, i, f, &badTexWarned, &atlasFullWarned, &maxPage ))
 		{
-			f.mins[j] = surf.info->mins[j];
-			f.maxs[j] = surf.info->maxs[j];
-		}
-
-		if( surf.flags & kSurfDrawSky )
-		{
-			s_world.numSky++;
+			if( surf.flags & kSurfDrawSky )
+				s_world.numSky++;
+			else if( surf.flags & kSurfDrawTurb )
+				s_world.numTurb++;
 			continue;
 		}
 
-		if( surf.flags & kSurfDrawTurb )
-		{
-			s_world.numTurb++;
-			continue;
-		}
-
-		const EngTexinfo *ti = surf.texinfo;
-		const EngTexture *tex = ti->texture;
-
-		f.texSlot = ( tex != NULL ) ? tex->gl_texturenum : 0;
-
-		if( f.texSlot == 0 )
-		{
-			f.texSlot = s_world.whiteTexSlot;
-
-			if( badTexWarned++ == 0 )
-				CSZ_LogWarn( "world", "surface %d has no engine texture slot; using *white", globalIndex );
-		}
-
-		f.alphaTest = ( tex != NULL && tex->name[0] == '{' ) ? 0.25f : 0.0f;
-
-		// Lightmap block (engine-authoritative lightmap matrix: lmvecs/
-		// lightmapmins/lightextents equal texinfo vecs/texturemins/extents on
-		// standard maps, verified against pinned mod_bmodel.c).
-		const EngExtraSurf *info = surf.info;
-		int sampleSize = FaceSampleSize( globalIndex );
-		int smax = ( info->lightextents[0] / sampleSize ) + 1;
-		int tmax = ( info->lightextents[1] / sampleSize ) + 1;
-		int page = 0, bx = 0, by = 0;
-
-		if( g_lightmaps.Allocate( smax, tmax, &page, &bx, &by ))
-		{
-			f.lmPage = page;
-			f.lmX = bx;
-			f.lmY = by;
-			f.smax = smax;
-			f.tmax = tmax;
-			g_lightmaps.UploadBlock( page, bx, by, smax, tmax, FaceLightBlock( surf, smax, tmax ));
-
-			if( page > maxPage )
-				maxPage = page;
-		}
-		else if( atlasFullWarned++ == 0 )
-		{
-			CSZ_LogError( "world", "lightmap atlas full at surface %d (%dx%d); face samples page 0 origin",
-				globalIndex, smax, tmax );
-		}
-
-		// Vertices in original polygon winding (triangle fan at draw time).
-		f.firstVert = vertCursor;
-		f.numVerts = surf.numedges;
-
-		float nx = f.planeBack ? -f.planeNormal[0] : f.planeNormal[0];
-		float ny = f.planeBack ? -f.planeNormal[1] : f.planeNormal[1];
-		float nz = f.planeBack ? -f.planeNormal[2] : f.planeNormal[2];
-
-		for( int e = 0; e < surf.numedges; e++ )
-		{
-			int vi = FetchEdgeVertex( bsp, bsp->surfedges[surf.firstedge + e] );
-			const float *pos = bsp->vertexes[vi].position;
-			float *out = &verts[(size_t)( vertCursor + e ) * kVertexFloats];
-
-			out[0] = pos[0];
-			out[1] = pos[1];
-			out[2] = pos[2];
-
-			float su = pos[0] * ti->vecs[0][0] + pos[1] * ti->vecs[0][1] + pos[2] * ti->vecs[0][2] + ti->vecs[0][3];
-			float tv = pos[0] * ti->vecs[1][0] + pos[1] * ti->vecs[1][1] + pos[2] * ti->vecs[1][2] + ti->vecs[1][3];
-
-			out[3] = ( tex != NULL ) ? su / (float)tex->width : 0.0f;
-			out[4] = ( tex != NULL ) ? tv / (float)tex->height : 0.0f;
-
-			if( f.lmPage >= 0 )
-			{
-				float ls = pos[0] * info->lmvecs[0][0] + pos[1] * info->lmvecs[0][1] +
-					pos[2] * info->lmvecs[0][2] + info->lmvecs[0][3] - (float)info->lightmapmins[0];
-				float lt = pos[0] * info->lmvecs[1][0] + pos[1] * info->lmvecs[1][1] +
-					pos[2] * info->lmvecs[1][2] + info->lmvecs[1][3] - (float)info->lightmapmins[1];
-
-				// (block offset + luxel + half-luxel center) / page, in
-				// world units divided by (pageSize * sampleSize).
-				out[5] = ((float)f.lmX * sampleSize + ls + 0.5f * sampleSize ) /
-					(float)( LightmapAtlas::kPageSize * sampleSize );
-				out[6] = ((float)f.lmY * sampleSize + lt + 0.5f * sampleSize ) /
-					(float)( LightmapAtlas::kPageSize * sampleSize );
-			}
-			else
-			{
-				out[5] = 0.0f;
-				out[6] = 0.0f;
-			}
-
-			out[7] = nx;
-			out[8] = ny;
-			out[9] = nz;
-		}
-
+		EmitFaceVerts( bsp, globalIndex, f, verts, vertCursor );
 		vertCursor += surf.numedges;
 
 		sortKeys[s_world.numOpaque].faceIndex = i;
@@ -567,6 +718,29 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 		s_world.opaque[i] = sortKeys[i].faceIndex;
 
 	delete[] sortKeys;
+
+	// --- Brush pass: every surface outside the worldmodel range, built into
+	// the SAME VBO. surfIndex holds the GLOBAL index; brushForGlobal maps it
+	// back so a brush entity's contiguous global range -> contiguous run. Sky/
+	// turb brush surfaces are skipped (no GL geometry), leaving a -1 hole that
+	// the draw-time range scan tolerates. ---
+	for( int g = 0; g < totalSurfaces; g++ )
+	{
+		if( g >= worldFirst && g < worldLast )
+			continue;	// owned by submodel 0
+
+		const EngSurface &surf = bsp->surfaces[g];
+		FaceRec &f = s_world.brushFaces[s_world.numBrushFaces];
+
+		if( !BuildFaceRec( bsp, g, g, f, &badTexWarned, &atlasFullWarned, &maxPage ))
+			continue;	// sky/turb: emit nothing, leave brushForGlobal[g] = -1
+
+		EmitFaceVerts( bsp, g, f, verts, vertCursor );
+		vertCursor += surf.numedges;
+
+		s_world.brushForGlobal[g] = s_world.numBrushFaces;
+		s_world.numBrushFaces++;
+	}
 
 	// GPU objects. Build happens outside the takeover window (slot 6), so
 	// leave VAO/VBO unbound for the engine afterwards.
@@ -593,13 +767,20 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	BuildProgram( "csz_world", kWorldVs, kWorldFs, true, s_world.program );
 	s_world.uViewProj = UniformLoc( s_world.program, "u_viewProj" );
 	s_world.uAlphaTest = UniformLoc( s_world.program, "u_alphaTest" );
+	s_world.uModel = UniformLoc( s_world.program, "u_model" );
 	s_world.uFog = UniformLoc( s_world.program, "u_fog" );
 	s_world.uAmbTint = UniformLoc( s_world.program, "u_ambTint" );
+	s_world.uBrushAlpha = UniformLoc( s_world.program, "u_brushAlpha" );
 
 	UseProgram( s_world.program.program );
 	glUniform1i( UniformLoc( s_world.program, "u_texDiffuse" ), 0 );
 	glUniform1i( UniformLoc( s_world.program, "u_texLightmap" ), 1 );
 	glUniform1f( s_world.uAlphaTest, 0.0f );
+	glUniform1f( s_world.uBrushAlpha, 1.0f );	// opaque/world default; per-entity feed in DrawBrushTransparent
+
+	Mat4 identity;
+	Mat4Identity( identity );
+	glUniformMatrix4fv( s_world.uModel, 1, GL_FALSE, identity.m );	// world stays identity (DrawOpaque re-pins)
 
 	const float kFogOff[4] = { 0.0f, 0.0f, 0.0f, 0.0f };	// fog off until fed (DrawOpaque)
 	const float kTintNeutral[3] = { 1.0f, 1.0f, 1.0f };	// neutral until fed (never tint-black)
@@ -636,8 +817,8 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.built = true;
 	s_world.lightmapsDirty = false;
 
-	CSZ_LogInfo( "world", "built %s: %d surfaces (%d sky, %d water skipped), %d verts, %d lightmap pages",
-		s_world.name, numFaces, s_world.numSky, s_world.numTurb, totalVerts, pages );
+	CSZ_LogInfo( "world", "built %s: %d world surfaces (%d sky, %d water skipped) + %d brush surfaces, %d verts, %d lightmap pages",
+		s_world.name, numFaces, s_world.numSky, s_world.numTurb, s_world.numBrushFaces, totalVerts, pages );
 }
 
 void WorldRenderer::BuildVisibleSet( const ViewSetup &view )
@@ -689,6 +870,12 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 	UseProgram( s_world.program.program );
 	glUniformMatrix4fv( s_world.uViewProj, 1, GL_FALSE, view.matViewProj.m );
 
+	// World geometry is baked in world space: pin u_model to identity (the
+	// brush passes set a per-entity matrix and may have left it dirty, E1).
+	Mat4 identity;
+	Mat4Identity( identity );
+	glUniformMatrix4fv( s_world.uModel, 1, GL_FALSE, identity.m );
+
 	// Ambience feed (M2a A1): server-authoritative snapshot rides in on the
 	// view (plan 2.5 slot 7.2); base pass only, pitfall 23.
 	const AmbienceParams &amb = view.ambience;
@@ -701,8 +888,11 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 	SetCull( false );	// BSP faces are culled per-face below (plan step 3)
 
 	// The program object remembers the last frame's alpha-test value; pin a
-	// known state so the per-face uniform dedup below stays truthful.
+	// known state so the per-face uniform dedup below stays truthful. Also pin
+	// u_brushAlpha = 1.0: a prior DrawBrushTransparent may have left it at a
+	// blended entity's renderamt (FIX 2), and the static world is always opaque.
 	glUniform1f( s_world.uAlphaTest, 0.0f );
+	glUniform1f( s_world.uBrushAlpha, 1.0f );
 
 	int curTex = -1;
 	int curPage = -1;
@@ -753,6 +943,373 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 	{
 		s_nextStatsTime = now + 1.0f;
 		CSZ_LogDev( "world", "drawn %d / %d opaque faces", drawn, s_world.numOpaque );
+	}
+}
+
+namespace
+{
+
+// Draws every drawable face of one brush entity through the base program with
+// the given model matrix already on u_model. Plane-side backface cull is done
+// in MODEL space (the baked plane is local) by transforming the view origin
+// through the inverse rigid transform, so rotating/moving brushes cull
+// correctly. applyAlphaTest=false (transparent path) feeds u_alphaTest=0 so the
+// full texture alpha blends instead of being cut out. curTex/curPage/curAlpha
+// carry the bind/uniform dedup across entities in one pass. Returns faces drawn.
+int DrawBrushEntityFaces( const cl_entity_t *ent, const ViewSetup &view, const Mat4 &model,
+	bool applyAlphaTest, int &curTex, int &curPage, float &curAlpha )
+{
+	const EngModel *bmod = EngBsp( ent->model );
+	int first = bmod->firstmodelsurface;
+	int count = bmod->nummodelsurfaces;
+
+	if( first < 0 || count <= 0 || first + count > s_world.bsp->numsurfaces )
+		return 0;
+
+	// View origin in the brush's local model space (rigid inverse:
+	// localView = R^T * (worldView - origin); matrix basis columns are the
+	// world-space axes, so the transpose rows are R^T).
+	float rel[3] = {
+		view.origin[0] - model.m[12],
+		view.origin[1] - model.m[13],
+		view.origin[2] - model.m[14],
+	};
+	float localView[3] = {
+		rel[0] * model.m[0] + rel[1] * model.m[1] + rel[2] * model.m[2],
+		rel[0] * model.m[4] + rel[1] * model.m[5] + rel[2] * model.m[6],
+		rel[0] * model.m[8] + rel[1] * model.m[9] + rel[2] * model.m[10],
+	};
+
+	int drawn = 0;
+
+	for( int g = first; g < first + count; g++ )
+	{
+		int slot = s_world.brushForGlobal[g];
+
+		if( slot < 0 )
+			continue;	// sky/turb surface: nothing emitted
+
+		const FaceRec &f = s_world.brushFaces[slot];
+
+		if( f.firstVert < 0 )
+			continue;
+
+		// Plane-side backface cull in model space (same sign rule as the world
+		// opaque pass, plan step 3).
+		float d = localView[0] * f.planeNormal[0] + localView[1] * f.planeNormal[1] +
+			localView[2] * f.planeNormal[2] - f.planeDist;
+
+		if( f.planeBack ? ( d > -kBackfaceEpsilon ) : ( d < kBackfaceEpsilon ))
+			continue;
+
+		if( f.texSlot != curTex )
+		{
+			BindTextureSlot( 0, f.texSlot );
+			curTex = f.texSlot;
+		}
+
+		if( f.lmPage != curPage )
+		{
+			BindTextureSlot( 1, g_lightmaps.PageTexSlot(( f.lmPage >= 0 ) ? f.lmPage : 0 ));
+			curPage = f.lmPage;
+		}
+
+		float wantAlpha = applyAlphaTest ? f.alphaTest : 0.0f;
+
+		if( wantAlpha != curAlpha )
+		{
+			glUniform1f( s_world.uAlphaTest, wantAlpha );
+			curAlpha = wantAlpha;
+		}
+
+		glDrawArrays( GL_TRIANGLE_FAN, f.firstVert, f.numVerts );
+		drawn++;
+	}
+
+	return drawn;
+}
+
+// AABB center (world space) of a brush entity, used as the transparent sort
+// key. mins/maxs are the model's local bounds; for transformed entities the
+// center is rotated/translated by the model matrix.
+void BrushWorldCenter( const cl_entity_t *ent, const Mat4 &model, float out[3] )
+{
+	const EngModel *bmod = EngBsp( ent->model );
+	float lc[3] = {
+		( bmod->mins[0] + bmod->maxs[0] ) * 0.5f,
+		( bmod->mins[1] + bmod->maxs[1] ) * 0.5f,
+		( bmod->mins[2] + bmod->maxs[2] ) * 0.5f,
+	};
+
+	out[0] = model.m[0] * lc[0] + model.m[4] * lc[1] + model.m[8] * lc[2] + model.m[12];
+	out[1] = model.m[1] * lc[0] + model.m[5] * lc[1] + model.m[9] * lc[2] + model.m[13];
+	out[2] = model.m[2] * lc[0] + model.m[6] * lc[1] + model.m[10] * lc[2] + model.m[14];
+}
+
+}
+
+void WorldRenderer::DrawBrushOpaque( const ViewSetup &view, cl_entity_s *const *ents, int count )
+{
+	if( !s_world.built || count <= 0 )
+		return;
+
+	if( s_world.lightmapsDirty )
+	{
+		ReuploadLightmaps();
+		s_world.lightmapsDirty = false;
+	}
+
+	// Same base program as the world opaque pass so brush surfaces eat the same
+	// fog/night-tint (pitfall 23): reuse s_world.program + its u_fog/u_ambTint.
+	UseProgram( s_world.program.program );
+	glUniformMatrix4fv( s_world.uViewProj, 1, GL_FALSE, view.matViewProj.m );
+
+	const AmbienceParams &amb = view.ambience;
+	const float fogVec[4] = { amb.fogColor[0], amb.fogColor[1], amb.fogColor[2], amb.fogDensity };
+
+	glUniform4fv( s_world.uFog, 1, fogVec );
+	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
+
+	BindVao( s_world.vao );
+	SetCull( false );		// per-face plane-side cull (model space) below
+	glUniform1f( s_world.uAlphaTest, 0.0f );
+	glUniform1f( s_world.uBrushAlpha, 1.0f );	// opaque brush ents ignore renderamt (FIX 2)
+
+	int curTex = -1;
+	int curPage = -1;
+	float curAlpha = 0.0f;
+	int drawnEnts = 0;
+	int drawnFaces = 0;
+
+	for( int i = 0; i < count; i++ )
+	{
+		cl_entity_t *ent = ents[i];
+
+		if( ent == NULL || ent->model == NULL || ent->model->type != mod_brush )
+			continue;
+
+		if( ResolveBrushRenderMode( ent ) != kRenderNormal )
+			continue;	// transparent: handled in the trans domain
+
+		Mat4 model;
+		BuildBrushModelMatrix( ent, model );
+		glUniformMatrix4fv( s_world.uModel, 1, GL_FALSE, model.m );
+
+		int n = DrawBrushEntityFaces( ent, view, model, true, curTex, curPage, curAlpha );
+
+		if( n > 0 )
+		{
+			drawnFaces += n;
+			drawnEnts++;
+		}
+	}
+
+	// Restore identity so later base-program users (DrawOpaque next frame, or a
+	// re-entrant draw) never inherit a stale brush matrix.
+	Mat4 identity;
+	Mat4Identity( identity );
+	glUniformMatrix4fv( s_world.uModel, 1, GL_FALSE, identity.m );
+
+	static float s_nextStatsTime;
+	float now = ClientTime();
+
+	if( drawnEnts > 0 && now >= s_nextStatsTime )
+	{
+		s_nextStatsTime = now + 1.0f;
+		CSZ_LogDev( "world", "drawn %d opaque brush ents (%d faces)", drawnEnts, drawnFaces );
+	}
+}
+
+void WorldRenderer::DrawBrushTransparent( const ViewSetup &view, cl_entity_s *const *ents, int count )
+{
+	if( !s_world.built || count <= 0 )
+		return;
+
+	// Collect transparent brush entities + their sort keys (AABB-center
+	// distance-squared to the view origin; brush+kRenderTransAlpha drawn first,
+	// dist = 1e9). Bounded by the frame entity cap.
+	static BrushDrawItem s_items[kMaxBrushItems];
+	int numItems = 0;
+
+	for( int i = 0; i < count && numItems < kMaxBrushItems; i++ )
+	{
+		cl_entity_t *ent = ents[i];
+
+		if( ent == NULL || ent->model == NULL || ent->model->type != mod_brush )
+			continue;
+
+		int mode = ResolveBrushRenderMode( ent );
+
+		if( mode == kRenderNormal )
+			continue;	// opaque: handled in the opaque domain
+
+		Mat4 model;
+		BuildBrushModelMatrix( ent, model );
+
+		float center[3];
+		BrushWorldCenter( ent, model, center );
+
+		float dx = center[0] - view.origin[0];
+		float dy = center[1] - view.origin[1];
+		float dz = center[2] - view.origin[2];
+		float distSq = dx * dx + dy * dy + dz * dz;
+
+		s_items[numItems].ent = ent;
+		// kRenderTransAlpha brush sorts first (drawn before the alpha-blended
+		// remainder): force it to the far end of the back-to-front order.
+		s_items[numItems].distSq = ( mode == kRenderTransAlpha ) ? 1e9f : distSq;
+		numItems++;
+	}
+
+	if( numItems == 0 )
+		return;
+
+	qsort( s_items, (size_t)numItems, sizeof( BrushDrawItem ), CompareBrushItems );
+
+	// Shares the trans domain with sprites (slot 14). Base program for fog/tint
+	// parity (pitfall 23). GL state is set per resolved rendermode below
+	// (engine R_SetRenderMode, non-Quake GoldSrc default), NOT one blanket
+	// alpha-blend: kRenderTransAlpha is a 1-bit cutout (alpha-test + depth-write,
+	// opaque-style), only TransAdd/TransColor/TransTexture are genuinely blended.
+	UseProgram( s_world.program.program );
+	glUniformMatrix4fv( s_world.uViewProj, 1, GL_FALSE, view.matViewProj.m );
+
+	const AmbienceParams &amb = view.ambience;
+	const float fogVec[4] = { amb.fogColor[0], amb.fogColor[1], amb.fogColor[2], amb.fogDensity };
+	const float fogOff[4] = { 0.0f, 0.0f, 0.0f, 0.0f };	// additive fades to black, not fog color
+
+	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
+	glUniform4fv( s_world.uFog, 1, fogVec );	// fog on baseline (per-mode toggles off below)
+
+	BindVao( s_world.vao );
+	SetCull( false );
+
+	// Pin u_alphaTest to a known value so DrawBrushEntityFaces' curAlpha dedup
+	// stays truthful regardless of what the prior pass left in the program.
+	glUniform1f( s_world.uAlphaTest, 0.0f );
+
+	int curTex = -1;
+	int curPage = -1;
+	float curAlpha = 0.0f;
+	int drawnEnts = 0;
+	int drawnFaces = 0;
+
+	// State the per-item loop tracks so each GL/uniform switch fires only on a
+	// real change (the sort groups kRenderTransAlpha cutouts at the front, then
+	// the blended remainder back-to-front).
+	int curMode = -1;		// resolved rendermode last applied
+	bool fogIsOff = false;		// whether u_fog currently holds the off vector
+	float curBrushAlpha = -1.0f;	// u_brushAlpha last uploaded
+
+	for( int i = 0; i < numItems; i++ )
+	{
+		cl_entity_t *ent = s_items[i].ent;
+		int mode = ResolveBrushRenderMode( ent );
+
+		// --- Per-mode GL state (engine R_SetRenderMode parity) ---
+		if( mode != curMode )
+		{
+			bool wantFogOff;
+			float wantBrushAlpha;
+
+			switch( mode )
+			{
+			case kRenderTransAdd:
+				// Additive: GL_ONE,GL_ONE; depth-write off; alpha-test off; fog
+				// off (additive content fades to black, never to fog color --
+				// matches the additive sprite path, pitfall 23 family).
+				SetBlend( kBlendAdditive );
+				SetDepthWrite( false );
+				wantFogOff = true;
+				wantBrushAlpha = (float)ent->curstate.renderamt * ( 1.0f / 255.0f );
+				break;
+			case kRenderTransAlpha:
+				// '{'-masked cutout (PT-01 primary target): hard 1-bit discard.
+				// Alpha-test ON (FaceRec.alphaTest, set via applyAlphaTest=true
+				// below), blend OFF, depth-write ON -- an opaque-style cutout
+				// that DOES occlude. Fog on; brushAlpha 1 (cutout is not faded).
+				SetBlend( kBlendNone );
+				SetDepthWrite( true );
+				wantFogOff = false;
+				wantBrushAlpha = 1.0f;
+				break;
+			case kRenderTransColor:
+			case kRenderTransTexture:
+			default:
+				// Alpha blend; depth-write off; alpha-test off; fog on. The
+				// default lands here so any other resolved trans mode composites
+				// (never silently becomes an opaque cutout).
+				SetBlend( kBlendAlpha );
+				SetDepthWrite( false );
+				wantFogOff = false;
+				wantBrushAlpha = (float)ent->curstate.renderamt * ( 1.0f / 255.0f );
+				break;
+			}
+
+			if( wantFogOff != fogIsOff )
+			{
+				glUniform4fv( s_world.uFog, 1, wantFogOff ? fogOff : fogVec );
+				fogIsOff = wantFogOff;
+			}
+
+			if( wantBrushAlpha != curBrushAlpha )
+			{
+				glUniform1f( s_world.uBrushAlpha, wantBrushAlpha );
+				curBrushAlpha = wantBrushAlpha;
+			}
+
+			curMode = mode;
+		}
+		else if( mode != kRenderTransAlpha )
+		{
+			// Same mode as the previous item but a different entity: refresh the
+			// per-entity renderamt (TransAlpha keeps brushAlpha pinned at 1).
+			float wantBrushAlpha = (float)ent->curstate.renderamt * ( 1.0f / 255.0f );
+
+			if( wantBrushAlpha != curBrushAlpha )
+			{
+				glUniform1f( s_world.uBrushAlpha, wantBrushAlpha );
+				curBrushAlpha = wantBrushAlpha;
+			}
+		}
+
+		Mat4 model;
+		BuildBrushModelMatrix( ent, model );
+		glUniformMatrix4fv( s_world.uModel, 1, GL_FALSE, model.m );
+
+		// applyAlphaTest only for the cutout mode (feeds FaceRec.alphaTest=0.25);
+		// the genuinely-blended modes pass alpha-test off so the full texture
+		// alpha blends.
+		int n = DrawBrushEntityFaces( ent, view, model, mode == kRenderTransAlpha,
+			curTex, curPage, curAlpha );
+
+		if( n > 0 )
+		{
+			drawnFaces += n;
+			drawnEnts++;
+		}
+	}
+
+	// Clean baseline for the next pass (viewmodel, slot 15) + identity model +
+	// restored fog/brushAlpha so the next base-program user is unaffected.
+	SetBlend( kBlendNone );
+	SetDepthWrite( true );
+
+	if( fogIsOff )
+		glUniform4fv( s_world.uFog, 1, fogVec );
+	glUniform1f( s_world.uBrushAlpha, 1.0f );
+
+	Mat4 identity;
+	Mat4Identity( identity );
+	glUniformMatrix4fv( s_world.uModel, 1, GL_FALSE, identity.m );
+
+	static float s_nextStatsTime;
+	float now = ClientTime();
+
+	if( drawnEnts > 0 && now >= s_nextStatsTime )
+	{
+		s_nextStatsTime = now + 1.0f;
+		CSZ_LogDev( "world", "drawn %d transparent brush ents (%d faces)", drawnEnts, drawnFaces );
 	}
 }
 

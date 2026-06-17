@@ -41,6 +41,7 @@ struct FrameEntities
 	static const int kMaxEntities = 1024;
 	cl_entity_t *studio[kMaxEntities];  int numStudio;
 	cl_entity_t *sprites[kMaxEntities]; int numSprites;
+	cl_entity_t *brush[kMaxEntities];   int numBrush;
 	void Clear();
 };
 

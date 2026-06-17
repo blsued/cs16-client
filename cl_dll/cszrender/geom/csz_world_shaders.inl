@@ -44,19 +44,26 @@
 // a 128/192 vertex color (= x2/3), so the net factor is 4/3 (gl_rsurf.c
 // R_BlendLightmaps). Upload already applied the engine light gamma table
 // (see csz_lightmap.cpp).
+// u_model is the per-draw model->world transform: identity for the static
+// world (vertices are baked in world space at build time), and a translate *
+// rotate built from a brush entity's origin/angles for moving/rotating brush
+// submodels (func_door, rotating brushes). The same base program draws both
+// the world and opaque brush entities so brush surfaces eat fog/night-tint
+// identically (pitfall 23); only u_model changes between them.
 static const char kWorldVs[] = R"GLSL(#version 330 core
 layout(location = 0) in vec3 a_pos;
 layout(location = 1) in vec2 a_uv;
 layout(location = 2) in vec2 a_lmuv;
 layout(location = 3) in vec3 a_normal;
 uniform mat4 u_viewProj;
+uniform mat4 u_model;
 out vec2 v_uv;
 out vec2 v_lmuv;
 void main()
 {
 	v_uv = a_uv;
 	v_lmuv = a_lmuv;
-	gl_Position = u_viewProj * vec4( a_pos, 1.0 );
+	gl_Position = u_viewProj * ( u_model * vec4( a_pos, 1.0 ));
 }
 )GLSL";
 
@@ -72,6 +79,7 @@ uniform sampler2D u_texLightmap;  // unit 1
 uniform float u_alphaTest;        // 0 = off, else discard threshold (0.25)
 uniform vec4 u_fog;               // rgb = fog color (linear), w = density; w<=0 -> off
 uniform vec3 u_ambTint;           // night tint; (1,1,1) neutral
+uniform float u_brushAlpha;       // per-entity translucency (curstate.renderamt/255); 1.0 = opaque/world
 out vec4 fragColor;
 void main()
 {
@@ -83,7 +91,7 @@ void main()
 	col *= u_ambTint;
 	float fogDepth = gl_FragCoord.z / gl_FragCoord.w;      // cheap view depth (clean-room f)
 	float fogF = ( u_fog.w > 0.0 ) ? clamp( exp2( -u_fog.w * fogDepth ), 0.0, 1.0 ) : 1.0;
-	fragColor = vec4( mix( u_fog.rgb, col, fogF ), base.a );
+	fragColor = vec4( mix( u_fog.rgb, col, fogF ), base.a * u_brushAlpha );
 }
 )GLSL";
 

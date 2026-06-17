@@ -162,6 +162,7 @@ void FrameEntities::Clear()
 {
 	numStudio = 0;
 	numSprites = 0;
+	numBrush = 0;
 }
 
 bool Renderer::OnHandshake( render_api_t *api )
@@ -291,6 +292,10 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	g_world.DrawOpaque( view );					// slot 11: world opaque
 	EndPass( kTmWorld );
 
+	BeginPass( kTmBrush );
+	g_world.DrawBrushOpaque( view, m_frame.brush, m_frame.numBrush );	// slot 11.5: opaque brush submodels (E1)
+	EndPass( kTmBrush );
+
 	BeginPass( kTmStudio );
 	g_studio.DrawOpaque( view, m_frame.studio, m_frame.numStudio );	// slot 12: studio opaque
 	EndPass( kTmStudio );
@@ -300,7 +305,8 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	EndPass( kTmLights );
 
 	BeginPass( kTmTrans );
-	DrawSprites( view, m_frame.sprites, m_frame.numSprites );	// slot 14: sprites
+	DrawSprites( view, m_frame.sprites, m_frame.numSprites );	// slot 14: sprites (trans domain)
+	g_world.DrawBrushTransparent( view, m_frame.brush, m_frame.numBrush );	// slot 14: transparent brush (trans domain, E1)
 	EndPass( kTmTrans );
 
 	BeginPass( kTmViewmodel );
@@ -443,6 +449,29 @@ void Renderer::AddEntity( int type, cl_entity_t *ent )
 		// Collected now, drawn from T5 on.
 		if( m_frame.numSprites < FrameEntities::kMaxEntities )
 			m_frame.sprites[m_frame.numSprites++] = ent;
+	}
+	else if( ent->model->type == mod_brush )
+	{
+		// Brush submodels (func_*, doors, rotating brushes). On the engine
+		// path R_DrawBrushModel draws these; under takeover we self-supply
+		// them from g_world's shared VBO (E1). No local-player filter: that
+		// is studio-only (the camera-inside-own-head case), brushes are never
+		// the view entity.
+		if( m_frame.numBrush < FrameEntities::kMaxEntities )
+		{
+			m_frame.brush[m_frame.numBrush++] = ent;
+		}
+		else
+		{
+			static float s_nextWarn;
+			float now = ClientTime();
+
+			if( now >= s_nextWarn )
+			{
+				s_nextWarn = now + 1.0f;
+				CSZ_LogWarn( "core", "brush entity list full (%d); dropping entities", FrameEntities::kMaxEntities );
+			}
+		}
 	}
 }
 
