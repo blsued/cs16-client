@@ -13,6 +13,7 @@ set(CSZRENDER_SRC
 	core/csz_shader.cpp
 	core/csz_math.cpp
 	core/csz_view.cpp
+	flashlight/csz_flashlight.cpp
 	fog/csz_fog.cpp
 	geom/csz_world.cpp
 	geom/csz_lightmap.cpp
@@ -26,6 +27,7 @@ set(CSZRENDER_SRC
 	lighting/csz_light_registry.cpp
 	lighting/csz_light_pass.cpp
 	lighting/csz_shadowmap.cpp
+	lighting/csz_volumetric.cpp
 )
 add_library(cszrender STATIC ${CSZRENDER_SRC})
 target_include_directories(cszrender PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

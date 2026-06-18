@@ -1,5 +1,5 @@
 /*
- * csz_fog.h -- CSOZ renderer: client-side ambience state (fog/night/moon)
+ * csz_volumetric.h -- CSOZ renderer: volumetric light cone (in-scatter shaft)
  *
  * Copyright (c) 2026 CSOZ project contributors
  *
@@ -10,7 +10,7 @@
  * Trinity, retail/leaked sources, or any other license-tainted source
  * (see csoz docs/provenance.md, section 6).
  * Clean-room implementation. Mechanism studied from PrimeXT (see
- * csoz docs/notes/primext-render-mechanisms-m2.md); implemented by an agent
+ * csoz docs/notes/primext-render-mechanisms.md); implemented by an agent
  * that has not read that source.
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -32,29 +32,30 @@
  * you are not obligated to do so. If you do not wish to do so, delete this
  * exception statement from your version.
  */
+// Dependency rule (spec 4.6): lighting/ is a PURE lighting client. This is a
+// light-scattering pass (in-scatter of the spot light through the distance
+// fog), so it lives in lighting/, NOT flashlight/ (which carries no rendering
+// code). It may include core/ + geom/ interfaces and reads g_lights.
 #pragma once
-#include "../core/csz_ambience_types.h"
+#include "../core/csz_view.h"
 namespace csz
 {
-// Client-side ambience state. The ONLY production writer is the server "CSZ"
-// envelope (spec 3.2); there is no enable/disable cvar (A-class, spec 4.1).
-// csz_devfog/csz_devtint/csz_devmoon (A1) and csz_devmoonlight (A4) exist
-// solely in CSZ_DEV_TOOLS builds for pre-A5 verification (compiled out via C9).
-class FogController
+// Additive in-scatter shaft for every active spot light (normally just the
+// player flashlight, key=-3). B-class: per-cvar, runtime-degradable; turning
+// it off leaves the A-class cone+fog untouched and grants NO extra visibility.
+class VolumetricPass
 {
 public:
-	void Reset();                          // map change / disconnect -> Neutral
-	// Rendering-line default applied after Reset() on every NewMap: a near-black
-	// slightly-cool fog so distant geometry is swallowed while near geometry
-	// stays readable. The server AMBIENCE envelope (A5) is authoritative and
-	// overrides this whenever it arrives. A-class: no enable/disable cvar; the
-	// csz_fog_default_density cvar tunes the AMOUNT only.
-	void ApplyDefaultNight();
-	// payload = AMBIENCE cmd body (45 bytes, layout 2.6), cmd/version already
-	// stripped by the dispatcher. Logs decoded values once at Info level.
-	void OnAmbienceEnvelope( const unsigned char *payload, int size );
-	const AmbienceParams &Current() const;
-	void RegisterDevCommands();            // no-op unless CSZ_DEV_TOOLS
+	void RegisterCvars();
+	void Render( const ViewSetup &view );
+
+	// GPU-side state container; defined in the .cpp. Public so the .cpp's
+	// file-local instance can name the type (it is otherwise opaque).
+	struct Gpu;
+
+private:
+	void EnsureBuilt();
 };
-extern FogController g_fog;
+
+extern VolumetricPass g_volumetric;
 }

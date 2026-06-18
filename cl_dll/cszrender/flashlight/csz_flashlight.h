@@ -1,5 +1,5 @@
 /*
- * csz_fog.h -- CSOZ renderer: client-side ambience state (fog/night/moon)
+ * csz_flashlight.h -- CSOZ renderer: player flashlight (torch) module
  *
  * Copyright (c) 2026 CSOZ project contributors
  *
@@ -10,7 +10,7 @@
  * Trinity, retail/leaked sources, or any other license-tainted source
  * (see csoz docs/provenance.md, section 6).
  * Clean-room implementation. Mechanism studied from PrimeXT (see
- * csoz docs/notes/primext-render-mechanisms-m2.md); implemented by an agent
+ * csoz docs/notes/primext-render-mechanisms.md); implemented by an agent
  * that has not read that source.
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -32,29 +32,24 @@
  * you are not obligated to do so. If you do not wish to do so, delete this
  * exception statement from your version.
  */
+// Dependency rule (spec 4.6): flashlight/ includes core/ headers and the
+// lighting/ PUBLIC registry (csz_light_registry.h) ONLY. Its sole coupling to
+// lighting is g_lights.AddOrUpdate(...)/Remove(...); it never touches geom/ or
+// lighting internals (light pass / shadowmap).
 #pragma once
-#include "../core/csz_ambience_types.h"
+#include "../core/csz_view.h"
 namespace csz
 {
-// Client-side ambience state. The ONLY production writer is the server "CSZ"
-// envelope (spec 3.2); there is no enable/disable cvar (A-class, spec 4.1).
-// csz_devfog/csz_devtint/csz_devmoon (A1) and csz_devmoonlight (A4) exist
-// solely in CSZ_DEV_TOOLS builds for pre-A5 verification (compiled out via C9).
-class FogController
+// View-locked spot light that follows the player's eye (a held torch). It is an
+// A-class feature (it ships); csz_flashlight is a gameplay on/off toggle for the
+// player's own torch, NOT a quality-disable for the lighting feature.
+class Flashlight
 {
 public:
-	void Reset();                          // map change / disconnect -> Neutral
-	// Rendering-line default applied after Reset() on every NewMap: a near-black
-	// slightly-cool fog so distant geometry is swallowed while near geometry
-	// stays readable. The server AMBIENCE envelope (A5) is authoritative and
-	// overrides this whenever it arrives. A-class: no enable/disable cvar; the
-	// csz_fog_default_density cvar tunes the AMOUNT only.
-	void ApplyDefaultNight();
-	// payload = AMBIENCE cmd body (45 bytes, layout 2.6), cmd/version already
-	// stripped by the dispatcher. Logs decoded values once at Info level.
-	void OnAmbienceEnvelope( const unsigned char *payload, int size );
-	const AmbienceParams &Current() const;
-	void RegisterDevCommands();            // no-op unless CSZ_DEV_TOOLS
+	void RegisterCvars();                       // master toggle (+ CSZ_DEV_TOOLS tunables)
+	void Update( const ViewSetup &view );       // re-register key=-3 spot at the view each frame
+private:
+	bool m_active = false;                      // true when the registry currently holds our spot
 };
-extern FogController g_fog;
+extern Flashlight g_flashlight;
 }

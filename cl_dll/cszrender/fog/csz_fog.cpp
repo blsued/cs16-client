@@ -90,6 +90,13 @@ RawAmbience NeutralRaw()
 RawAmbience s_raw = NeutralRaw();
 AmbienceParams s_current = AmbienceNeutral();
 
+// Rendering-line black-fog default (WS2). fogColor is a near-black, slightly
+// cool linear value; the density comes from csz_fog_default_density so the
+// amount is tunable (A-class: the FEATURE always ships, only the amount tunes).
+const float kDefaultNightFogColor[3] = { 0.010f, 0.013f, 0.022f };
+
+cvar_t *s_cvarDefaultDensity;	// csz_fog_default_density (amount only; A-class)
+
 int ClampByte( int v )
 {
 	if( v < 0 ) return 0;
@@ -289,6 +296,32 @@ void FogController::Reset()
 	CSZ_LogDev( "fog", "ambience reset to neutral" );
 }
 
+void FogController::ApplyDefaultNight()
+{
+	// Rendering-line default; server AMBIENCE envelope (A5) is authoritative and
+	// overrides this (OnAmbienceEnvelope -> ApplyRaw replaces s_current wholesale
+	// whenever it arrives). We touch ONLY the fog fields here; tint/moon stay at
+	// their neutral defaults because the sky pass publishes tint per-frame into
+	// view.ambience (PublishLighting), never reading these stored tint values.
+	float density = ( s_cvarDefaultDensity != NULL ) ? s_cvarDefaultDensity->value : 0.0022f;
+
+	// Mirror into the byte-domain raw so a subsequent dev edit / Info echo sees a
+	// consistent state. Color bytes round-trip the linear default closely enough
+	// for the dev echo (the authoritative path is the linear s_current below).
+	s_raw.fogR = ClampByte( (int)( kDefaultNightFogColor[0] * 255.0f + 0.5f ));
+	s_raw.fogG = ClampByte( (int)( kDefaultNightFogColor[1] * 255.0f + 0.5f ));
+	s_raw.fogB = ClampByte( (int)( kDefaultNightFogColor[2] * 255.0f + 0.5f ));
+	s_raw.fogDensity = density;
+
+	s_current.fogColor[0] = kDefaultNightFogColor[0];
+	s_current.fogColor[1] = kDefaultNightFogColor[1];
+	s_current.fogColor[2] = kDefaultNightFogColor[2];
+	s_current.fogDensity = density;
+
+	CSZ_LogInfo( "fog", "default night fog applied: c=(%.3f,%.3f,%.3f) d=%f (server AMBIENCE overrides)",
+		s_current.fogColor[0], s_current.fogColor[1], s_current.fogColor[2], density );
+}
+
 void FogController::OnAmbienceEnvelope( const unsigned char *payload, int size )
 {
 	// Fixed-length body; every group is always present, flags gate effect
@@ -350,6 +383,11 @@ const AmbienceParams &FogController::Current() const
 
 void FogController::RegisterDevCommands()
 {
+	// Production cvar (A-class, NOT dev-gated): tunes the amount of the
+	// rendering-line black-fog default only; it cannot disable the feature.
+	if( s_cvarDefaultDensity == NULL )
+		s_cvarDefaultDensity = gEngfuncs.pfnRegisterVariable( "csz_fog_default_density", "0.0018", FCVAR_CLIENTDLL );
+
 #ifdef CSZ_DEV_TOOLS
 	gEngfuncs.pfnAddCommand( "csz_devfog", DevFogCommand );
 	gEngfuncs.pfnAddCommand( "csz_devtint", DevTintCommand );
