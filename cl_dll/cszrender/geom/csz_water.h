@@ -92,6 +92,12 @@ public:
 	// frustum, computed by DrawWater each frame. -1 = not yet tested this map.
 	int VisibleWaterFaces() const { return m_visibleFacesLastFrame; }
 
+	// Count per-face water AABBs that survive an ARBITRARY frustum (does NOT
+	// touch m_visibleFacesLastFrame). Used by the capture auto-frame
+	// (csz_debugcam 2) to score candidate poses before any frame is drawn. Same
+	// CullBox test DrawWater uses. 0 when the map has no water.
+	int CountVisibleFaces( const Frustum &frustum ) const;
+
 private:
 	// One draw batch = all triangle-list vertices that share a single diffuse
 	// texture slot, stored as a CONTIGUOUS run in the VBO. The turb faces are

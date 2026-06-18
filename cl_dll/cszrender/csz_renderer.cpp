@@ -133,10 +133,17 @@ void AimAnglesToward( const float eye[3], const float target[3], float anglesOut
 	anglesOut[2] = 0.0f;
 }
 
-// csz_debugcam 2: pick the first candidate eye that (a) sits in EMPTY/WATER
-// (not SOLID/SKY) and (b), aiming at the water centroid, has the centroid in
-// front within the view half-FOV. Candidates orbit the water-surface center
-// (water AABB top). Returns true + fills origin/angles; logs the verdict.
+// csz_debugcam 2: auto-frame the map water for a well-composed A/B shot.
+// SELECTION RULE: among ALL legit candidates (eye contents EMPTY/WATER + inside
+// world AABB + water centroid inside the candidate's frustum cone), pick the one
+// with the MAXIMUM visible water faces (counted in-engine via the candidate's
+// frustum against the per-face AABBs). Tie-break: pitch closest to ~30deg (a
+// grazing/oblique vantage shows the planar reflection far better than straight
+// down). Candidates are generated at a horizontal DISTANCE around the water with
+// a MODERATE height -> shallow pitch (~20-40deg), plus a few steeper/overhead
+// fallbacks. All evaluated in this single frame setup (PM_PointContents + a
+// frustum build + a per-face CullBox sweep per candidate is cheap). Returns true
+// + fills origin/angles; logs the chosen pose, its visFaces, and legit/total.
 bool AutoFrameWater( ViewSetup &view )
 {
 	float wc[3], wmin[3], wmax[3];
@@ -149,48 +156,90 @@ bool AutoFrameWater( ViewSetup &view )
 		return false;
 	}
 
-	// Surface center = water-body XY centroid at the AABB top (maxs.z).
-	const float surf[3] = { wc[0], wc[1], wmax[2] };
+	// World AABB for the inside-world legitimacy test (same bounds the camgate
+	// uses below; eps matches PointInBox usage there).
+	const EngModel *bsp = EngBsp( WorldModel() );
+	const float worldMin[3] = { bsp->mins[0], bsp->mins[1], bsp->mins[2] };
+	const float worldMax[3] = { bsp->maxs[0], bsp->maxs[1], bsp->maxs[2] };
+
+	const float planeZ = wmax[2];				// water surface (top plane)
 	// Aim target = water-body centroid (mid-Z), so the surface fills the shot.
 	const float target[3] = { wc[0], wc[1], ( wmin[2] + wmax[2] ) * 0.5f };
-
-	// Ordered candidate eye offsets from the surface center (overhead first,
-	// then progressively oblique orbits). ~12 candidates.
-	static const float kOff[][3] = {
-		{    0.0f,    0.0f,   96.0f },
-		{    0.0f,    0.0f,  160.0f },
-		{    0.0f,    0.0f,   64.0f },
-		{  250.0f,    0.0f,  120.0f },
-		{ -250.0f,    0.0f,  120.0f },
-		{    0.0f,  250.0f,  120.0f },
-		{    0.0f, -250.0f,  120.0f },
-		{  250.0f,  250.0f,  140.0f },
-		{ -250.0f, -250.0f,  140.0f },
-		{  450.0f,    0.0f,  200.0f },
-		{    0.0f,  450.0f,  200.0f },
-		{    0.0f,    0.0f,  280.0f },
-	};
-	const int kNumCand = (int)( sizeof( kOff ) / sizeof( kOff[0] ));
 
 	// Half the wider FOV (with a small margin) as the in-front cone threshold.
 	float halfFov = 0.5f * ( ( view.fovX > view.fovY ) ? view.fovX : view.fovY );
 	if( halfFov < 1.0f || halfFov > 89.0f ) halfFov = 45.0f;	// guard bad/zero FOV
 	float cosHalf = cosf( ( halfFov - 3.0f ) * kCamDegToRad );	// 3deg margin in
 
-	int tried = 0;
-	for( int i = 0; i < kNumCand; i++ )
-	{
-		float eye[3] = { surf[0] + kOff[i][0], surf[1] + kOff[i][1], surf[2] + kOff[i][2] };
-		tried = i + 1;
+	// --- candidate generation ------------------------------------------------
+	// OBLIQUE grazing set FIRST: 8 compass directions x 2 horizontal distances x
+	// 2 heights above planeZ, eye placed at (center + dir*dist, planeZ + height).
+	// Aiming at the centroid then yields a shallow pitch (atan(height/dist) over
+	// the run to center): e.g. dist 900 / height 320 -> ~20deg; dist 600 /
+	// height 360 -> ~31deg. Then a few steeper/overhead fallbacks so a cramped
+	// water pit still gets framed if no oblique candidate is legit.
+	static const float kDirs[][2] = {
+		{  1.0f,  0.0f }, { -1.0f,  0.0f }, {  0.0f,  1.0f }, {  0.0f, -1.0f },
+		{  0.707f,  0.707f }, { -0.707f,  0.707f }, {  0.707f, -0.707f }, { -0.707f, -0.707f },
+	};
+	const int kNumDirs = (int)( sizeof( kDirs ) / sizeof( kDirs[0] ));
+	static const float kDist[]   = { 600.0f, 900.0f, 1300.0f };
+	const int kNumDist = (int)( sizeof( kDist ) / sizeof( kDist[0] ));
+	static const float kHeight[] = { 180.0f, 320.0f };	// above planeZ -> grazing pitch
+	const int kNumHeight = (int)( sizeof( kHeight ) / sizeof( kHeight[0] ));
+	// Steeper/overhead fallbacks (offset from surface center), pitch large.
+	static const float kFallback[][3] = {
+		{    0.0f,    0.0f,  280.0f },
+		{    0.0f,    0.0f,  160.0f },
+		{  300.0f,    0.0f,  260.0f },
+		{    0.0f,  300.0f,  260.0f },
+	};
+	const int kNumFallback = (int)( sizeof( kFallback ) / sizeof( kFallback[0] ));
 
+	const int kNumCand = kNumDirs * kNumDist * kNumHeight + kNumFallback;
+
+	// Best (max visFaces, then pitch nearest ~30deg) over all legit candidates.
+	const float kIdealPitch = 30.0f;
+	int   bestVis   = -1;
+	float bestPitchErr = 1.0e9f;
+	float bestEye[3] = { 0.0f, 0.0f, 0.0f };
+	float bestAng[3] = { 0.0f, 0.0f, 0.0f };
+	int   legitCount = 0;
+
+	for( int ci = 0; ci < kNumCand; ci++ )
+	{
+		float eye[3];
+		if( ci < kNumDirs * kNumDist * kNumHeight )
+		{
+			int idx = ci;
+			int hi = idx % kNumHeight; idx /= kNumHeight;
+			int di = idx % kNumDist;   idx /= kNumDist;
+			int dr = idx;
+			eye[0] = wc[0] + kDirs[dr][0] * kDist[di];
+			eye[1] = wc[1] + kDirs[dr][1] * kDist[di];
+			eye[2] = planeZ + kHeight[hi];
+		}
+		else
+		{
+			const float *o = kFallback[ci - kNumDirs * kNumDist * kNumHeight];
+			eye[0] = wc[0] + o[0];
+			eye[1] = wc[1] + o[1];
+			eye[2] = planeZ + o[2];
+		}
+
+		// Legit: not SOLID/SKY at the eye AND inside the world AABB (64u eps to
+		// match the camgate's PointInBox test).
 		int c = EyeContents( eye );
 		if( c != CONTENTS_EMPTY && c != CONTENTS_WATER )
-			continue;	// embedded in solid/sky or other -> reject
+			continue;
+		if( !PointInBox( eye, worldMin, worldMax, 64.0f ))
+			continue;
 
 		float ang[3];
 		AimAnglesToward( eye, target, ang );
 
-		// Verify the target projects inside the frustum cone: forward . dir.
+		// Target must project inside the frustum cone (forward . dir) and within
+		// far clip -- guards against a degenerate aim.
 		float fwd[3], right[3], up[3];
 		AngleVectors( ang, fwd, right, up );
 		float dir[3] = { target[0] - eye[0], target[1] - eye[1], target[2] - eye[2] };
@@ -199,20 +248,161 @@ bool AutoFrameWater( ViewSetup &view )
 			continue;
 		float inv = 1.0f / len;
 		float dot = fwd[0] * dir[0] * inv + fwd[1] * dir[1] * inv + fwd[2] * dir[2] * inv;
-
-		bool inFront = ( dot > cosHalf ) && ( len < view.zFar );
-		if( !inFront )
+		if( !( dot > cosHalf && len < view.zFar ))
 			continue;
 
-		// Accept this candidate.
-		view.origin[0] = eye[0]; view.origin[1] = eye[1]; view.origin[2] = eye[2];
-		view.angles[0] = ang[0]; view.angles[1] = ang[1]; view.angles[2] = ang[2];
-		CSZ_LogInfo( "camgate", "auto-frame chosen pos=(%.1f %.1f %.1f) ang=(%.1f %.1f %.1f) from %d candidates (tried=%d)",
-			eye[0], eye[1], eye[2], ang[0], ang[1], ang[2], kNumCand, tried );
+		legitCount++;
+
+		// Build this candidate's frustum (reuse the engine projection already in
+		// view.matProj) and count visible water faces against the per-face AABBs.
+		Mat4 mView, mViewProj;
+		Frustum fr;
+		Mat4ViewQuake( eye, ang, mView );
+		Mat4Multiply( view.matProj, mView, mViewProj );
+		FrustumFromMatrix( mViewProj, false, fr );
+		int vis = g_water.CountVisibleFaces( fr );
+
+		float pitchErr = ( ang[0] >= kIdealPitch ) ? ( ang[0] - kIdealPitch ) : ( kIdealPitch - ang[0] );
+
+		// Max visible faces wins; tie -> pitch nearest the ideal grazing angle.
+		if( vis > bestVis || ( vis == bestVis && pitchErr < bestPitchErr ))
+		{
+			bestVis = vis;
+			bestPitchErr = pitchErr;
+			bestEye[0] = eye[0]; bestEye[1] = eye[1]; bestEye[2] = eye[2];
+			bestAng[0] = ang[0]; bestAng[1] = ang[1]; bestAng[2] = ang[2];
+		}
+	}
+
+	if( legitCount == 0 || bestVis <= 0 )
+	{
+		CSZ_LogInfo( "camgate", "auto-frame FAILED (legit=%d of %d, bestVis=%d)",
+			legitCount, kNumCand, bestVis );
+		return false;
+	}
+
+	view.origin[0] = bestEye[0]; view.origin[1] = bestEye[1]; view.origin[2] = bestEye[2];
+	view.angles[0] = bestAng[0]; view.angles[1] = bestAng[1]; view.angles[2] = bestAng[2];
+
+	// Log ONCE per chosen-pose change (the pose is deterministic and stable, so
+	// this fires for the framed shot then stays quiet -- no per-frame spam, which
+	// is what bloated the V6 log to 300KB+).
+	static float s_lastEye[3] = { 1.0e30f, 1.0e30f, 1.0e30f };
+	if( s_lastEye[0] != bestEye[0] || s_lastEye[1] != bestEye[1] || s_lastEye[2] != bestEye[2] )
+	{
+		s_lastEye[0] = bestEye[0]; s_lastEye[1] = bestEye[1]; s_lastEye[2] = bestEye[2];
+		CSZ_LogInfo( "camgate", "auto-frame chosen pos=(%.1f %.1f %.1f) ang=(%.1f %.1f %.1f) visFaces=%d (legit=%d of %d)",
+			bestEye[0], bestEye[1], bestEye[2], bestAng[0], bestAng[1], bestAng[2],
+			bestVis, legitCount, kNumCand );
+	}
+	return true;
+}
+
+// csz_debugcam 3: auto-nudge a seed pose to the nearest legit EMPTY eye, KEEPING
+// the operator's aim (for rain/snow/wet vantage shots where the look direction
+// is chosen, not the water). Seed already EMPTY -> use as-is. Seed in SOLID/SKY
+// (or outside world) -> search outward: first raise Z in steps, then try ±X/±Y
+// rings at increasing radius, picking the first EMPTY point inside the world.
+// Returns true + writes the chosen eye into view.origin (angles untouched);
+// logs the seed, chosen point, and step count, or 'auto-nudge FAILED'.
+bool AutoNudgeToLegit( ViewSetup &view )
+{
+	const EngModel *bsp = EngBsp( WorldModel() );
+	const float worldMin[3] = { bsp->mins[0], bsp->mins[1], bsp->mins[2] };
+	const float worldMax[3] = { bsp->maxs[0], bsp->maxs[1], bsp->maxs[2] };
+
+	float seed[3] = { view.origin[0], view.origin[1], view.origin[2] };
+
+	// Throttle: the seed is a stable cvar, so a fresh search every frame would
+	// log identically forever (the V6 spam lesson). Cache the last seed + the
+	// nudge result; when the seed is unchanged, replay the cached chosen origin
+	// without re-logging. -1 = no cached result yet.
+	static float s_lastSeed[3] = { 1.0e30f, 1.0e30f, 1.0e30f };
+	static float s_chosen[3]   = { 0.0f, 0.0f, 0.0f };
+	static int   s_cachedOk    = -1;
+	bool seedSame = ( s_lastSeed[0] == seed[0] && s_lastSeed[1] == seed[1] && s_lastSeed[2] == seed[2] );
+	if( seedSame && s_cachedOk >= 0 )
+	{
+		if( s_cachedOk == 1 )
+		{
+			view.origin[0] = s_chosen[0]; view.origin[1] = s_chosen[1]; view.origin[2] = s_chosen[2];
+		}
+		return s_cachedOk == 1;
+	}
+	s_lastSeed[0] = seed[0]; s_lastSeed[1] = seed[1]; s_lastSeed[2] = seed[2];
+
+	// Accept the seed directly when it is already a clean, in-world EMPTY eye.
+	int sc = EyeContents( seed );
+	if( sc == CONTENTS_EMPTY && PointInBox( seed, worldMin, worldMax, 64.0f ))
+	{
+		s_chosen[0] = seed[0]; s_chosen[1] = seed[1]; s_chosen[2] = seed[2];
+		s_cachedOk = 1;
+		CSZ_LogInfo( "camgate", "auto-nudge seed=(%.1f %.1f %.1f) already EMPTY -> chosen=(%.1f %.1f %.1f) ang=(%.1f %.1f %.1f) steps=0",
+			seed[0], seed[1], seed[2], seed[0], seed[1], seed[2],
+			view.angles[0], view.angles[1], view.angles[2] );
 		return true;
 	}
 
-	CSZ_LogInfo( "camgate", "auto-frame FAILED all %d candidates", kNumCand );
+	// Outward/upward search. Step 1: raise Z (the seed is usually buried in floor
+	// geometry, so lifting straight up exits solid fastest). Then expand ±X/±Y
+	// rings at the original height AND a couple of raised heights.
+	static const float kZsteps[]   = { 32.0f, 64.0f, 96.0f, 128.0f, 192.0f, 256.0f, 384.0f, 512.0f };
+	const int kNumZ = (int)( sizeof( kZsteps ) / sizeof( kZsteps[0] ));
+	static const float kRings[]    = { 96.0f, 192.0f, 320.0f, 512.0f, 768.0f };
+	const int kNumRings = (int)( sizeof( kRings ) / sizeof( kRings[0] ));
+	static const float kRingZ[]    = { 0.0f, 96.0f, 192.0f };	// height added while ringing
+	const int kNumRingZ = (int)( sizeof( kRingZ ) / sizeof( kRingZ[0] ));
+	static const float kRingDir[][2] = {
+		{  1.0f,  0.0f }, { -1.0f,  0.0f }, {  0.0f,  1.0f }, {  0.0f, -1.0f },
+		{  0.707f,  0.707f }, { -0.707f,  0.707f }, {  0.707f, -0.707f }, { -0.707f, -0.707f },
+	};
+	const int kNumRingDir = (int)( sizeof( kRingDir ) / sizeof( kRingDir[0] ));
+
+	int steps = 0;
+
+	// Pass 1: straight up.
+	for( int z = 0; z < kNumZ; z++ )
+	{
+		float p[3] = { seed[0], seed[1], seed[2] + kZsteps[z] };
+		steps++;
+		if( EyeContents( p ) == CONTENTS_EMPTY && PointInBox( p, worldMin, worldMax, 64.0f ))
+		{
+			view.origin[0] = p[0]; view.origin[1] = p[1]; view.origin[2] = p[2];
+			s_chosen[0] = p[0]; s_chosen[1] = p[1]; s_chosen[2] = p[2];
+			s_cachedOk = 1;
+			CSZ_LogInfo( "camgate", "auto-nudge seed=(%.1f %.1f %.1f) -> chosen=(%.1f %.1f %.1f) ang=(%.1f %.1f %.1f) steps=%d",
+				seed[0], seed[1], seed[2], p[0], p[1], p[2],
+				view.angles[0], view.angles[1], view.angles[2], steps );
+			return true;
+		}
+	}
+
+	// Pass 2: ±X/±Y rings at increasing radius and a few raised heights.
+	for( int r = 0; r < kNumRings; r++ )
+		for( int rz = 0; rz < kNumRingZ; rz++ )
+			for( int d = 0; d < kNumRingDir; d++ )
+			{
+				float p[3] = {
+					seed[0] + kRingDir[d][0] * kRings[r],
+					seed[1] + kRingDir[d][1] * kRings[r],
+					seed[2] + kRingZ[rz]
+				};
+				steps++;
+				if( EyeContents( p ) == CONTENTS_EMPTY && PointInBox( p, worldMin, worldMax, 64.0f ))
+				{
+					view.origin[0] = p[0]; view.origin[1] = p[1]; view.origin[2] = p[2];
+					s_chosen[0] = p[0]; s_chosen[1] = p[1]; s_chosen[2] = p[2];
+					s_cachedOk = 1;
+					CSZ_LogInfo( "camgate", "auto-nudge seed=(%.1f %.1f %.1f) -> chosen=(%.1f %.1f %.1f) ang=(%.1f %.1f %.1f) steps=%d",
+						seed[0], seed[1], seed[2], p[0], p[1], p[2],
+						view.angles[0], view.angles[1], view.angles[2], steps );
+					return true;
+				}
+			}
+
+	s_cachedOk = 0;
+	CSZ_LogInfo( "camgate", "auto-nudge FAILED seed=(%.1f %.1f %.1f) after %d steps",
+		seed[0], seed[1], seed[2], steps );
 	return false;
 }
 
@@ -539,8 +729,9 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	if( m_cvarDebugCam != NULL && m_cvarDebugCam->value != 0.0f )
 	{
 		const bool autoFrame = ( m_cvarDebugCam->value == 2.0f );
+		const bool autoNudge = ( m_cvarDebugCam->value == 3.0f );
 		bool poseChanged = false;	// did we actually move the view this pass?
-		bool autoFrameOk = true;	// csz_debugcam 2 self-correct verdict
+		bool autoFrameOk = true;	// csz_debugcam 2/3 self-correct verdict
 
 		if( autoFrame )
 		{
@@ -570,6 +761,17 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 			}
 			// Parse failure = ignore that override (keep the engine's value).
 			poseChanged = ( posOk || angOk );
+
+			if( autoNudge )
+			{
+				// csz_debugcam 3 = auto-nudge the SEED (the parsed manual pose) to the
+				// nearest legit EMPTY eye, keeping the operator's aim. Non-water
+				// vantage shots (rain/snow/wet) whose seed may be buried in floor
+				// geometry get lifted out of solid so they pass the camgate. Verdict
+				// folds into the same autoFrameOk gate as mode 2.
+				autoFrameOk = AutoNudgeToLegit( view );
+				poseChanged = true;	// the seed was at least applied; nudge may move it further
+			}
 		}
 
 		if( poseChanged )
@@ -591,7 +793,7 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 		float wmin[3] = { bsp->mins[0], bsp->mins[1], bsp->mins[2] };
 		float wmax[3] = { bsp->maxs[0], bsp->maxs[1], bsp->maxs[2] };
 		bool insideWorld = PointInBox( view.origin, wmin, wmax, 64.0f );
-		bool legit = ContentsLegit( contents ) && insideWorld && ( !autoFrame || autoFrameOk );
+		bool legit = ContentsLegit( contents ) && insideWorld && ( ( !autoFrame && !autoNudge ) || autoFrameOk );
 
 		m_camGateLegit = legit;
 		m_camGateContents = contents;

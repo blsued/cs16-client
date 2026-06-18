@@ -77,3 +77,31 @@ The user looked at V5 and rejected it. I accept this verdict without defense. Co
     the analytic fake. Honest FPS gate (200 budget; half-res FBO).
 - **Phase 3:** build → capture under lock → SEPARATE visual-review (frames) & code-review (diffs) subagents.
 - Honesty: any phase that won't build/work → reported BLOCKED, never optimism.
+
+## Iteration log
+
+- 03:39 — Phase 1 committed `2d4ef17`, Phase 2 committed `1400fb3`. Both build clean (client.dll 715776 B).
+- 03:41 — First V6 capture (RunId v6_20260618) + parallel code review. Results:
+  - **Code review: PASS** (structurally sound, no blockers; 1 MEDIUM portability note re gl_ClipDistance
+    outside GLES3/WebGL2 intersection → wants CSZ-PORT marker; minor LOW perf — redundant main visible-set
+    rebuild + 2nd world draw, fine for budget).
+  - **Reflection genuinely RAN** (no analytic fallback): `reflect=1 planeZ=-344 reflTex=1233 refrTex=1234
+    reflRes=640x360`. FPS 415 avg worst-case (>>200 budget). Lock + DLL SHA-verify OK.
+  - **Camgate WORKED — caught bad frames before any false claim:**
+    - de_dust2 rain/snow/wet: camera (-700 -1550 z) in **SOLID** → legit=0 → 3 scenarios correctly FAILED.
+      Root: hardcoded poses, no auto-frame for non-water scenarios.
+    - de_aztec water_off vs water_on PNGs **byte-identical** → `csz_water 0` did not disable water in the
+      shot (off log still draw_batches=1, reflect=1). A/B not proven — capture-config bug.
+    - Auto-frame picked straight-down (pitch 90), visible_water_faces=28/324 — legit but poorly framed for
+      reflection (grazing angles show reflection best).
+  - **DECISION: do NOT run visual review on invalid/poorly-framed frames.** Fix framing/poses/toggle first
+    (the gate exists precisely to block premature visual claims). Phase 2.5 below.
+- **Phase 2.5 (fix capture legitimacy & framing — renderer auto-frame + capture script):**
+  1. Improve `csz_debugcam 2` auto-frame: pick the candidate with MAX visible_water_faces (not first), bias
+     to OBLIQUE grazing vantage (pitch ~20-40°, horizontal offset) so the frame shows more surface + real
+     reflection of surrounding geometry/sky.
+  2. Add `csz_debugcam 3` auto-nudge: for non-water scenarios, nudge a seed pose out of SOLID to nearest
+     legit EMPTY point (keep angles) → salvage de_dust2 rain/snow/wet legitimately.
+  3. Fix water on/off A/B: make water_off truly disable water (draw_batches=0); ensure on = real reflect.
+     Optionally add an analytic-vs-real A/B/C (csz_water_reflect 0 vs 1) to evidence the bottom-level fix.
+  → rebuild → re-capture → THEN separate visual review on legit, well-framed frames.

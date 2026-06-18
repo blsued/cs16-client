@@ -687,4 +687,18 @@ void WaterRenderer::GetWaterBounds( float center[3], float mins[3], float maxs[3
 	}
 }
 
+int WaterRenderer::CountVisibleFaces( const Frustum &frustum ) const
+{
+	// Pure scoring helper for the capture auto-frame: same per-face CullBox test
+	// DrawWater runs (CullBox true = fully outside), but against a caller-supplied
+	// frustum and WITHOUT mutating m_visibleFacesLastFrame.
+	int n = 0;
+	for( int f = 0; f < m_numFaceBounds; f++ )
+	{
+		if( !frustum.CullBox( m_faceBounds[f].mins, m_faceBounds[f].maxs ))
+			n++;
+	}
+	return n;
+}
+
 }

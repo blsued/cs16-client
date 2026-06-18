@@ -149,34 +149,49 @@ $ProgressGraceSeconds      = 180   # 3-minute rule: must see proc alive AND a pn
 #    OutPng      EXACT deliverable filename copied into R2_EVIDENCE_V5
 # ============================================================================
 $AllScenarios = @(
-  # --- de_aztec water A/B: csz_debugcam 2 auto-frames the water body in-engine
-  #     (self-correcting legit pose), csz_water 0 vs 1 (MUST differ). The blind
-  #     hand pose is gone -- the renderer picks a legit eye over the water. ----
+  # --- de_aztec water A/B/C: csz_debugcam 2 auto-frames the water body in-engine
+  #     at an OBLIQUE grazing vantage (max visible faces, pitch ~30deg) so the
+  #     planar reflection reads -- the prior straight-down (90deg) pose made the
+  #     on/off frames byte-identical. The 3 shots SHARE the auto-frame pose
+  #     (A/B/C control) and differ ONLY in the water cvars:
+  #       off      : csz_water 0                    -> no water pass (draw_batches=0)
+  #       analytic : csz_water 1 + csz_water_reflect 0 -> OLD analytic-sky fake
+  #       on       : csz_water 1 + csz_water_reflect 1 -> REAL planar reflection
+  #     ReflectCvar is emitted explicitly (BEFORE csz_water, which is emitted
+  #     LAST) so the off shot can never be re-enabled by a stale default. ------
   @{ Name='water_off_de_aztec'; Map='de_aztec'; WeatherMode=0; Intensity=''; Quality='';
-     WaterCvar=0;     AutoFrameWater=$true; DebugPos='328 -600 -300'; DebugAng='8 90 0';
+     WaterCvar=0; ReflectCvar=0; AutoFrameWater=$true; DebugPos='328 -600 -300'; DebugAng='8 90 0';
      Hold=$false; ExpectWater=$true;  OutPng='weather_v5_00_water_off_surface.png' },
 
+  @{ Name='water_analytic_de_aztec'; Map='de_aztec'; WeatherMode=0; Intensity=''; Quality='';
+     WaterCvar=1; ReflectCvar=0; AutoFrameWater=$true; DebugPos='328 -600 -300'; DebugAng='8 90 0';
+     Hold=$false; ExpectWater=$true;  OutPng='weather_v5_01b_water_analytic_surface.png' },
+
   @{ Name='water_on_de_aztec';  Map='de_aztec'; WeatherMode=0; Intensity=''; Quality='';
-     WaterCvar=1;     AutoFrameWater=$true; DebugPos='328 -600 -300'; DebugAng='8 90 0';
+     WaterCvar=1; ReflectCvar=1; AutoFrameWater=$true; DebugPos='328 -600 -300'; DebugAng='8 90 0';
      Hold=$false; ExpectWater=$true;  OutPng='weather_v5_01_water_on_surface.png' },
 
-  # --- de_dust2 weather clean shots --------------------------------------------
+  # --- de_dust2 weather clean shots. csz_debugcam 3 = auto-nudge: the renderer
+  #     lifts the SEED out of solid (the prior -700 -1550 z seed was INSIDE SOLID
+  #     -> legit=0 -> all 3 auto-failed) to the nearest legit EMPTY eye while
+  #     KEEPING the operator's aim. Seed Z raised toward the play area; the nudge
+  #     does the final correction in-engine. ----------------------------------
   @{ Name='rain_clean_de_dust2'; Map='de_dust2'; WeatherMode=1; Intensity='0.7'; Quality='2';
-     WaterCvar=1;     DebugPos='-700 -1550 140'; DebugAng='2 90 0';
+     WaterCvar=1;     AutoNudge=$true; DebugPos='-700 -1550 160'; DebugAng='5 90 0';
      Hold=$false; ExpectWater=$false; OutPng='weather_v5_02_rain_clean.png' },
 
   @{ Name='snow_cover_de_dust2'; Map='de_dust2'; WeatherMode=2; Intensity='0.7'; Quality='2';
-     WaterCvar=1;     DebugPos='-700 -1550 90'; DebugAng='12 90 0';
+     WaterCvar=1;     AutoNudge=$true; DebugPos='-700 -1550 160'; DebugAng='12 90 0';
      Hold=$false; ExpectWater=$false; OutPng='weather_v5_03_snow_cover_clean.png' },
 
   @{ Name='wet_ground_de_dust2'; Map='de_dust2'; WeatherMode=1; Intensity='1.0'; Quality='2';
-     WaterCvar=1;     DebugPos='-700 -1550 50'; DebugAng='8 90 0';
+     WaterCvar=1;     AutoNudge=$true; DebugPos='-700 -1550 160'; DebugAng='8 90 0';
      Hold=$false; ExpectWater=$false; OutPng='weather_v5_04_wet_ground_clean.png' },
 
   # --- worst-case FPS stress: heaviest load (high-quality, max-intensity rain
   #     + water on) for the FPS headroom shot. THIS is the hold/FPS-window shot.
   @{ Name='worstcase_fps_de_aztec'; Map='de_aztec'; WeatherMode=1; Intensity='1.0'; Quality='2';
-     WaterCvar=1;     AutoFrameWater=$true; DebugPos='328 -600 -300'; DebugAng='8 90 0';
+     WaterCvar=1; ReflectCvar=1; AutoFrameWater=$true; DebugPos='328 -600 -300'; DebugAng='8 90 0';
      Hold=$true;  ExpectWater=$true;  OutPng='weather_v5_05_worstcase_fps.png' }
 )
 
@@ -223,9 +238,13 @@ function Add-ConsistencyOff {
 
 function Get-EffectCmds([hashtable]$Sc) {
   # Translate the self-contained scenario fields into the effect cvar lines.
-  # Order: water -> quality/intensity -> weather LAST (weather mode re-reads
+  # Order: csz_water_reflect FIRST, then csz_water LAST among the water cvars
+  # (so the authoritative csz_water value is applied after reflect and cannot be
+  # left re-enabled by a stale default -- the V6 on/off identical-frame bug),
+  # then quality/intensity, then weather LAST (weather mode re-reads
   # quality/intensity at toggle). '' / 'none' means "leave default / untouched".
   $cmds = New-Object System.Collections.Generic.List[string]
+  if ("$($Sc.ReflectCvar)" -ne 'none' -and "$($Sc.ReflectCvar)" -ne $null -and "$($Sc.ReflectCvar)" -ne '') { $cmds.Add("csz_water_reflect $($Sc.ReflectCvar)") }
   if ("$($Sc.WaterCvar)" -ne 'none' -and "$($Sc.WaterCvar)" -ne '') { $cmds.Add("csz_water $($Sc.WaterCvar)") }
   if ("$($Sc.Quality)"   -ne '')                                    { $cmds.Add("csz_weather_quality $($Sc.Quality)") }
   if ("$($Sc.Intensity)" -ne '')                                    { $cmds.Add("csz_weather_intensity $($Sc.Intensity)") }
@@ -319,8 +338,12 @@ function Write-ScenarioAutoexec([hashtable]$Sc, [int]$HoldSeconds) {
   # --- camera via debugcam cvars (setpos/setang are Unknown command here) -----
   #   mode 2 = renderer auto-frames the map water (self-correcting legit pose);
   #   the manual pos/ang are ignored by the renderer but still set as a fallback
-  #   record. mode 1 = blind manual pose from the table.
-  $camMode = if ($Sc.AutoFrameWater) { 2 } else { 1 }
+  #   record.
+  #   mode 3 = renderer auto-nudges the SEED pos/ang to the nearest legit EMPTY
+  #   eye, KEEPING the operator's aim (for non-water rain/snow/wet vantage shots
+  #   whose seed may be buried in solid).
+  #   mode 1 = blind manual pose from the table.
+  $camMode = if ($Sc.AutoFrameWater) { 2 } elseif ($Sc.AutoNudge) { 3 } else { 1 }
   $L.Add("csz_debugcam $camMode")
   $L.Add("csz_debugcam_pos `"$($Sc.DebugPos)`"")
   $L.Add("csz_debugcam_ang `"$($Sc.DebugAng)`"")
