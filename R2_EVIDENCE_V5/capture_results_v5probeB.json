@@ -1,0 +1,27 @@
+﻿{
+    "name":  "water_on_de_aztec",
+    "runid":  "v5probeB",
+    "map":  "de_aztec",
+    "png":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\water_on_de_aztec_v5probeB.png",
+    "out_png":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\weather_v5_01_water_on_surface.png",
+    "log":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\engine_water_on_de_aztec_v5probeB.log",
+    "turb_count":  324,
+    "fps_samples":  4,
+    "fps_avg":  769.3,
+    "fps_sane":  true,
+    "unlock_end":  true,
+    "fps_readback":  [
+                         "\"gl_vsync\" is \"0\" ( \"1\" )",
+                         "\"fps_override\" is \"1\" ( \"0\" )",
+                         "\"fps_max\" is \"1000\" ( \"72\" )",
+                         "\"cl_updaterate\" is \"1000\" ( \"20\" )",
+                         "\"sys_ticrate\" is \"1000\" ( \"100\" )"
+                     ],
+    "fps_max_observed":  998.1,
+    "fps_cap_active":  false,
+    "debugcam_valid":  true,
+    "debugcam_active":  "[CSZ:debugcam] Info: active pos=(328.0 -600.0 -300.0) ang=(8.0 90.0 0.0)",
+    "classification":  "OK",
+    "success":  true,
+    "note":  ""
+}

@@ -102,6 +102,10 @@ const int kVertsPerQuad = 6;     // two triangles, non-indexed (simple + cheap)
 const int kScratchMaxQuads = 7000;	// == WeatherRenderer::kMaxParticles
 float s_vertScratch[kScratchMaxQuads * kVertsPerQuad * kVertFloats];
 
+// Separate small scratch for splash rings (== WeatherRenderer::kMaxSplashes).
+const int kSplashScratchQuads = 256;	// == WeatherRenderer::kMaxSplashes
+float s_splashScratch[kSplashScratchQuads * kVertsPerQuad * kVertFloats];
+
 // Deterministic 32-bit integer hash (public-domain "wang/xxhash-style" mix).
 // Used to seed/recycle particles without relying on a seeded std::rand.
 unsigned int Hash32( unsigned int x )
@@ -309,6 +313,14 @@ void WeatherRenderer::Simulate( const ViewSetup &view )
 
 		m_poolSeeded = true;
 		m_poolMode = mode;
+
+		// Drop any in-flight splashes on a mode change so leftover rain rings never
+		// linger into snow/off.
+		for( int i = 0; i < kMaxSplashes; i++ )
+			m_splashes[i].alive = false;
+
+		m_splashActive = 0;
+		m_splashHead = 0;
 	}
 
 	// Integrate + recycle the active prefix. A particle that leaves the box (fell
@@ -332,10 +344,14 @@ void WeatherRenderer::Simulate( const ViewSetup &view )
 		}
 		else			// SNOW: slow fall + lateral drift/sway
 		{
-			float fall = -90.0f - p.seed * 60.0f;		// -90..-150 z
+			// Depth-aware fall: near flakes (layer~1) larger + drift more; far
+			// (layer~0) smaller/slower -> volume reads across many depths. Two
+			// swirl frequencies (settling tumble) instead of one flat sin sway.
+			float fall = -70.0f - p.seed * 70.0f - p.layer * 30.0f;	// ~-70..-170 z
 			float t = now + p.seed * 6.2831853f;
-			float swayX = sinf( t * 0.8f ) * 30.0f;		// lateral sway
-			float swayY = cosf( t * 0.6f ) * 24.0f;
+			float swirl = 18.0f + p.layer * 22.0f;	// near flakes swirl wider
+			float swayX = ( sinf( t * 0.8f ) + 0.5f * sinf( t * 1.7f + p.seed * 3.0f )) * swirl;
+			float swayY = ( cosf( t * 0.6f ) + 0.5f * cosf( t * 1.3f + p.seed * 2.0f )) * ( swirl * 0.8f );
 			float driftX = ( p.seed - 0.5f ) * 30.0f;	// steady drift bias
 
 			p.pos[0] += ( swayX + driftX ) * dt;
@@ -348,8 +364,36 @@ void WeatherRenderer::Simulate( const ViewSetup &view )
 		float dy = p.pos[1] - org[1];
 		float relZ = p.pos[2] - org[2];
 
-		if( relZ < kBoxBot || dx < -kBoxHalf || dx > kBoxHalf || dy < -kBoxHalf || dy > kBoxHalf )
+		bool hitFloor = ( relZ < kBoxBot );
+
+		if( hitFloor || dx < -kBoxHalf || dx > kBoxHalf || dy < -kBoxHalf || dy > kBoxHalf )
 		{
+			// RAIN hitting the recycle FLOOR near the camera spawns an impact ring.
+			// This is a flat ground-plane approximation (see csz_weather.h note):
+			// the box floor stands in for the ground because no surface trace API
+			// is reachable from the weather subsystem. Limit to streaks landing in
+			// a near radius so splashes cluster believably around the player.
+			if( mode == 1 && hitFloor )
+			{
+				float horiz2 = dx * dx + dy * dy;
+				const float kSplashRadius = 420.0f;
+
+				// Throttle: only a small fraction of near floor-hits spawn a ring, so
+				// the splash set stays small (rings live ~0.4s instead of being
+				// overwritten the same frame) and the second draw stays cheap. The
+				// gate is deterministic (hash RNG) so captures reproduce.
+				float gate = Rand01( key, m_frameCounter + 101u );
+
+				if( horiz2 < kSplashRadius * kSplashRadius && gate < 0.04f )
+				{
+					float landed[3];
+					landed[0] = p.pos[0];
+					landed[1] = p.pos[1];
+					landed[2] = org[2] + kBoxBot;	// flat floor plane
+					SpawnSplash( landed, Rand01( key, m_frameCounter + 77u ));
+				}
+			}
+
 			// Fresh randomized x/y near the top; salt with the frame counter so the
 			// recycled position is deterministic yet varies frame-to-frame.
 			unsigned int salt = m_frameCounter;
@@ -357,6 +401,53 @@ void WeatherRenderer::Simulate( const ViewSetup &view )
 			p.pos[0] = org[0] + ( Rand01( key, salt + 11u ) * 2.0f - 1.0f ) * kBoxHalf;
 			p.pos[1] = org[1] + ( Rand01( key, salt + 22u ) * 2.0f - 1.0f ) * kBoxHalf;
 			p.pos[2] = org[2] + kBoxTop - Rand01( key, salt + 33u ) * 40.0f;	// just under the ceiling
+		}
+	}
+
+	// Age the splash ring buffer (cheap; early-outs when none are alive, and the
+	// mode-change reseed above clears them so none linger into snow).
+	SimulateSplashes( dt );
+}
+
+// Queue one impact ring into the fixed ring buffer (oldest is overwritten when
+// full -- bounded cost, never reallocates). Deterministic: seed comes from the
+// hash RNG so repeated captures reproduce.
+void WeatherRenderer::SpawnSplash( const float pos[3], float seed )
+{
+	Splash &s = m_splashes[m_splashHead];
+
+	if( !s.alive )
+		m_splashActive++;
+
+	s.pos[0] = pos[0];
+	s.pos[1] = pos[1];
+	s.pos[2] = pos[2];
+	s.age = 0.0f;
+	s.life = 0.32f + seed * 0.22f;	// ~0.32..0.54s short-lived ripple
+	s.seed = seed;
+	s.alive = true;
+
+	m_splashHead = ( m_splashHead + 1 ) % kMaxSplashes;
+}
+
+void WeatherRenderer::SimulateSplashes( float dt )
+{
+	if( m_splashActive <= 0 )
+		return;
+
+	for( int i = 0; i < kMaxSplashes; i++ )
+	{
+		Splash &s = m_splashes[i];
+
+		if( !s.alive )
+			continue;
+
+		s.age += dt;
+
+		if( s.age >= s.life )
+		{
+			s.alive = false;
+			m_splashActive--;
 		}
 	}
 }
@@ -372,8 +463,10 @@ void WeatherRenderer::EnsureBuilt()
 		// glDelete them -- the context that owned them is gone (mirrors csz_sky).
 		m_gpu.rainProgram.program = 0;
 		m_gpu.snowProgram.program = 0;
+		m_gpu.splashProgram.program = 0;
 		m_gpu.rainVao = m_gpu.rainVbo = 0;
 		m_gpu.snowVao = m_gpu.snowVbo = 0;
+		m_gpu.splashVao = m_gpu.splashVbo = 0;
 	}
 
 	m_gpu.gpuGeneration = GpuGeneration();
@@ -381,9 +474,12 @@ void WeatherRenderer::EnsureBuilt()
 	// Init-time programs: a compile failure is FATAL (matches world/sky/sprite).
 	BuildProgram( "csz_weather_rain", kRainVs, kRainFs, true, m_gpu.rainProgram );
 	BuildProgram( "csz_weather_snow", kSnowVs, kSnowFs, true, m_gpu.snowProgram );
+	// Rain-impact rings reuse the snow VS (plain corner+color passthrough).
+	BuildProgram( "csz_weather_splash", kSnowVs, kSplashFs, true, m_gpu.splashProgram );
 
 	m_gpu.uRainViewProj = UniformLoc( m_gpu.rainProgram, "u_viewProj" );
 	m_gpu.uSnowViewProj = UniformLoc( m_gpu.snowProgram, "u_viewProj" );
+	m_gpu.uSplashViewProj = UniformLoc( m_gpu.splashProgram, "u_viewProj" );
 
 	const int stride = kVertFloats * (int)sizeof( float );
 
@@ -404,6 +500,18 @@ void WeatherRenderer::EnsureBuilt()
 	BindVao( m_gpu.snowVao );
 	glGenBuffers( 1, &m_gpu.snowVbo );
 	glBindBuffer( GL_ARRAY_BUFFER, m_gpu.snowVbo );
+	glEnableVertexAttribArray( 0 );
+	glVertexAttribPointer( 0, 3, GL_FLOAT, GL_FALSE, stride, (const void *)0 );
+	glEnableVertexAttribArray( 1 );
+	glVertexAttribPointer( 1, 2, GL_FLOAT, GL_FALSE, stride, (const void *)( 3 * sizeof( float )));
+	glEnableVertexAttribArray( 2 );
+	glVertexAttribPointer( 2, 4, GL_FLOAT, GL_FALSE, stride, (const void *)( 5 * sizeof( float )));
+
+	// Splash VAO/VBO (same vertex layout; small dynamic buffer).
+	glGenVertexArrays( 1, &m_gpu.splashVao );
+	BindVao( m_gpu.splashVao );
+	glGenBuffers( 1, &m_gpu.splashVbo );
+	glBindBuffer( GL_ARRAY_BUFFER, m_gpu.splashVbo );
 	glEnableVertexAttribArray( 0 );
 	glVertexAttribPointer( 0, 3, GL_FLOAT, GL_FALSE, stride, (const void *)0 );
 	glEnableVertexAttribArray( 1 );
@@ -434,7 +542,6 @@ void WeatherRenderer::DrawPrecip( const ViewSetup &view )
 	float fwd[3], right[3], up[3];
 
 	AngleVectors( view.angles, fwd, right, up );
-	(void)fwd;
 
 	const float *org = view.origin;
 	float fogDensity = view.ambience.fogDensity;
@@ -442,34 +549,66 @@ void WeatherRenderer::DrawPrecip( const ViewSetup &view )
 	float *v = s_vertScratch;
 	int quads = 0;
 
-	if( mode == 1 )		// ---- RAIN: depth-layered vertical streaks ----
+	if( mode == 1 )		// ---- RAIN: depth-layered motion-blur streaks ----
 	{
 		// Cool desaturated rain color (grey-blue).
 		const float rainR = 0.62f, rainG = 0.70f, rainB = 0.82f;
+
+		// Camera forward (already have fwd from AngleVectors above). Used for the
+		// "don't blanket the sky" fade: streaks whose view-ray points well ABOVE
+		// the horizon are likely drawn against the bright skybox band -> fade them
+		// so rain concentrates in the playable volume in front of/around geometry.
+		// We approximate the per-streak view-ray up-ness with the normalized
+		// camera->streak direction's world-Z, biased by camera pitch (fwd[2]).
 
 		for( int i = 0; i < m_activeCount; i++ )
 		{
 			const Particle &p = m_pool[i];
 
-			// Distance to camera (for fog darkening + size/alpha falloff).
+			// Vector camera->streak (for distance + view-ray up-ness + height fade).
 			float dx = p.pos[0] - org[0];
 			float dy = p.pos[1] - org[1];
 			float dz = p.pos[2] - org[2];
 			float dist = sqrtf( dx * dx + dy * dy + dz * dz );
+			float invDist = ( dist > 1.0f ) ? ( 1.0f / dist ) : 1.0f;
 
-			// Depth layer: near (layer~1) = thicker/longer streaks; far (layer~0) =
-			// thinner/shorter/dimmer = a finer rain veil behind the near curtain.
-			// Per-streak variation from the stable seed so no two streaks match
-			// (length/width/alpha jitter) -> reads as a natural curtain, not UI lines.
 			float layer = p.layer;
 			float jitter = p.seed;				// stable 0..1 per streak
-			// Thinner overall (was 0.9..2.8): near ~0.7..1.4, far ~0.4 -> hairline rain.
-			float halfWidth = 0.40f + layer * ( 0.75f + jitter * 0.35f );
-			// Length varies per streak AND by layer (near longer); far streaks short.
-			float length = 30.0f + layer * 70.0f + jitter * 28.0f;	// ~30..128 units
-			// Far layer DIMMER but still present (veil); near brighter. The far floor
-			// (0.10) keeps a frame-wide fine mist instead of clustering near camera.
-			float baseAlpha = 0.10f + layer * 0.30f + jitter * 0.06f;
+
+			// --- STRUCTURAL near/far parallax ---------------------------------
+			// Strong, legible depth gradient. Near (layer~1) = long/wide/bright;
+			// far (layer~0) = short/thin/dim. Width spread widened, alpha spread
+			// widened vs. the old near-uniform look.
+			float halfWidth = 0.35f + layer * layer * ( 1.20f + jitter * 0.45f );
+
+			// Motion-correct length: proportional to fall SPEED (the same speed the
+			// sim integrates: -1500 - layer*700). Faster (nearer) drops leave longer
+			// motion-blur streaks. Scaled to world units + per-streak jitter so no
+			// two streaks match (breaks the painted-line uniformity).
+			float fallSpeed = 1500.0f + layer * 700.0f;	// matches Simulate()
+			float length = fallSpeed * ( 0.045f + layer * 0.022f ) * ( 0.8f + jitter * 0.5f );
+
+			// --- "Don't blanket the sky" fade ---------------------------------
+			// 1) HEIGHT fade: streaks far ABOVE the camera eye-line and far away
+			//    horizontally are the ones that paint over the sky band. Fade by
+			//    (how high above eye) * (how far horizontal).
+			float horizDist = sqrtf( dx * dx + dy * dy );
+			float aboveEye = Clamp01( dz / kBoxTop );		// 0 at eye, 1 at ceiling
+			float horizFar = Clamp01( horizDist / 600.0f );	// 0 near, 1 far horizontally
+			float skyFade = 1.0f - aboveEye * horizFar;		// high+far -> 0
+
+			// 2) VIEW-RAY up-ness fade: if the streak's view ray points upward
+			//    (rayUp>0) it is likely projected onto the sky band; bias by camera
+			//    pitch so looking up culls more sky rain, looking down keeps it.
+			float rayUp = dz * invDist;				// -1..1 (1 = straight up)
+			float upFade = Clamp01( 1.0f - 0.85f * Clamp01( rayUp + 0.15f * fwd[2] ));
+
+			skyFade = Clamp01( skyFade * ( 0.45f + 0.55f * upFade ));
+
+			// Far layer DIMMER but present (veil); near brighter. Wider alpha spread
+			// (layer^1.4) so the depth read is unmistakable, not a flat curtain.
+			float layerAlpha = layer * layer;
+			float baseAlpha = 0.07f + layerAlpha * 0.40f + jitter * 0.05f;
 
 			// Fog factor (exp2 falloff with distance): FAR streaks get darkened and
 			// further faded so distant rain reads as compressed "rain mist", near
@@ -478,14 +617,14 @@ void WeatherRenderer::DrawPrecip( const ViewSetup &view )
 
 			fog = Clamp01( fog );
 
-			// Gentle distance fade only: stretch the falloff to the full box diagonal
-			// (~1100u) with a 0.30 floor so rain is distributed across the WHOLE frame
-			// (a scene-wide curtain) instead of a tight cluster right at the camera.
+			// Distance fade (full box diagonal ~1100u, 0.22 floor) * sky fade. The
+			// sky fade is the structural fix: it removes the uniform full-frame
+			// curtain, concentrating rain in front of/around near geometry.
 			float distFade = Clamp01( 1.0f - dist / 1100.0f );
-			float alpha = baseAlpha * fog * ( 0.30f + 0.70f * distFade );
+			float alpha = baseAlpha * fog * ( 0.22f + 0.78f * distFade ) * skyFade;
 
 			if( alpha <= 0.004f )
-				continue;	// skip invisible far streaks (cheaper draw)
+				continue;	// skip invisible / sky-culled streaks (cheaper draw)
 
 			// Streak color darkened by fog (far rain = dim rain-mist tone toward
 			// the fog color so it sinks into the haze).
@@ -554,12 +693,27 @@ void WeatherRenderer::DrawPrecip( const ViewSetup &view )
 			float dz = p.pos[2] - org[2];
 			float dist = sqrtf( dx * dx + dy * dy + dz * dz );
 
-			float size = 2.2f + p.seed * 3.0f;		// larger/varied so flakes read
+			// Depth distribution + size variance: near flakes (layer~1) larger,
+			// softer, brighter; far flakes (layer~0) tiny + dim -> reads as a volume
+			// at many depths instead of a uniform sheet. Size couples to BOTH the
+			// depth layer and the per-flake seed for structural variance.
+			float layer = p.layer;
+			float size = 1.0f + layer * ( 2.4f + p.seed * 2.6f );	// far ~1, near ~6
 			float fog = ( fogDensity > 0.0f ) ? Clamp01( exp2f( -fogDensity * dist ) ) : 1.0f;
 			float distFade = Clamp01( 1.0f - dist / ( kBoxHalf * 1.25f ) );
-			// Brighter flakes + a higher near-floor (0.55) so snowfall stays clearly
+
+			// "Don't blanket the sky": flakes high above the eye AND far horizontally
+			// paint over the bright sky band -> fade them the same way as rain.
+			float horizDist = sqrtf( dx * dx + dy * dy );
+			float aboveEye = Clamp01( dz / kBoxTop );
+			float horizFar = Clamp01( horizDist / 600.0f );
+			float skyFade = Clamp01( 1.0f - 0.85f * aboveEye * horizFar );
+
+			// Brighter near flakes (depth read) + a near-floor so snowfall stays
 			// visible against the dark night scene rather than fading to nothing.
-			float alpha = ( 0.72f + 0.28f * p.seed ) * fog * ( 0.55f + 0.45f * distFade );
+			float depthBright = 0.40f + layer * 0.45f;	// far dimmer, near brighter
+			float alpha = ( 0.55f + 0.45f * p.seed ) * depthBright * fog
+				* ( 0.45f + 0.55f * distFade ) * skyFade;
 
 			if( alpha <= 0.004f )
 				continue;
@@ -590,8 +744,12 @@ void WeatherRenderer::DrawPrecip( const ViewSetup &view )
 		}
 	}
 
-	if( quads == 0 )
-		return;
+	// Build the rain-impact splash ring verts (rain mode only). Done here so the
+	// shared transparent GL state below covers both the precip draw and splashes.
+	int splashQuads = ( mode == 1 ) ? BuildSplashVerts( view, s_splashScratch ) : 0;
+
+	if( quads == 0 && splashQuads == 0 )
+		return;	// nothing to draw this frame
 
 	// GL state: transparent, depth-tested (occluded by walls) but no depth write.
 	SetDepthTest( true );
@@ -599,29 +757,125 @@ void WeatherRenderer::DrawPrecip( const ViewSetup &view )
 	SetBlend( kBlendAlpha );
 	SetCull( false );
 
-	unsigned int prog = ( mode == 1 ) ? m_gpu.rainProgram.program : m_gpu.snowProgram.program;
-	unsigned int vao  = ( mode == 1 ) ? m_gpu.rainVao : m_gpu.snowVao;
-	unsigned int vbo  = ( mode == 1 ) ? m_gpu.rainVbo : m_gpu.snowVbo;
-	int uViewProj     = ( mode == 1 ) ? m_gpu.uRainViewProj : m_gpu.uSnowViewProj;
+	if( quads > 0 )
+	{
+		unsigned int prog = ( mode == 1 ) ? m_gpu.rainProgram.program : m_gpu.snowProgram.program;
+		unsigned int vao  = ( mode == 1 ) ? m_gpu.rainVao : m_gpu.snowVao;
+		unsigned int vbo  = ( mode == 1 ) ? m_gpu.rainVbo : m_gpu.snowVbo;
+		int uViewProj     = ( mode == 1 ) ? m_gpu.uRainViewProj : m_gpu.uSnowViewProj;
 
-	UseProgram( prog );
-	glUniformMatrix4fv( uViewProj, 1, GL_FALSE, view.matViewProj.m );
+		UseProgram( prog );
+		glUniformMatrix4fv( uViewProj, 1, GL_FALSE, view.matViewProj.m );
 
-	BindVao( vao );
-	glBindBuffer( GL_ARRAY_BUFFER, vbo );
-	glBufferData( GL_ARRAY_BUFFER,
-		(GLsizeiptr)( (size_t)quads * kVertsPerQuad * kVertFloats * sizeof( float )),
-		s_vertScratch, GL_DYNAMIC_DRAW );	// orphan + upload this frame's quads
-	glBindBuffer( GL_ARRAY_BUFFER, 0 );	// attribute bindings live in the VAO
+		BindVao( vao );
+		glBindBuffer( GL_ARRAY_BUFFER, vbo );
+		glBufferData( GL_ARRAY_BUFFER,
+			(GLsizeiptr)( (size_t)quads * kVertsPerQuad * kVertFloats * sizeof( float )),
+			s_vertScratch, GL_DYNAMIC_DRAW );	// orphan + upload this frame's quads
+		glBindBuffer( GL_ARRAY_BUFFER, 0 );	// attribute bindings live in the VAO
 
-	glDrawArrays( GL_TRIANGLES, 0, quads * kVertsPerQuad );
+		glDrawArrays( GL_TRIANGLES, 0, quads * kVertsPerQuad );
 
-	BindVao( 0 );
+		BindVao( 0 );
+	}
+
+	// Splash pass: cheap second draw (<= kMaxSplashes quads) sharing the same
+	// transparent state. Reuses the snow VS + splash FS (expanding ground ring).
+	if( splashQuads > 0 )
+	{
+		UseProgram( m_gpu.splashProgram.program );
+		glUniformMatrix4fv( m_gpu.uSplashViewProj, 1, GL_FALSE, view.matViewProj.m );
+
+		BindVao( m_gpu.splashVao );
+		glBindBuffer( GL_ARRAY_BUFFER, m_gpu.splashVbo );
+		glBufferData( GL_ARRAY_BUFFER,
+			(GLsizeiptr)( (size_t)splashQuads * kVertsPerQuad * kVertFloats * sizeof( float )),
+			s_splashScratch, GL_DYNAMIC_DRAW );
+		glBindBuffer( GL_ARRAY_BUFFER, 0 );
+
+		glDrawArrays( GL_TRIANGLES, 0, splashQuads * kVertsPerQuad );
+
+		BindVao( 0 );
+	}
 
 	// Restore the EnterTakeover baseline (depth write ON, blend NONE) so later
 	// passes (viewmodel, post) see the expected state.
 	SetDepthWrite( true );
 	SetBlend( kBlendNone );
+}
+
+// Build the splash ring verts into `out` (CPU scratch). Each alive splash becomes
+// one GROUND-aligned quad whose half-size grows over the splash lifetime so the FS
+// ring annulus reads as an outward-expanding ripple. Returns the quad count
+// written (<= kMaxSplashes). Ground-plane approximation -- see the honest note in
+// csz_weather.h (no surface trace API reachable here).
+int WeatherRenderer::BuildSplashVerts( const ViewSetup &view, float *out )
+{
+	if( m_splashActive <= 0 )
+		return 0;
+
+	// Splash tint: a touch brighter/cooler than the rain streaks so impacts pop.
+	const float spR = 0.74f, spG = 0.82f, spB = 0.92f;
+
+	const float *org = view.origin;
+	float fogDensity = view.ambience.fogDensity;
+
+	float *v = out;
+	int quads = 0;
+
+	for( int i = 0; i < kMaxSplashes && quads < kSplashScratchQuads; i++ )
+	{
+		const Splash &s = m_splashes[i];
+
+		if( !s.alive )
+			continue;
+
+		float frac = ( s.life > 0.0f ) ? Clamp01( s.age / s.life ) : 1.0f;
+
+		// Ring grows outward; alpha fades over life. Radius 4..~24 units.
+		float radius = 4.0f + frac * ( 16.0f + s.seed * 10.0f );
+		float alpha = ( 1.0f - frac ) * ( 0.45f + 0.25f * s.seed );
+
+		// Distance fade + fog so far splashes are not over-bright.
+		float dx = s.pos[0] - org[0];
+		float dy = s.pos[1] - org[1];
+		float dz = s.pos[2] - org[2];
+		float dist = sqrtf( dx * dx + dy * dy + dz * dz );
+		float fog = ( fogDensity > 0.0f ) ? Clamp01( exp2f( -fogDensity * dist ) ) : 1.0f;
+		float distFade = Clamp01( 1.0f - dist / 500.0f );
+
+		alpha *= fog * distFade;
+
+		if( alpha <= 0.004f )
+			continue;
+
+		// GROUND-aligned quad (lies flat on the XY plane at the impact Z). corner.xy
+		// in [0,1] -> FS maps to [-1,1] for the radial ring. Axes are world X/Y so
+		// the ripple reads as lying on the ground, not facing the camera.
+		float cx = s.pos[0], cy = s.pos[1], cz = s.pos[2];
+		float ex = radius, ey = radius;
+
+		float blx = cx - ex, bly = cy - ey, blz = cz;
+		float tlx = cx - ex, tly = cy + ey, tlz = cz;
+		float trx = cx + ex, try_ = cy + ey, trz = cz;
+		float brx = cx + ex, bry = cy - ey, brz = cz;
+
+		#define CSZ_PUSH_SPLASH( px, py, pz, ux, uy ) \
+			v[0]=(px); v[1]=(py); v[2]=(pz); v[3]=(ux); v[4]=(uy); \
+			v[5]=spR; v[6]=spG; v[7]=spB; v[8]=alpha; v += kVertFloats;
+
+		CSZ_PUSH_SPLASH( blx, bly, blz, 0.0f, 0.0f )
+		CSZ_PUSH_SPLASH( tlx, tly, tlz, 0.0f, 1.0f )
+		CSZ_PUSH_SPLASH( trx, try_, trz, 1.0f, 1.0f )
+		CSZ_PUSH_SPLASH( blx, bly, blz, 0.0f, 0.0f )
+		CSZ_PUSH_SPLASH( trx, try_, trz, 1.0f, 1.0f )
+		CSZ_PUSH_SPLASH( brx, bry, brz, 1.0f, 0.0f )
+		#undef CSZ_PUSH_SPLASH
+
+		quads++;
+	}
+
+	return quads;
 }
 
 void WeatherRenderer::Shutdown()
@@ -633,17 +887,21 @@ void WeatherRenderer::Shutdown()
 	{
 		if( m_gpu.rainVbo != 0 ) glDeleteBuffers( 1, &m_gpu.rainVbo );
 		if( m_gpu.snowVbo != 0 ) glDeleteBuffers( 1, &m_gpu.snowVbo );
+		if( m_gpu.splashVbo != 0 ) glDeleteBuffers( 1, &m_gpu.splashVbo );
 		if( m_gpu.rainVao != 0 ) glDeleteVertexArrays( 1, &m_gpu.rainVao );
 		if( m_gpu.snowVao != 0 ) glDeleteVertexArrays( 1, &m_gpu.snowVao );
+		if( m_gpu.splashVao != 0 ) glDeleteVertexArrays( 1, &m_gpu.splashVao );
 
 		DestroyProgram( m_gpu.rainProgram );
 		DestroyProgram( m_gpu.snowProgram );
+		DestroyProgram( m_gpu.splashProgram );
 	}
 
-	m_gpu.rainVbo = m_gpu.snowVbo = 0;
-	m_gpu.rainVao = m_gpu.snowVao = 0;
+	m_gpu.rainVbo = m_gpu.snowVbo = m_gpu.splashVbo = 0;
+	m_gpu.rainVao = m_gpu.snowVao = m_gpu.splashVao = 0;
 	m_gpu.rainProgram.program = 0;
 	m_gpu.snowProgram.program = 0;
+	m_gpu.splashProgram.program = 0;
 	m_gpu.built = false;
 }
 

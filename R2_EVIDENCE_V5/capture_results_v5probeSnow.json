@@ -1,0 +1,27 @@
+﻿{
+    "name":  "snow_cover_de_dust2",
+    "runid":  "v5probeSnow",
+    "map":  "de_dust2",
+    "png":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\snow_cover_de_dust2_v5probeSnow.png",
+    "out_png":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\weather_v5_03_snow_cover_clean.png",
+    "log":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\engine_snow_cover_de_dust2_v5probeSnow.log",
+    "turb_count":  -1,
+    "fps_samples":  4,
+    "fps_avg":  756.2,
+    "fps_sane":  true,
+    "unlock_end":  true,
+    "fps_readback":  [
+                         "\"gl_vsync\" is \"0\" ( \"1\" )",
+                         "\"fps_override\" is \"1\" ( \"0\" )",
+                         "\"fps_max\" is \"1000\" ( \"72\" )",
+                         "\"cl_updaterate\" is \"1000\" ( \"20\" )",
+                         "\"sys_ticrate\" is \"1000\" ( \"100\" )"
+                     ],
+    "fps_max_observed":  967.5,
+    "fps_cap_active":  false,
+    "debugcam_valid":  true,
+    "debugcam_active":  "[CSZ:debugcam] Info: active pos=(-700.0 -1550.0 90.0) ang=(12.0 90.0 0.0)",
+    "classification":  "OK",
+    "success":  true,
+    "note":  ""
+}

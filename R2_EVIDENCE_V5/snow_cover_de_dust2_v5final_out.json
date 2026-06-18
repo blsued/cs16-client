@@ -1,0 +1,29 @@
+{
+  "engine_log": "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\engine_snow_cover_de_dust2_v5final.log",
+  "used_markers": true,
+  "start_marker": "MATPERF-FPS-START",
+  "end_marker": "MATPERF-FPS-END",
+  "thresholds": {
+    "fps_cap": 200.0,
+    "min_avg": 199.0,
+    "min_1low": 195.0,
+    "min_samples": 55
+  },
+  "stats": null,
+  "pass_ms": {
+    "order": [],
+    "means": {}
+  },
+  "errors": {
+    "count": 0,
+    "samples": []
+  },
+  "warnings": [],
+  "gate": {
+    "passed": false,
+    "fail_reasons": [
+      "NO FPS SAMPLES parsed from window"
+    ],
+    "soft_warnings": []
+  }
+}

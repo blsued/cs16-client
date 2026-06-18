@@ -1,0 +1,5 @@
+R2 CAPTURE BLOCKER
+time: 2026-06-18T01:45:57.0274346-06:00
+reason: xash3d.exe not found: water_on_de_aztec\client\xash3d.exe
+RunDir: water_on_de_aztec
+Exe: water_on_de_aztec\client\xash3d.exe

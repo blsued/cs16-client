@@ -182,7 +182,7 @@ void main()
 		// near-black -- snow self-illuminates as a soft sheet (like real snow holds
 		// ambient sky light). Distance floor raised to 0.60 so far snow still reads.
 		float csz_snowDist = clamp( 1.0 - ( gl_FragCoord.z / gl_FragCoord.w ) / 1600.0, 0.60, 1.0 );
-		float csz_snowLit = clamp( ( 0.80 + 0.30 * csz_lmLum ) * csz_snowDist, 0.0, 1.0 );
+		float csz_snowLit = clamp( ( 0.92 + 0.25 * csz_lmLum ) * csz_snowDist, 0.0, 1.0 );
 		// Cool-white snow with a faint blue cast (NOT pure white) so it reads as
 		// snow, not a grey slab. u_snowColor is the night-cooled base; add a tiny
 		// constant blue lift that survives even when u_snowColor is dim at night.

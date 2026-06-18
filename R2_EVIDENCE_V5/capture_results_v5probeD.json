@@ -1,0 +1,83 @@
+﻿[
+    {
+        "name":  "rain_clean_de_dust2",
+        "runid":  "v5probeD",
+        "map":  "de_dust2",
+        "png":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\rain_clean_de_dust2_v5probeD.png",
+        "out_png":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\weather_v5_02_rain_clean.png",
+        "log":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\engine_rain_clean_de_dust2_v5probeD.log",
+        "turb_count":  -1,
+        "fps_samples":  4,
+        "fps_avg":  764.8,
+        "fps_sane":  true,
+        "unlock_end":  true,
+        "fps_readback":  [
+                             "\"gl_vsync\" is \"0\" ( \"1\" )",
+                             "\"fps_override\" is \"1\" ( \"0\" )",
+                             "\"fps_max\" is \"1000\" ( \"72\" )",
+                             "\"cl_updaterate\" is \"1000\" ( \"20\" )",
+                             "\"sys_ticrate\" is \"1000\" ( \"100\" )"
+                         ],
+        "fps_max_observed":  984.9,
+        "fps_cap_active":  false,
+        "debugcam_valid":  true,
+        "debugcam_active":  "[CSZ:debugcam] Info: active pos=(-700.0 -1550.0 140.0) ang=(2.0 90.0 0.0)",
+        "classification":  "OK",
+        "success":  true,
+        "note":  ""
+    },
+    {
+        "name":  "snow_cover_de_dust2",
+        "runid":  "v5probeD",
+        "map":  "de_dust2",
+        "png":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\snow_cover_de_dust2_v5probeD.png",
+        "out_png":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\weather_v5_03_snow_cover_clean.png",
+        "log":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\engine_snow_cover_de_dust2_v5probeD.log",
+        "turb_count":  -1,
+        "fps_samples":  4,
+        "fps_avg":  762.7,
+        "fps_sane":  true,
+        "unlock_end":  true,
+        "fps_readback":  [
+                             "\"gl_vsync\" is \"0\" ( \"1\" )",
+                             "\"fps_override\" is \"1\" ( \"0\" )",
+                             "\"fps_max\" is \"1000\" ( \"72\" )",
+                             "\"cl_updaterate\" is \"1000\" ( \"20\" )",
+                             "\"sys_ticrate\" is \"1000\" ( \"100\" )"
+                         ],
+        "fps_max_observed":  979,
+        "fps_cap_active":  false,
+        "debugcam_valid":  true,
+        "debugcam_active":  "[CSZ:debugcam] Info: active pos=(-700.0 -1500.0 150.0) ang=(38.0 90.0 0.0)",
+        "classification":  "OK",
+        "success":  true,
+        "note":  ""
+    },
+    {
+        "name":  "wet_ground_de_dust2",
+        "runid":  "v5probeD",
+        "map":  "de_dust2",
+        "png":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\wet_ground_de_dust2_v5probeD.png",
+        "out_png":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\weather_v5_04_wet_ground_clean.png",
+        "log":  "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\engine_wet_ground_de_dust2_v5probeD.log",
+        "turb_count":  -1,
+        "fps_samples":  4,
+        "fps_avg":  762.7,
+        "fps_sane":  true,
+        "unlock_end":  true,
+        "fps_readback":  [
+                             "\"gl_vsync\" is \"0\" ( \"1\" )",
+                             "\"fps_override\" is \"1\" ( \"0\" )",
+                             "\"fps_max\" is \"1000\" ( \"72\" )",
+                             "\"cl_updaterate\" is \"1000\" ( \"20\" )",
+                             "\"sys_ticrate\" is \"1000\" ( \"100\" )"
+                         ],
+        "fps_max_observed":  985.6,
+        "fps_cap_active":  false,
+        "debugcam_valid":  true,
+        "debugcam_active":  "[CSZ:debugcam] Info: active pos=(-700.0 -1550.0 50.0) ang=(8.0 90.0 0.0)",
+        "classification":  "OK",
+        "success":  true,
+        "note":  ""
+    }
+]

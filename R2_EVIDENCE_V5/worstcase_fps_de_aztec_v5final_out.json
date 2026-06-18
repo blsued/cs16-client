@@ -1,0 +1,71 @@
+{
+  "engine_log": "D:\\csoz-wt\\weather\\R2_EVIDENCE_V5\\engine_worstcase_fps_de_aztec_v5final.log",
+  "used_markers": true,
+  "start_marker": "MATPERF-FPS-START",
+  "end_marker": "MATPERF-FPS-END",
+  "thresholds": {
+    "fps_cap": 200.0,
+    "min_avg": 199.0,
+    "min_1low": 195.0,
+    "min_samples": 55
+  },
+  "stats": {
+    "samples": 68,
+    "duration_s_approx": 68,
+    "avg_fps": 404.09558823529414,
+    "min_fps": 396.1,
+    "max_fps": 708.9,
+    "low_1pct_fps": 396.1,
+    "low_1pct_n": 1,
+    "worst_frame_ms": 185.71,
+    "mean_avg_ms": 2.485294117647059
+  },
+  "pass_ms": {
+    "order": [
+      "shadow",
+      "sky",
+      "world",
+      "brush",
+      "decal",
+      "studio",
+      "lights",
+      "volume",
+      "trans",
+      "delegate",
+      "triapi",
+      "viewmodel",
+      "water",
+      "weather"
+    ],
+    "means": {
+      "shadow": 0.0,
+      "sky": 0.0,
+      "world": 0.02,
+      "brush": 0.010588235294117647,
+      "decal": 0.0,
+      "studio": 0.008529411764705883,
+      "water": 0.0,
+      "lights": 0.0,
+      "volume": 0.0,
+      "trans": 0.23647058823529415,
+      "weather": 0.0,
+      "delegate": 0.0,
+      "triapi": 0.0,
+      "viewmodel": 0.0
+    }
+  },
+  "errors": {
+    "count": 0,
+    "samples": []
+  },
+  "warnings": [
+    "end marker 'MATPERF-FPS-END' not found; parsing from START to EOF"
+  ],
+  "gate": {
+    "passed": true,
+    "fail_reasons": [],
+    "soft_warnings": [
+      "avg fps 404.1 exceeds fps-cap+5 (200.0+5) \u2014 fps cap may not be applied"
+    ]
+  }
+}

@@ -33,6 +33,7 @@
  * exception statement from your version.
  */
 #include "csz_renderer.h"
+#include "core/csz_engine_bsp.h"	// EngBsp/EngModel world AABB (camgate bounds test)
 #include "core/csz_glcaps.h"
 #include "core/csz_glfuncs.h"
 #include "core/csz_glstate.h"
@@ -52,6 +53,9 @@
 #include "lighting/csz_light_registry.h"
 #include "lighting/csz_shadowmap.h"
 
+#include <stdio.h>	// sscanf (csz_debugcam_pos/_ang parse)
+#include <math.h>	// sqrtf/atan2f/cosf (camgate auto-frame aim)
+
 namespace csz
 {
 
@@ -65,6 +69,152 @@ bool s_takeoverLogged;
 // The world model we last handed to g_world (identity for the
 // Mod_ProcessUserData create=false teardown path).
 model_t *s_worldModel;
+
+// --- camera-legitimacy gate helpers (csz_debugcam) -------------------------
+// degrees -> radians (kDegToRad lives in csz_math.cpp's TU, not the header).
+const float kCamDegToRad = 3.14159265358979323846f / 180.0f;
+
+// Map an engine CONTENTS_* int to a short readable token for the camgate log.
+const char *ContentsName( int c )
+{
+	switch( c )
+	{
+	case CONTENTS_EMPTY:       return "EMPTY";
+	case CONTENTS_SOLID:       return "SOLID";
+	case CONTENTS_WATER:       return "WATER";
+	case CONTENTS_SLIME:       return "SLIME";
+	case CONTENTS_LAVA:        return "LAVA";
+	case CONTENTS_SKY:         return "SKY";
+	case CONTENTS_TRANSLUCENT: return "TRANSLUCENT";
+	default:                   return "OTHER";
+	}
+}
+
+// Sample engine contents at a world point (same API as csz_sky.cpp). Returns
+// CONTENTS_EMPTY when PM_PointContents is unavailable (parity with sky).
+int EyeContents( const float pos[3] )
+{
+	return ( gEngfuncs.PM_PointContents != NULL )
+		? gEngfuncs.PM_PointContents( (float *)pos, NULL ) : CONTENTS_EMPTY;
+}
+
+// Point inside [mins,maxs] expanded by eps (world-bounds membership test).
+bool PointInBox( const float p[3], const float mins[3], const float maxs[3], float eps )
+{
+	return p[0] >= mins[0] - eps && p[0] <= maxs[0] + eps
+		&& p[1] >= mins[1] - eps && p[1] <= maxs[1] + eps
+		&& p[2] >= mins[2] - eps && p[2] <= maxs[2] + eps;
+}
+
+// A pose is "legit" when the eye is not embedded in SOLID/SKY and lies inside
+// the world AABB (the V5 over-the-edge skybox shots failed exactly this).
+bool ContentsLegit( int contents )
+{
+	return contents != CONTENTS_SOLID && contents != CONTENTS_SKY;
+}
+
+// Build [pitch yaw roll] (engine view-angle order) so that forward points from
+// eye toward target. Quake yaw is atan2(dy,dx); pitch is positive looking DOWN
+// (engine convention -> negate the vertical component).
+void AimAnglesToward( const float eye[3], const float target[3], float anglesOut[3] )
+{
+	float dx = target[0] - eye[0];
+	float dy = target[1] - eye[1];
+	float dz = target[2] - eye[2];
+	float horiz = sqrtf( dx * dx + dy * dy );
+
+	float yaw = atan2f( dy, dx ) / kCamDegToRad;
+	// Engine pitch is positive downward; looking down at water from above => dz<0
+	// => positive pitch.
+	float pitch = -atan2f( dz, horiz ) / kCamDegToRad;
+
+	anglesOut[0] = pitch;
+	anglesOut[1] = yaw;
+	anglesOut[2] = 0.0f;
+}
+
+// csz_debugcam 2: pick the first candidate eye that (a) sits in EMPTY/WATER
+// (not SOLID/SKY) and (b), aiming at the water centroid, has the centroid in
+// front within the view half-FOV. Candidates orbit the water-surface center
+// (water AABB top). Returns true + fills origin/angles; logs the verdict.
+bool AutoFrameWater( ViewSetup &view )
+{
+	float wc[3], wmin[3], wmax[3];
+	bool hasWater = false;
+	g_water.GetWaterBounds( wc, wmin, wmax, hasWater );
+
+	if( !hasWater )
+	{
+		CSZ_LogInfo( "camgate", "auto-frame: NO WATER IN MAP" );
+		return false;
+	}
+
+	// Surface center = water-body XY centroid at the AABB top (maxs.z).
+	const float surf[3] = { wc[0], wc[1], wmax[2] };
+	// Aim target = water-body centroid (mid-Z), so the surface fills the shot.
+	const float target[3] = { wc[0], wc[1], ( wmin[2] + wmax[2] ) * 0.5f };
+
+	// Ordered candidate eye offsets from the surface center (overhead first,
+	// then progressively oblique orbits). ~12 candidates.
+	static const float kOff[][3] = {
+		{    0.0f,    0.0f,   96.0f },
+		{    0.0f,    0.0f,  160.0f },
+		{    0.0f,    0.0f,   64.0f },
+		{  250.0f,    0.0f,  120.0f },
+		{ -250.0f,    0.0f,  120.0f },
+		{    0.0f,  250.0f,  120.0f },
+		{    0.0f, -250.0f,  120.0f },
+		{  250.0f,  250.0f,  140.0f },
+		{ -250.0f, -250.0f,  140.0f },
+		{  450.0f,    0.0f,  200.0f },
+		{    0.0f,  450.0f,  200.0f },
+		{    0.0f,    0.0f,  280.0f },
+	};
+	const int kNumCand = (int)( sizeof( kOff ) / sizeof( kOff[0] ));
+
+	// Half the wider FOV (with a small margin) as the in-front cone threshold.
+	float halfFov = 0.5f * ( ( view.fovX > view.fovY ) ? view.fovX : view.fovY );
+	if( halfFov < 1.0f || halfFov > 89.0f ) halfFov = 45.0f;	// guard bad/zero FOV
+	float cosHalf = cosf( ( halfFov - 3.0f ) * kCamDegToRad );	// 3deg margin in
+
+	int tried = 0;
+	for( int i = 0; i < kNumCand; i++ )
+	{
+		float eye[3] = { surf[0] + kOff[i][0], surf[1] + kOff[i][1], surf[2] + kOff[i][2] };
+		tried = i + 1;
+
+		int c = EyeContents( eye );
+		if( c != CONTENTS_EMPTY && c != CONTENTS_WATER )
+			continue;	// embedded in solid/sky or other -> reject
+
+		float ang[3];
+		AimAnglesToward( eye, target, ang );
+
+		// Verify the target projects inside the frustum cone: forward . dir.
+		float fwd[3], right[3], up[3];
+		AngleVectors( ang, fwd, right, up );
+		float dir[3] = { target[0] - eye[0], target[1] - eye[1], target[2] - eye[2] };
+		float len = sqrtf( dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2] );
+		if( len <= 0.0f )
+			continue;
+		float inv = 1.0f / len;
+		float dot = fwd[0] * dir[0] * inv + fwd[1] * dir[1] * inv + fwd[2] * dir[2] * inv;
+
+		bool inFront = ( dot > cosHalf ) && ( len < view.zFar );
+		if( !inFront )
+			continue;
+
+		// Accept this candidate.
+		view.origin[0] = eye[0]; view.origin[1] = eye[1]; view.origin[2] = eye[2];
+		view.angles[0] = ang[0]; view.angles[1] = ang[1]; view.angles[2] = ang[2];
+		CSZ_LogInfo( "camgate", "auto-frame chosen pos=(%.1f %.1f %.1f) ang=(%.1f %.1f %.1f) from %d candidates (tried=%d)",
+			eye[0], eye[1], eye[2], ang[0], ang[1], ang[2], kNumCand, tried );
+		return true;
+	}
+
+	CSZ_LogInfo( "camgate", "auto-frame FAILED all %d candidates", kNumCand );
+	return false;
+}
 
 // ---------------------------------------------------------------------------
 // Per-pass CPU ms accounting (M2 plan 2.7; composition-root internal, not a
@@ -149,6 +299,13 @@ void SampleFps()
 				s_passAccumMs[kTmVolume] * inv, s_passAccumMs[kTmTrans] * inv,
 				s_passAccumMs[kTmWeather] * inv, s_passAccumMs[kTmDelegate] * inv,
 				s_passAccumMs[kTmTriapi] * inv, s_passAccumMs[kTmViewmodel] * inv );
+
+			// Runtime A/B proof for the batched water draw: separate fields, never
+			// conflated. draw_batches = batches actually issued last frame (0 when
+			// csz_water 0 skips the pass, 1 when the single-texture liquid map
+			// draws); turb_verts = triangle-list vertex count in the VBO.
+			CSZ_LogDev( "fps", "water_draw: draw_batches=%d turb_verts=%d",
+				g_water.DrawBatchesLastFrame(), g_water.TurbVerts() );
 		}
 
 		for( int i = 0; i < kTmCount; i++ )
@@ -196,6 +353,21 @@ void Renderer::OnHudInit()
 	// for A/B capture. Same FCVAR_CLIENTDLL convention as the other csz cvars.
 	if( m_cvarWater == NULL )
 		m_cvarWater = gEngfuncs.pfnRegisterVariable( "csz_water", "1", FCVAR_CLIENTDLL );
+
+	// Renderer-side debug camera (capture-rig aim): setpos/setang are
+	// "Unknown command" in this build, so an external cfg drives the view by
+	// setting these cvars. RenderFrame overrides view.origin/angles when
+	// csz_debugcam != 0. Same double-register guard / FCVAR_CLIENTDLL convention.
+	if( m_cvarDebugCam == NULL )
+		m_cvarDebugCam = gEngfuncs.pfnRegisterVariable( "csz_debugcam", "0", FCVAR_CLIENTDLL );
+	if( m_cvarDebugCamPos == NULL )
+		m_cvarDebugCamPos = gEngfuncs.pfnRegisterVariable( "csz_debugcam_pos", "0 0 0", FCVAR_CLIENTDLL );
+	if( m_cvarDebugCamAng == NULL )
+		m_cvarDebugCamAng = gEngfuncs.pfnRegisterVariable( "csz_debugcam_ang", "0 0 0", FCVAR_CLIENTDLL );
+
+	// Camera-gate state defaults (only meaningful once a debugcam pose is set).
+	m_camGateLegit = false;
+	m_camGateContents = CONTENTS_EMPTY;
 
 	RegisterSpriteCommands();	// csz_testsprite (T5)
 	RegisterLightingCommands();	// csz_testspot + csz_testlight (T6)
@@ -259,6 +431,98 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 
 	ViewSetup view;							// slot 5: view + fat PVS
 	BuildViewFromPass( rvp, view );
+
+	// Debug-camera override (capture rig): no setpos/setang in this build, so an
+	// external cfg aims the view via csz_debugcam_pos/_ang. Done BEFORE
+	// UpdateFatPvs so the fat PVS is computed from the overridden origin (else the
+	// world around the debug viewpoint gets culled away). angles are
+	// [pitch yaw roll], matching rvp->viewangles -> view.angles (BuildViewFromPass
+	// copies them straight through, then Mat4ViewQuake consumes that order).
+	if( m_cvarDebugCam != NULL && m_cvarDebugCam->value != 0.0f )
+	{
+		const bool autoFrame = ( m_cvarDebugCam->value == 2.0f );
+		bool poseChanged = false;	// did we actually move the view this pass?
+		bool autoFrameOk = true;	// csz_debugcam 2 self-correct verdict
+
+		if( autoFrame )
+		{
+			// csz_debugcam 2 = auto-frame the map water. Build water now (idempotent
+			// when already built) so GetWaterBounds() is populated, then pick a
+			// legitimate eye that frames the surface. Ignore the manual pos/ang.
+			g_water.EnsureBuilt( WorldModel() );
+			autoFrameOk = AutoFrameWater( view );
+			poseChanged = autoFrameOk;	// only moved if a candidate was accepted
+		}
+		else
+		{
+			float px = 0.0f, py = 0.0f, pz = 0.0f;
+			float ax = 0.0f, ay = 0.0f, az = 0.0f;
+			bool posOk = m_cvarDebugCamPos != NULL && m_cvarDebugCamPos->string != NULL
+				&& sscanf( m_cvarDebugCamPos->string, "%f %f %f", &px, &py, &pz ) == 3;
+			bool angOk = m_cvarDebugCamAng != NULL && m_cvarDebugCamAng->string != NULL
+				&& sscanf( m_cvarDebugCamAng->string, "%f %f %f", &ax, &ay, &az ) == 3;
+
+			if( posOk )
+			{
+				view.origin[0] = px; view.origin[1] = py; view.origin[2] = pz;
+			}
+			if( angOk )
+			{
+				view.angles[0] = ax; view.angles[1] = ay; view.angles[2] = az;
+			}
+			// Parse failure = ignore that override (keep the engine's value).
+			poseChanged = ( posOk || angOk );
+		}
+
+		if( poseChanged )
+		{
+			// Recompute matrices/frustum from the overridden view (BuildViewFromPass
+			// already built them from the engine origin/angles).
+			Mat4ViewQuake( view.origin, view.angles, view.matView );
+			Mat4Multiply( view.matProj, view.matView, view.matViewProj );
+			FrustumFromMatrix( view.matViewProj, false, view.frustum );
+		}
+
+		// --- camera-legitimacy gate ---------------------------------------------
+		// Validate the FINAL eye (whether manual override or auto-framed): sample
+		// the engine contents at the eye and test against the world AABB. This is
+		// the guard the V5 over-the-edge skybox shots lacked (no PM_PointContents,
+		// no bounds). legit = not SOLID/SKY at the eye AND inside the world bounds.
+		int contents = EyeContents( view.origin );
+		const EngModel *bsp = EngBsp( WorldModel() );
+		float wmin[3] = { bsp->mins[0], bsp->mins[1], bsp->mins[2] };
+		float wmax[3] = { bsp->maxs[0], bsp->maxs[1], bsp->maxs[2] };
+		bool insideWorld = PointInBox( view.origin, wmin, wmax, 64.0f );
+		bool legit = ContentsLegit( contents ) && insideWorld && ( !autoFrame || autoFrameOk );
+
+		m_camGateLegit = legit;
+		m_camGateContents = contents;
+
+		// Log ONCE PER CHANGE so the capture script can grep the active aim
+		// without spamming the console every frame.
+		static float s_lastPos[3] = { 0.0f, 0.0f, 0.0f };
+		static float s_lastAng[3] = { 0.0f, 0.0f, 0.0f };
+		static bool s_logged = false;
+
+		if( !s_logged
+			|| s_lastPos[0] != view.origin[0] || s_lastPos[1] != view.origin[1] || s_lastPos[2] != view.origin[2]
+			|| s_lastAng[0] != view.angles[0] || s_lastAng[1] != view.angles[1] || s_lastAng[2] != view.angles[2] )
+		{
+			s_logged = true;
+			s_lastPos[0] = view.origin[0]; s_lastPos[1] = view.origin[1]; s_lastPos[2] = view.origin[2];
+			s_lastAng[0] = view.angles[0]; s_lastAng[1] = view.angles[1]; s_lastAng[2] = view.angles[2];
+			CSZ_LogInfo( "debugcam", "active pos=(%.1f %.1f %.1f) ang=(%.1f %.1f %.1f)",
+				view.origin[0], view.origin[1], view.origin[2],
+				view.angles[0], view.angles[1], view.angles[2] );
+			CSZ_LogInfo( "camgate", "pos=(%.1f %.1f %.1f) ang=(%.1f %.1f %.1f) contents=%s inside_world=%d world_min=(%.0f %.0f %.0f) world_max=(%.0f %.0f %.0f) legit=%d",
+				view.origin[0], view.origin[1], view.origin[2],
+				view.angles[0], view.angles[1], view.angles[2],
+				ContentsName( contents ), insideWorld ? 1 : 0,
+				wmin[0], wmin[1], wmin[2], wmax[0], wmax[1], wmax[2],
+				legit ? 1 : 0 );
+		}
+	}
+
 	view.pvs = UpdateFatPvs( view.origin );
 
 	model_t *world = WorldModel();					// slot 6: world build + visible set
@@ -360,6 +624,8 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	g_water.EnsureBuilt( world );					// same world model g_world.EnsureBuilt used (~252)
 	if( m_cvarWater == NULL || m_cvarWater->value != 0.0f )		// csz_water 0 = skip custom water (OFF baseline)
 		g_water.DrawWater( view, g_weather.RainIntensity(), ph );
+	else
+		g_water.MarkNotDrawn();					// OFF baseline: water pass skipped -> draw_batches=0
 	EndPass( kTmWater );
 
 	BeginPass( kTmLights );

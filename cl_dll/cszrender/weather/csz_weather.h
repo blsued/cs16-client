@@ -59,6 +59,9 @@ public:
 private:
 	void EnsureBuilt();          // lazy GL init (programs + dynamic VBOs), keyed on GpuGeneration()
 	void Simulate( const ViewSetup &view );  // CPU pool spawn/recycle/integrate (called from Update)
+	void SpawnSplash( const float pos[3], float seed );  // queue a rain-impact ring (cheap ring buffer)
+	void SimulateSplashes( float dt );        // age/expire the splash ring buffer
+	int  BuildSplashVerts( const ViewSetup &view, float *out );  // -> quad count written to out
 
 	WeatherSurfaceState m_surf;
 
@@ -84,15 +87,40 @@ private:
 	float m_lastTime;        // ClientTime() at the previous Simulate (for dt)
 	unsigned int m_frameCounter;  // accumulating counter -> deterministic recycle randomness
 
+	// --- Rain splash ring particles (impact interaction) ---
+	// SELF-CONTAINED approximation: with only u_viewProj available (no engine
+	// trace API exposed in cszrender core), we cannot resolve true per-surface
+	// impact heights from inside the weather subsystem. Splashes are spawned at
+	// the recycle FLOOR of the spawn box near the camera -- a flat ground-plane
+	// approximation. True surface-accurate splashes / water-surface ripples are a
+	// follow-up needing renderer/water integration (off-limits to this subsystem).
+	static const int kMaxSplashes = 256;   // small budget; cheap second draw
+
+	struct Splash
+	{
+		float pos[3];   // world impact position (box floor approximation)
+		float age;      // seconds since spawn
+		float life;     // total lifetime (seconds)
+		float seed;     // 0..1 size/phase jitter
+		bool  alive;
+	};
+
+	Splash m_splashes[kMaxSplashes];
+	int    m_splashHead;       // ring-buffer write cursor
+	int    m_splashActive;     // count alive (for cheap early-out)
+
 	// GL resources (rebuilt on GpuGeneration() change; never glDelete a stale gen).
 	struct WeatherGpu
 	{
 		ShaderProgram rainProgram;
 		ShaderProgram snowProgram;
+		ShaderProgram splashProgram;	// rain-impact rings (snow VS + splash FS)
 		unsigned int  rainVao, rainVbo;
 		unsigned int  snowVao, snowVbo;
+		unsigned int  splashVao, splashVbo;
 		int uRainViewProj;
 		int uSnowViewProj;
+		int uSplashViewProj;
 		int gpuGeneration;
 		bool built;
 	};

@@ -39,13 +39,21 @@
 // Two tiny programs (rain, snow). Both share the same vertex layout built on the
 // CPU each frame into a dynamic VBO:
 //   attribute 0 : vec3 a_pos    -- world-space billboard corner
-//   attribute 1 : vec2 a_corner -- per-corner UV in [0,1] (round-flake falloff)
+//   attribute 1 : vec2 a_corner -- per-corner UV in [0,1] (streak/flake falloff)
 //   attribute 2 : vec4 a_color  -- rgb (already fog/night modulated) + a (alpha)
-// All depth/fog/intensity modulation is done CPU-side and baked into a_color, so
-// the fragment stages stay branch-free and texture-free (cheap, GL3.3/GLES3 safe).
-// The only uniform is u_viewProj (view.matViewProj.m), matching csz_sprite.
+// Depth/fog/intensity modulation -- AND the structural "don't blanket the sky"
+// and near/far parallax weighting -- are computed CPU-side (full world state:
+// camera origin + forward, per-particle world pos/height) and baked into
+// a_color (rgb + alpha). The fragment stages only do per-fragment SHAPING that
+// cannot be done per-vertex: streak head/tail taper, soft flake falloff, ring.
+// This keeps the shaders branch-free, texture-free, GL3.3/GLES3 safe and avoids
+// relying on fragile derived-from-clip-space heuristics.
+//
+// Uniforms:
+//   u_viewProj  (all)  : view.matViewProj.m
+// All GL3.3 / GLES3 safe; texture-free.
 
-// Rain vertex stage: pass corner (for the vertical streak gradient) + color.
+// Rain vertex stage: pass corner (streak param) + color through.
 static const char kRainVs[] = R"GLSL(#version 330 core
 layout(location = 0) in vec3 a_pos;
 layout(location = 1) in vec2 a_corner;
@@ -61,28 +69,37 @@ void main()
 }
 )GLSL";
 
-// Rain fragment stage: cool grey-blue streak. The CPU bakes the per-streak alpha
-// (depth/fog/intensity); here we add a soft vertical gradient (brighter mid,
-// fading at the head/tail) and a gentle horizontal feather so the thin quad does
-// not read as a hard-edged rectangle. Alpha-blended.
+// Rain fragment stage: cool grey-blue motion-blur streak. The CPU bakes per-streak
+// alpha (depth/fog/intensity/sky-fade) into v_color.a. Here we shape the streak so
+// it reads as falling water, not a painted bar:
+//   - asymmetric head/tail taper: a tight bright HEAD (bottom, corner.y~0) and a
+//     long thin TAIL (top, corner.y~1) -> a real motion streak, brighter at the
+//     leading drop, dissolving along the trail.
+//   - soft horizontal core: thin bright center, feathered sides (no hard rect).
 static const char kRainFs[] = R"GLSL(#version 330 core
 in vec2 v_corner;
 in vec4 v_color;
 out vec4 fragColor;
 void main()
 {
-	// Vertical gradient along the streak (corner.y 0..1): fade both ends a touch
-	// so streaks taper instead of ending abruptly.
-	float vy = v_corner.y;
-	float vGrad = smoothstep( 0.0, 0.15, vy ) * smoothstep( 1.0, 0.72, vy );
-	// Horizontal feather across the streak width (corner.x 0..1, center 0.5): start
-	// fading from the center outward (0.05) so the streak has a thin soft core and
-	// no hard rectangular edge -> reads as a fine rain line, not a UI bar.
+	// Streak param along its length: corner.y 0 = leading HEAD (bottom of the
+	// falling drop), 1 = trailing TAIL (top). A drop is bright/condensed at the
+	// head and dissolves up the trail.
+	float t = v_corner.y;
+	// Head: quick ramp-in over the first 12% so the leading edge is crisp.
+	float head = smoothstep( 0.0, 0.12, t );
+	// Tail: long fade from ~35% to the very top -> elongated motion-blur trail.
+	float tail = 1.0 - smoothstep( 0.35, 1.0, t );
+	// Brightness boost at the head (leading drop catches light).
+	float headGlow = 1.0 + 0.6 * ( 1.0 - smoothstep( 0.0, 0.22, t ) );
+	float vGrad = head * tail;
+	// Horizontal feather across the streak width (corner.x 0..1, center 0.5):
+	// thin bright core, soft sides -> a fine rain line, not a UI bar.
 	float hx = 1.0 - smoothstep( 0.05, 0.5, abs( v_corner.x - 0.5 ) );
 	float a = v_color.a * vGrad * hx;
 	if( a <= 0.003 )
 		discard;
-	fragColor = vec4( v_color.rgb, a );
+	fragColor = vec4( v_color.rgb * headGlow, a );
 }
 )GLSL";
 
@@ -102,8 +119,9 @@ void main()
 }
 )GLSL";
 
-// Snow fragment stage: soft round flake. Procedural radial alpha from the corner
-// (no texture). Color is the night-tinted cool white baked on the CPU.
+// Snow fragment stage: soft round flake with a faint bright core so near flakes
+// read as fluffy volume rather than flat discs. Procedural radial alpha from the
+// corner (no texture). Color is the night-tinted cool white baked on the CPU.
 static const char kSnowFs[] = R"GLSL(#version 330 core
 in vec2 v_corner;
 in vec4 v_color;
@@ -113,7 +131,33 @@ void main()
 	// corner*2-1 maps the [0,1] quad to [-1,1]; fade alpha to 0 at the rim.
 	vec2 d = v_corner * 2.0 - 1.0;
 	float r = length( d );
-	float a = v_color.a * smoothstep( 1.0, 0.0, r );
+	// Soft round falloff + a gentle inner core lift so the flake has a fluffy
+	// bright middle (reads as a snowflake catching light, not a flat dot).
+	float edge = smoothstep( 1.0, 0.0, r );
+	float core = 0.35 * ( 1.0 - smoothstep( 0.0, 0.55, r ) );
+	float a = v_color.a * min( 1.0, edge + core );
+	if( a <= 0.003 )
+		discard;
+	fragColor = vec4( v_color.rgb, a );
+}
+)GLSL";
+
+// Splash fragment stage (rain impact rings). Reuses the snow VS (corner pass).
+// Draws a thin expanding RING: alpha peaks at a radius that the CPU advances over
+// the splash lifetime by scaling the quad size, and the ring thickness tapers.
+// corner -> [-1,1]; ring = narrow band near r==1 (the quad rim), so as the CPU
+// grows the quad the lit band reads as an outward-expanding ripple on the ground.
+static const char kSplashFs[] = R"GLSL(#version 330 core
+in vec2 v_corner;
+in vec4 v_color;
+out vec4 fragColor;
+void main()
+{
+	vec2 d = v_corner * 2.0 - 1.0;
+	float r = length( d );
+	// Ring centered near r=0.78 with soft inner/outer falloff -> a thin annulus.
+	float ring = smoothstep( 0.45, 0.78, r ) * ( 1.0 - smoothstep( 0.78, 1.0, r ) );
+	float a = v_color.a * ring;
 	if( a <= 0.003 )
 		discard;
 	fragColor = vec4( v_color.rgb, a );

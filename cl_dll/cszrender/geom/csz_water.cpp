@@ -144,12 +144,24 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 	glUniform1i( UniformLoc( m_program, "u_tex" ), 0 );	// diffuse on TMU 0
 	UseProgram( 0 );
 
+	// Stash the pre-batch per-face count (old path = one fan draw per turb face)
+	// so the build/runtime logs can report the genuine before/after baseline.
+	m_turbFaces = turbFaces;
+
 	// No water on this map: empty set, DrawWater early-returns. Still "built".
 	if( turbFaces == 0 )
 	{
 		m_batches = NULL;
 		m_numBatches = 0;
 		m_numVerts = 0;
+		m_lastDrawBatches = 0;
+		m_faceBounds = NULL;
+		m_numFaceBounds = 0;
+		m_visibleFacesLastFrame = 0;	// no water -> nothing can be visible
+		m_hasWater = false;
+		m_waterCenter[0] = m_waterCenter[1] = m_waterCenter[2] = 0.0f;
+		m_waterMins[0] = m_waterMins[1] = m_waterMins[2] = 0.0f;
+		m_waterMaxs[0] = m_waterMaxs[1] = m_waterMaxs[2] = 0.0f;
 		m_built = true;
 		CSZ_LogDev( "water", "built %s: no turb surfaces", bsp->name );
 		return;
@@ -200,6 +212,13 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 	if( m_batches == NULL )
 		CSZ_FatalInit( "water", "out of memory building water surface buffers" );
 
+	// Per-face world-space AABB (one per turb face, in collected order) for the
+	// per-frame frustum count in DrawWater. Sized to turbFaces.
+	m_faceBounds = new( std::nothrow ) FaceBounds[turbFaces];
+	if( m_faceBounds == NULL )
+		CSZ_FatalInit( "water", "out of memory building water surface buffers" );
+	m_numFaceBounds = 0;
+
 	int vertCursor = 0;
 	int numBatches = 0;
 	int curSlot = -1;
@@ -238,6 +257,10 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 		const int maxE = ( nE <= 64 ) ? nE : 64;
 		float ccx = 0.0f, ccy = 0.0f;
 
+		// Accumulate this face's world-space AABB while gathering its vertices.
+		float fbMin[3] = {  1e30f,  1e30f,  1e30f };
+		float fbMax[3] = { -1e30f, -1e30f, -1e30f };
+
 		for( int e = 0; e < maxE; e++ )
 		{
 			int vi = WaterEdgeVertex( bsp, bsp->surfedges[surf.firstedge + e] );
@@ -245,6 +268,11 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 			fx[e] = pos[0];
 			fy[e] = pos[1];
 			fz[e] = pos[2];
+			for( int c = 0; c < 3; c++ )
+			{
+				if( pos[c] < fbMin[c] ) fbMin[c] = pos[c];
+				if( pos[c] > fbMax[c] ) fbMax[c] = pos[c];
+			}
 			float su = pos[0] * ti->vecs[0][0] + pos[1] * ti->vecs[0][1] +
 				pos[2] * ti->vecs[0][2] + ti->vecs[0][3];
 			float tv = pos[0] * ti->vecs[1][0] + pos[1] * ti->vecs[1][1] +
@@ -257,6 +285,11 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 
 		ccx /= (float)maxE;
 		ccy /= (float)maxE;
+
+		// Record this face's AABB (collected order) for per-frame frustum counting.
+		FaceBounds &fb = m_faceBounds[m_numFaceBounds++];
+		fb.mins[0] = fbMin[0]; fb.mins[1] = fbMin[1]; fb.mins[2] = fbMin[2];
+		fb.maxs[0] = fbMax[0]; fb.maxs[1] = fbMax[1]; fb.maxs[2] = fbMax[2];
 
 		// Fan triangulation: (0, e, e+1) for e in 1..maxE-2 -> triangle list.
 		// Preserves the same winding as the original GL_TRIANGLE_FAN.
@@ -308,6 +341,12 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 		float cy = ( m_numVerts > 0 ) ? (float)( sum[1] / m_numVerts ) : 0.0f;
 		float cz = ( m_numVerts > 0 ) ? (float)( sum[2] / m_numVerts ) : 0.0f;
 
+		// Publish the water body bounds for capture auto-framing (csz_debugcam 2).
+		m_hasWater = ( m_numVerts > 0 );
+		m_waterCenter[0] = cx; m_waterCenter[1] = cy; m_waterCenter[2] = cz;
+		m_waterMins[0] = mn[0]; m_waterMins[1] = mn[1]; m_waterMins[2] = mn[2];
+		m_waterMaxs[0] = mx[0]; m_waterMaxs[1] = mx[1]; m_waterMaxs[2] = mx[2];
+
 		CSZ_LogInfo( "water", "turb centroid=(%.0f %.0f %.0f) min=(%.0f %.0f %.0f) max=(%.0f %.0f %.0f)",
 			cx, cy, cz, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2] );
 	}
@@ -335,13 +374,19 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 	delete[] verts;
 
 	m_built = true;
-	CSZ_LogInfo( "water", "built %s: %d turb verts, %d draw batch(es)", bsp->name, m_numVerts, m_numBatches );
+	m_lastDrawBatches = 0;	// nothing drawn yet this map
+	m_visibleFacesLastFrame = -1;	// not frustum-tested yet this map
+	CSZ_LogInfo( "water", "built %s: %d turb faces (pre-batch per-face draws=%d) -> turb_verts=%d draw_batches=%d",
+		bsp->name, turbFaces, turbFaces, m_numVerts, m_numBatches );
 }
 
 void WaterRenderer::DrawWater( const ViewSetup &view, float rainIntensity, float skyPhase )
 {
 	if( !m_built || m_numBatches == 0 || m_program.program == 0 || m_vao == 0 )
+	{
+		m_lastDrawBatches = 0;	// nothing issued this frame (no water / not built)
 		return;
+	}
 
 	// Water is solid (opaque): depth test + write ON, no blend, cull OFF so a
 	// face reads regardless of which side the camera sees. It depth-tests
@@ -367,6 +412,32 @@ void WaterRenderer::DrawWater( const ViewSetup &view, float rainIntensity, float
 	glUniform1f( m_uRain, rainIntensity );
 	glUniform1f( m_uPhase, skyPhase );
 
+	// On-screen water evidence: count per-face AABBs that survive the view
+	// frustum. The build-time centroid line proves water EXISTS; this proves it
+	// is in the shot. CullBox returns true when fully outside, so a face is
+	// "visible" when CullBox is false. Cheap: a handful of plane dots per face.
+	int visibleFaces = 0;
+	for( int f = 0; f < m_numFaceBounds; f++ )
+	{
+		if( !view.frustum.CullBox( m_faceBounds[f].mins, m_faceBounds[f].maxs ))
+			visibleFaces++;
+	}
+	m_visibleFacesLastFrame = visibleFaces;
+
+	// Log once per view-origin change (matches the debugcam log throttle): the
+	// capture rig moves the camera once, so this fires for the framed shot and
+	// then stays quiet. Never per-frame spam.
+	static float s_lastLogPos[3] = { 1e30f, 1e30f, 1e30f };
+	if( s_lastLogPos[0] != view.origin[0] || s_lastLogPos[1] != view.origin[1]
+		|| s_lastLogPos[2] != view.origin[2] )
+	{
+		s_lastLogPos[0] = view.origin[0];
+		s_lastLogPos[1] = view.origin[1];
+		s_lastLogPos[2] = view.origin[2];
+		CSZ_LogInfo( "water", "visible_water_faces=%d of %d (frustum-tested)",
+			visibleFaces, m_numFaceBounds );
+	}
+
 	// One glDrawArrays per distinct texture slot. The whole turb surface was
 	// pre-triangulated and grouped by texture at build time, so a single-texture
 	// liquid map (de_aztec) collapses 324 per-face fan draws into ONE draw call.
@@ -376,6 +447,8 @@ void WaterRenderer::DrawWater( const ViewSetup &view, float rainIntensity, float
 		BindTextureSlot( 0, b.texSlot );
 		glDrawArrays( GL_TRIANGLES, b.firstVert, b.vertCount );
 	}
+
+	m_lastDrawBatches = m_numBatches;	// runtime A/B proof: batches actually issued
 
 	// Restore the EnterTakeover baseline for the passes that follow: depth test
 	// + write on, blend none, cull off (it was already off here). TMU0 was just
@@ -423,8 +496,26 @@ void WaterRenderer::Shutdown()
 	m_batches = NULL;
 	m_numBatches = 0;
 	m_numVerts = 0;
+
+	delete[] m_faceBounds;
+	m_faceBounds = NULL;
+	m_numFaceBounds = 0;
+	m_visibleFacesLastFrame = -1;
+	m_hasWater = false;
+
 	m_model = NULL;
 	m_built = false;
+}
+
+void WaterRenderer::GetWaterBounds( float center[3], float mins[3], float maxs[3], bool &hasWater ) const
+{
+	hasWater = m_hasWater;
+	for( int c = 0; c < 3; c++ )
+	{
+		center[c] = m_waterCenter[c];
+		mins[c] = m_waterMins[c];
+		maxs[c] = m_waterMaxs[c];
+	}
 }
 
 }

@@ -64,6 +64,11 @@ public:
 	void AddEntity( int type, cl_entity_t *ent );
 	FrameEntities &Frame() { return m_frame; }
 	int GpuGeneration() const { return m_gpuGeneration; }
+	// Camera-legitimacy gate result from the last debugcam evaluation (capture
+	// rig auditability): legit = eye not in SOLID/SKY and inside the world AABB.
+	// CameraGateContents() is the raw engine CONTENTS_* int at the eye.
+	bool CameraGateLegit() const { return m_camGateLegit; }
+	int CameraGateContents() const { return m_camGateContents; }
 private:
 	bool EnsureGlReady();        // one-shot lazy GL init (loader+caps+shaders); FATAL inside on hard fail
 	FrameEntities m_frame;
@@ -71,6 +76,11 @@ private:
 	bool m_handshakeOk, m_glReady;
 	cvar_t *m_cvarEnable;        // csz_renderer (dev-build escape hatch; release builds pin it, M2 concern)
 	cvar_t *m_cvarWater;         // csz_water (default 1): 0 skips the custom water pass (engine water shows)
+	cvar_t *m_cvarDebugCam;      // csz_debugcam (default 0): 1 = override view origin/angles from the cfg below
+	cvar_t *m_cvarDebugCamPos;   // csz_debugcam_pos "X Y Z" world position (debug aim, no setpos in this build)
+	cvar_t *m_cvarDebugCamAng;   // csz_debugcam_ang "pitch yaw roll" view angles (matches rvp->viewangles order)
+	bool m_camGateLegit;         // last debugcam camera-gate verdict (eye legit + in-world)
+	int m_camGateContents;       // last debugcam eye CONTENTS_* (raw engine int)
 };
 extern Renderer g_renderer;
 }

@@ -48,6 +48,23 @@ public:
 	void EnsureBuilt( model_s *world );  // build turb-surface VBO (lazy, keyed on GPU gen)
 	void DrawWater( const ViewSetup &view, float rainIntensity, float skyPhase );  // water pass
 	void Shutdown();                     // destroy GL objects
+	void MarkNotDrawn() { m_lastDrawBatches = 0; }  // csz_water 0 path: water pass skipped this frame
+
+	// Draw metrics (kept as SEPARATE fields, never conflated):
+	int TurbVerts() const { return m_numVerts; }              // triangle-list vertex count in the VBO
+	int DrawBatches() const { return m_numBatches; }          // batched draw count (== glDrawArrays calls)
+	int TurbFaces() const { return m_turbFaces; }             // pre-batch per-face draw count (old fan-per-face path)
+	int DrawBatchesLastFrame() const { return m_lastDrawBatches; }  // batches actually issued last frame (0 = skipped)
+
+	// Build-time water body bounds (centroid + AABB over every turb vertex),
+	// for capture auto-framing (csz_debugcam 2). hasWater=false when the map has
+	// no turb surfaces -> center/mins/maxs are left zeroed. Cheap accessor; reads
+	// the values computed once at build time.
+	void GetWaterBounds( float center[3], float mins[3], float maxs[3], bool &hasWater ) const;
+
+	// On-screen water evidence: count of per-face AABBs intersecting the view
+	// frustum, computed by DrawWater each frame. -1 = not yet tested this map.
+	int VisibleWaterFaces() const { return m_visibleFacesLastFrame; }
 
 private:
 	// One draw batch = all triangle-list vertices that share a single diffuse
@@ -62,12 +79,33 @@ private:
 		int texSlot;	// engine diffuse texture slot (gl_texturenum)
 	};
 
+	// Per-face world-space AABB, built once and used for per-frame frustum
+	// counting (the REAL on-screen water evidence; the centroid line is
+	// build-time only). One entry per turb face that made it into the VBO.
+	struct FaceBounds
+	{
+		float mins[3];
+		float maxs[3];
+	};
+
 	ShaderProgram m_program;	// program.program == 0 until built
 	unsigned int m_vao;		// 0 = none
 	unsigned int m_vbo;		// 0 = none
 	WaterBatch *m_batches;		// owned; NULL when no turb surfaces
 	int m_numBatches;		// distinct texture slots (== draw calls)
 	int m_numVerts;			// total triangle-list vertices in the VBO
+	int m_turbFaces;		// turb FACE count (pre-batch per-face draw baseline)
+	int m_lastDrawBatches;		// batches issued last DrawWater (0 = skipped this frame)
+
+	FaceBounds *m_faceBounds;	// owned; per turb face AABB (NULL when no water)
+	int m_numFaceBounds;		// entries in m_faceBounds (== m_turbFaces)
+	int m_visibleFacesLastFrame;	// faces whose AABB hit the frustum last DrawWater (-1 = untested)
+
+	// Water body bounds over every turb vertex (build-time; for auto-framing).
+	float m_waterCenter[3];
+	float m_waterMins[3];
+	float m_waterMaxs[3];
+	bool m_hasWater;
 
 	model_s *m_model;		// map identity (rebuild on change)
 	int m_gpuGeneration;		// GPU generation that owns the GL names
