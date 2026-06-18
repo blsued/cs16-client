@@ -93,6 +93,42 @@ float hash13( vec3 p )
 	return fract( ( p.x + p.y ) * p.z );
 }
 
+// Cheap trilinear value noise on the world-direction lattice (public-domain
+// technique; world-direction input => rotation stable, like the star field).
+float vnoise( vec3 p )
+{
+	vec3 i = floor( p );
+	vec3 f = fract( p );
+	f = f * f * ( 3.0 - 2.0 * f );                       // Hermite smoothing
+	float n000 = hash13( i + vec3( 0.0, 0.0, 0.0 ) );
+	float n100 = hash13( i + vec3( 1.0, 0.0, 0.0 ) );
+	float n010 = hash13( i + vec3( 0.0, 1.0, 0.0 ) );
+	float n110 = hash13( i + vec3( 1.0, 1.0, 0.0 ) );
+	float n001 = hash13( i + vec3( 0.0, 0.0, 1.0 ) );
+	float n101 = hash13( i + vec3( 1.0, 0.0, 1.0 ) );
+	float n011 = hash13( i + vec3( 0.0, 1.0, 1.0 ) );
+	float n111 = hash13( i + vec3( 1.0, 1.0, 1.0 ) );
+	float nx00 = mix( n000, n100, f.x );
+	float nx10 = mix( n010, n110, f.x );
+	float nx01 = mix( n001, n101, f.x );
+	float nx11 = mix( n011, n111, f.x );
+	return mix( mix( nx00, nx10, f.y ), mix( nx01, nx11, f.y ), f.z );
+}
+
+// 3-octave fBm (kept cheap: octaves low, math is plain mul/add). Output ~0..0.94.
+float fbm3( vec3 p )
+{
+	float s = 0.0;
+	float a = 0.5;
+	for( int o = 0; o < 3; o++ )
+	{
+		s += a * vnoise( p );
+		p *= 2.02;
+		a *= 0.5;
+	}
+	return s;
+}
+
 // Three keyframe sky color sets (zenith, horizon), lerped by phase. Linear
 // space; the renderer is not gamma-managed past this point (matches world FS).
 void skyColors( float ph, out vec3 zenith, out vec3 horizon )
@@ -102,34 +138,48 @@ void skyColors( float ph, out vec3 zenith, out vec3 horizon )
 	vec3 ssZen = vec3( 0.060, 0.075, 0.175 );
 	vec3 ssHor = vec3( 0.120, 0.115, 0.195 );
 	// Night (cool blue moonlit): the warm sunset is gone by ~phase 0.18, so the
-	// night reads blue/moonlit, not a lingering orange dusk.
-	vec3 ntZen = vec3( 0.012, 0.022, 0.060 );
-	vec3 ntHor = vec3( 0.035, 0.055, 0.115 );
-	// Midnight (darkest, cold blue).
-	vec3 mnZen = vec3( 0.005, 0.008, 0.024 );
-	vec3 mnHor = vec3( 0.014, 0.020, 0.045 );
+	// night reads blue/moonlit, not a lingering orange dusk. Deeper blue at the
+	// TOP, a brighter+less-saturated haze band near the HORIZON.
+	vec3 ntZen = vec3( 0.009, 0.018, 0.056 );
+	vec3 ntHor = vec3( 0.088, 0.110, 0.190 );
+	// Midnight (darkest): deep cold-blue zenith, thin cool horizon haze glow. The
+	// horizon band is kept >= 0.05 luma brighter than the zenith (gradient depth),
+	// both bands cool (B >= R).
+	vec3 mnZen = vec3( 0.004, 0.007, 0.020 );
+	vec3 mnHor = vec3( 0.100, 0.124, 0.200 );
 	// Dawn / daylight: COOL brightening blue base. The warm sunrise is the same
 	// directional sun-side glow in main(), NOT a 360-degree gold ring.
 	vec3 dwZen = vec3( 0.230, 0.330, 0.520 );
 	vec3 dwHor = vec3( 0.380, 0.470, 0.640 );
 
-	if( ph < 0.18 )                              // sunset -> cool night (fast handoff)
+	// Thresholds realigned to the absolute-time schedule's phase anchors
+	// (midnight 0.5, dawn 0.86, day 1.0). ph<0.5 darkens sunset->night->midnight;
+	// 0.5..0.86 lightens the darkest to a still-DIM cool pre-dawn (ntZen, not the
+	// bright dwZen); 0.86..1.0 ramps that dim pre-dawn up to full daylight (dwZen).
+	// During the held night the phase sits at 0.5, so the dome stays at mnZen.
+	if( ph < 0.25 )                              // sunset -> cool night (fast handoff)
 	{
-		float t = smoothstep( 0.0, 0.18, ph );
+		float t = smoothstep( 0.0, 0.25, ph );
 		zenith  = mix( ssZen, ntZen, t );
 		horizon = mix( ssHor, ntHor, t );
 	}
-	else if( ph < 0.5 )                          // night -> midnight (darkening, stays cool)
+	else if( ph < 0.5 )                          // night -> darkest midnight
 	{
-		float t = smoothstep( 0.18, 0.5, ph );
+		float t = smoothstep( 0.25, 0.5, ph );
 		zenith  = mix( ntZen, mnZen, t );
 		horizon = mix( ntHor, mnHor, t );
 	}
-	else                                         // midnight -> dawn/day
+	else if( ph < 0.86 )                         // hold dark, then lighten toward a dim pre-dawn
 	{
-		float t = smoothstep( 0.5, 1.0, ph );
-		zenith  = mix( mnZen, dwZen, t );
-		horizon = mix( mnHor, dwHor, t );
+		float t = smoothstep( 0.5, 0.86, ph );
+		zenith  = mix( mnZen, ntZen, t );
+		horizon = mix( mnHor, ntHor, t );
+	}
+	else                                         // dim pre-dawn -> full daylight (final ramp)
+	{
+		float t = smoothstep( 0.86, 1.0, ph );
+		zenith  = mix( ntZen, dwZen, t );
+		horizon = mix( ntHor, dwHor, t );
 	}
 }
 
@@ -141,7 +191,7 @@ void main()
 	vec3 zenith, horizon;
 	skyColors( u_phase, zenith, horizon );
 	float up = clamp( dir.z, 0.0, 1.0 );
-	float grad = pow( up, 0.55 );               // pull the ramp toward the horizon
+	float grad = pow( up, 0.40 );               // pull the ramp toward the horizon (steepened: brighter horizon band, deeper zenith => more gradient depth)
 	vec3 col = mix( horizon, zenith, grad );
 
 	// --- Warm horizon glow that FOLLOWS THE SUN (sunset in the west, sunrise in the
@@ -163,29 +213,60 @@ void main()
 		col += warm * sunLow * lowBand * pow( toSun, 3.0 ) * 1.1;
 	}
 
-	// --- Hash star field: world-direction cells, twinkle-free, faded by dawn. ---
+	// --- Hash star field: world-direction cells, twinkle-free, faded by dawn.
+	// Fine & subtle: finer cells (smaller points), a high threshold (sparse, ~0.1-
+	// 0.3% coverage) and a capped brightness so no star rivals the moon (<= ~0.6
+	// luma). The dawn/horizon fade ramp (u_starAmount, csz_sky.cpp) is unchanged. ---
 	if( u_starAmount > 0.001 && up > 0.02 )
 	{
-		vec3 cell = floor( dir * 260.0 );
+		vec3 cell = floor( dir * 300.0 );                   // finer cells => smaller (<=2px) points
 		float h = hash13( cell );
-		float star = smoothstep( 0.9965, 1.0, h );          // sparse bright points
+		float star = smoothstep( 0.9950, 1.0, h );          // sparser bright points
 		float horizonFade = smoothstep( 0.02, 0.30, up );   // keep them off the rim
-		col += vec3( star ) * u_starAmount * horizonFade * ( 0.7 + 0.3 * hash13( cell + 7.0 ));
+		float starBright = 0.45 + 0.22 * hash13( cell + 7.0 );  // cap < 0.7 luma (must not rival the moon)
+		col += vec3( star ) * u_starAmount * horizonFade * starBright;
 	}
 
-	// --- Moon disc + halo (visible through the night arc). ---
+	// Moon visibility + angular position, computed here so the cloud layer below
+	// can light its wisps by the moon before the disc is drawn on top.
 	float cm = dot( dir, u_moonDir );
+	float moonVis = clamp( ( u_moonDir.z + 0.10 ) * 4.0, 0.0, 1.0 );  // fade in as the moon rises above the horizon
+
+	// --- Moonlit wispy clouds: cheap 3-octave fBm over the view direction, upper
+	// sky only, low coverage (wispy, not overcast), tinted by the moonlight color.
+	// SILVER where lit -- near the moon (proximity) and at the cloud's leading edge
+	// (rim) -- DARK/subtle far from it. Drawn UNDER the moon disc/halo so it never
+	// competes with the moon as the focal point. Night-only (gated by moonVis), so
+	// the fBm cost is paid only when the moon is up. Single default path (no tier). ---
+	if( up > 0.05 && moonVis > 0.01 )
+	{
+		float n = fbm3( dir * 3.0 );                                   // low freq => large soft wisps
+		float cloud = smoothstep( 0.46, 0.82, n );                     // lowered threshold => wider contiguous wisps (still not overcast)
+		cloud *= smoothstep( 0.05, 0.45, up );                         // live in the upper sky
+		float nearMoon = pow( max( cm, 0.0 ), 6.0 );                   // lit toward the moon, dark away
+		float rim = smoothstep( 0.56, 0.66, n ) * ( 1.0 - smoothstep( 0.74, 0.92, n ) );  // bright leading edge
+		float lit = 0.18 + 0.55 * nearMoon + 0.32 * rim * nearMoon;    // silver edges near the moon (subtle; clearly dimmer than the moon disc)
+		vec3 cloudCol = u_moonColor * lit;
+		col = mix( col, cloudCol, clamp( cloud, 0.0, 1.0 ) * moonVis * 0.9 );
+	}
+
+	// --- Moon disc + smooth graded halo (visible through the night arc). ---
 	float aaM = fwidth( cm ) + 1e-5;
 	float moonDisc = smoothstep( u_moonCosR - aaM, u_moonCosR + aaM, cm );
-	float moonHalo = pow( max( cm, 0.0 ), 256.0 ) * u_moonHalo;
+	// Soft radial glow: monotonically decreasing from the disc edge out to ~3x the
+	// disc radius (no hard step between disc and sky). Worked in angular distance
+	// so the falloff is uniform regardless of the disc size.
+	float moonAng = acos( clamp( cm, -1.0, 1.0 ) );                    // angular dist from moon center
+	float discR   = acos( clamp( u_moonCosR, -1.0, 1.0 ) );            // disc angular radius
+	float moonHalo = ( 1.0 - smoothstep( discR, discR * 3.0, moonAng ) ) * u_moonHalo;
 	// Blood-moon: shift the moon body + its halo toward red, keep it legible
 	// (mix, never flat-replace), and warm the surrounding sky a touch.
 	vec3 moonBody = mix( u_moonColor, vec3( 0.75, 0.06, 0.04 ), u_bloodMoon );
 	vec3 moonGlow = mix( u_moonColor, vec3( 0.55, 0.05, 0.03 ), u_bloodMoon );
-	col = mix( col, moonBody, clamp( moonDisc, 0.0, 1.0 ));
-	col += moonGlow * moonHalo;
+	col = mix( col, moonBody, clamp( moonDisc, 0.0, 1.0 ) * moonVis );
+	col += moonGlow * moonHalo * moonVis;
 	if( u_bloodMoon > 0.0 )
-		col += vec3( 0.05, 0.0, 0.0 ) * u_bloodMoon * pow( max( cm, 0.0 ), 8.0 );
+		col += vec3( 0.05, 0.0, 0.0 ) * u_bloodMoon * pow( max( cm, 0.0 ), 8.0 ) * moonVis;
 
 	// --- Sun disc + halo (rises near dawn; only contributes above the horizon). ---
 	float cs = dot( dir, u_sunDir );
@@ -211,6 +292,13 @@ void main()
 		col = mix( u_fog.rgb, col, fogF );
 	}
 
+	// Ordered dither: break up 8-bit quantization banding on the very dark sky
+	// gradient (only ~24-46 levels/channel at midnight). Triangular-PDF (+/-1 LSB)
+	// from two decorrelated interleaved-gradient-noise samples; screen-space via
+	// gl_FragCoord, no uniform needed. (Jimenez IGN base; Gjol/Playdead TPDF.)
+	float ign1 = fract( 52.9829189 * fract( dot( gl_FragCoord.xy,        vec2( 0.06711056, 0.00583715 ) ) ) );
+	float ign2 = fract( 52.9829189 * fract( dot( gl_FragCoord.xy + 17.0, vec2( 0.06711056, 0.00583715 ) ) ) );
+	col += ( ign1 + ign2 - 1.0 ) / 255.0;   // TPDF noise in [-1/255, +1/255]
 	fragColor = vec4( col, 1.0 );
 }
 )GLSL";

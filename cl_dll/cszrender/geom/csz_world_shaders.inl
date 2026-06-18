@@ -102,6 +102,15 @@ void main()
 	// add N.L on top of the baked lightmap before the fog mix. u_sunColor is 0
 	// when the publisher hasn't enabled the light, so the term vanishes.
 	col += base.rgb * u_sunColor * max( dot( normalize( v_normal ), u_sunDir ), 0.0 );
+	// Day-for-night grade: at night the ambient tint is cool (B>R); push warm
+	// baked-lightmap/sandstone surfaces toward a cool blue-grey so the WORLD visibly
+	// tracks the day/night timeline (not just the sky). Phase-correct & contract-safe:
+	// derived purely from u_ambTint's cool-bias, so it is IDENTITY at day (tint white,
+	// b-r=0) and at sunset (tint warm, b-r<0 -> 0), and only engages at night/dawn (b>r).
+	float csz_night = smoothstep( 0.0, 0.10, u_ambTint.b - u_ambTint.r );
+	float csz_l = dot( col, vec3( 0.2126, 0.7152, 0.0722 ));
+	vec3  csz_cool = vec3( csz_l ) * vec3( 0.75, 0.92, 1.25 );   // luminance pushed cool-blue
+	col = mix( col, csz_cool, csz_night * 0.70 );                // 0.70 = grade strength (tunable)
 	float fogDepth = gl_FragCoord.z / gl_FragCoord.w;      // cheap view depth (clean-room f)
 	float fogF = ( u_fog.w > 0.0 ) ? clamp( exp2( -u_fog.w * fogDepth ), 0.0, 1.0 ) : 1.0;
 	fragColor = vec4( mix( u_fog.rgb, col, fogF ), base.a * u_brushAlpha );

@@ -265,6 +265,34 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	float ph = g_sky.ComputePhase();
 	g_sky.PublishLighting( view.ambience, ph );
 
+	// Disposable observability hook (csz_sky_debug, default 0; registered in
+	// csz_sky.cpp RegisterDevCvars). When armed, dump the PUBLISHED per-phase
+	// ambience -- the runtime ground truth the test agent reads -- once per
+	// second (throttled off ClientTime, never per-frame). Cleanly gated, so it
+	// ships harmlessly. Goes through the CSZ_Log facade (the only console path;
+	// README/code-standards 2.6 R8), carrying the exact greppable token.
+	{
+		static cvar_t *s_skyDebug;
+
+		if( s_skyDebug == NULL )
+			s_skyDebug = gEngfuncs.pfnGetCvarPointer( "csz_sky_debug" );
+
+		if( s_skyDebug != NULL && s_skyDebug->value != 0.0f )
+		{
+			static float s_nextSkyDebug;
+			float now = ClientTime();
+
+			if( now >= s_nextSkyDebug )
+			{
+				const AmbienceParams &a = view.ambience;
+
+				s_nextSkyDebug = now + 1.0f;
+				CSZ_LogInfo( "sky", "[csz_sky_debug] ph=%.3f tint=(%.3f,%.3f,%.3f) fog d=%.3f c=(%.3f,%.3f,%.3f)",
+					ph, a.tint[0], a.tint[1], a.tint[2], a.fogDensity, a.fogColor[0], a.fogColor[1], a.fogColor[2] );
+			}
+		}
+	}
+
 	g_lights.UpdateMatrices();					// slot 7.6: light matrix update
 
 	EnterTakeover();						// slot 8
