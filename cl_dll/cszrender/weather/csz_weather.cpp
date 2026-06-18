@@ -252,7 +252,6 @@ void WeatherRenderer::Update( const ViewSetup &view, float phase, float time )
 		m_surf.snowColor[2] = 1.0f;
 	}
 
-	// ===B2: particle simulation goes here===
 	// Advance the rain/snow particle pool (spawn/recycle/integrate). Pure CPU;
 	// runs pre-takeover. No-op when weather is off (Simulate early-returns).
 	Simulate( view );
