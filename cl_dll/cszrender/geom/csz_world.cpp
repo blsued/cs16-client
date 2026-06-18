@@ -42,6 +42,7 @@
 #include "../core/csz_log.h"
 #include "../core/csz_fatal.h"
 #include "../core/csz_shader.h"
+#include "../core/csz_weather_types.h"	// READ-ONLY: WeatherSurfaceState (read from ViewSetup.weather, one-way layering)
 
 #include <math.h>
 #include <new>
@@ -98,6 +99,9 @@ struct WorldState
 	int uFog, uAmbTint;		// base pass only (M2a fog/night; lit/depth stay fog-free, pitfall 23)
 	int uSunDir, uSunColor;		// base pass only (sky 档1 directional N.L; lit/depth exempt, pitfall 23)
 	int uBrushAlpha;		// per-entity translucency for blended brush modes (renderamt); 1.0 = opaque/world
+	int uCamPos;			// world-space view origin (weather wet fresnel/view vector)
+	int uWetness, uSnowAmount;	// weather surface state (0 => splice is a no-op, safety contract)
+	int uSnowColor;			// pre-cooled snow albedo (linear RGB)
 	ShaderProgram litProgram;	// additive per-light pass (T6)
 	int litUViewProj, litUAlphaTest;
 	int litULightOrigin, litULightDir, litULightColor;
@@ -774,6 +778,10 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.uSunDir = UniformLoc( s_world.program, "u_sunDir" );
 	s_world.uSunColor = UniformLoc( s_world.program, "u_sunColor" );
 	s_world.uBrushAlpha = UniformLoc( s_world.program, "u_brushAlpha" );
+	s_world.uCamPos = UniformLoc( s_world.program, "u_camPos" );
+	s_world.uWetness = UniformLoc( s_world.program, "u_wetness" );
+	s_world.uSnowAmount = UniformLoc( s_world.program, "u_snowAmount" );
+	s_world.uSnowColor = UniformLoc( s_world.program, "u_snowColor" );
 
 	UseProgram( s_world.program.program );
 	glUniform1i( UniformLoc( s_world.program, "u_texDiffuse" ), 0 );
@@ -888,6 +896,16 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
 	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
 	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
+
+	// Weather wet/snow feed (csz_weather.h surface contract). Both 0 => the world
+	// shader splice is a byte-exact no-op (safety contract). The base program is
+	// shared with the brush passes, so all three must feed these to avoid stale
+	// values; brush entities (crates) also pick up snow tops this way.
+	const csz::WeatherSurfaceState &w = view.weather;
+	glUniform3fv( s_world.uCamPos, 1, view.origin );
+	glUniform1f( s_world.uWetness, w.wetness );
+	glUniform1f( s_world.uSnowAmount, w.snowAmount );
+	glUniform3fv( s_world.uSnowColor, 1, w.snowColor );
 
 	BindVao( s_world.vao );
 	SetCull( false );	// BSP faces are culled per-face below (plan step 3)
@@ -1077,6 +1095,14 @@ void WorldRenderer::DrawBrushOpaque( const ViewSetup &view, cl_entity_s *const *
 	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
 	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
 
+	// Weather wet/snow feed: shared base program persists uniforms, so feed here
+	// too (stale 0 would still be safe, but brush tops should get snow/wet too).
+	const csz::WeatherSurfaceState &w = view.weather;
+	glUniform3fv( s_world.uCamPos, 1, view.origin );
+	glUniform1f( s_world.uWetness, w.wetness );
+	glUniform1f( s_world.uSnowAmount, w.snowAmount );
+	glUniform3fv( s_world.uSnowColor, 1, w.snowColor );
+
 	BindVao( s_world.vao );
 	SetCull( false );		// per-face plane-side cull (model space) below
 	glUniform1f( s_world.uAlphaTest, 0.0f );
@@ -1189,6 +1215,14 @@ void WorldRenderer::DrawBrushTransparent( const ViewSetup &view, cl_entity_s *co
 	glUniform4fv( s_world.uFog, 1, fogVec );	// fog on baseline (per-mode toggles off below)
 	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
 	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
+
+	// Weather wet/snow feed: shared base program; feed here so transparent brush
+	// surfaces stay consistent and never inherit a stale wet/snow value.
+	const csz::WeatherSurfaceState &w = view.weather;
+	glUniform3fv( s_world.uCamPos, 1, view.origin );
+	glUniform1f( s_world.uWetness, w.wetness );
+	glUniform1f( s_world.uSnowAmount, w.snowAmount );
+	glUniform3fv( s_world.uSnowColor, 1, w.snowColor );
 
 	BindVao( s_world.vao );
 	SetCull( false );

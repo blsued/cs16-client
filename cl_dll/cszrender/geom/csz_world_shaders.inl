@@ -60,6 +60,7 @@ uniform mat4 u_model;
 out vec2 v_uv;
 out vec2 v_lmuv;
 out vec3 v_normal;
+out vec3 v_worldPos;
 void main()
 {
 	v_uv = a_uv;
@@ -69,6 +70,9 @@ void main()
 	// (kWorldLitVs) likewise forwards a_normal unrotated, so the base directional
 	// term matches the lit pass for moving brush submodels (parity choice).
 	v_normal = a_normal;
+	// World-space fragment position for the weather wet/snow splice (view vector,
+	// fresnel). u_model IS applied here so brush submodels get correct positions.
+	v_worldPos = ( u_model * vec4( a_pos, 1.0 )).xyz;
 	gl_Position = u_viewProj * ( u_model * vec4( a_pos, 1.0 ));
 }
 )GLSL";
@@ -81,6 +85,7 @@ static const char kWorldFs[] = R"GLSL(#version 330 core
 in vec2 v_uv;
 in vec2 v_lmuv;
 in vec3 v_normal;
+in vec3 v_worldPos;
 uniform sampler2D u_texDiffuse;   // unit 0
 uniform sampler2D u_texLightmap;  // unit 1
 uniform float u_alphaTest;        // 0 = off, else discard threshold (0.25)
@@ -89,6 +94,13 @@ uniform vec3 u_ambTint;           // night tint; (1,1,1) neutral
 uniform vec3 u_sunDir;            // surface -> dominant body, normalized; base pass only
 uniform vec3 u_sunColor;          // intensity-premultiplied light color; (0,0,0) = off
 uniform float u_brushAlpha;       // per-entity translucency (curstate.renderamt/255); 1.0 = opaque/world
+// Weather surface contract (csz_weather.h WeatherSurfaceState). SAFETY: every
+// weather term is gated on u_wetness / u_snowAmount, so when both are 0 the
+// shader output is byte-identical to the night-atmosphere baseline.
+uniform vec3 u_camPos;            // world-space view origin (view.origin)
+uniform float u_wetness;          // 0..1 rain ground wetness (>0 only in rain)
+uniform float u_snowAmount;       // 0..1 snow coverage (>0 only in snow)
+uniform vec3 u_snowColor;         // linear RGB, already night-cooled & not overexposed
 out vec4 fragColor;
 void main()
 {
@@ -111,6 +123,45 @@ void main()
 	float csz_l = dot( col, vec3( 0.2126, 0.7152, 0.0722 ));
 	vec3  csz_cool = vec3( csz_l ) * vec3( 0.75, 0.92, 1.25 );   // luminance pushed cool-blue
 	col = mix( col, csz_cool, csz_night * 0.70 );                // 0.70 = grade strength (tunable)
+	// ---- Weather wet-ground / snow-cover splice (after cool grade, before fog).
+	// SAFETY CONTRACT: each term is multiplied by u_wetness or u_snowAmount, so
+	// with both at 0 every line below is an identity no-op (col unchanged).
+	vec3  csz_N = normalize( v_normal );
+	vec3  csz_V = normalize( u_camPos - v_worldPos );
+	float csz_up = clamp( csz_N.z, 0.0, 1.0 );                   // floors/puddles are up-facing
+	float csz_lmLum = dot( lm, vec3( 0.2126, 0.7152, 0.0722 )); // only lit areas get highlights
+	if( u_wetness > 0.0 )
+	{
+		// Wet pooling mostly on near-horizontal surfaces ("积水" on floors/tops).
+		float ground = smoothstep( 0.5, 0.9, csz_up );
+		float wet = u_wetness * ground;
+		// Water absorbs -> darken albedo where wet (reflective dark bands).
+		col *= mix( 1.0, 0.65, wet );
+		// Grazing fresnel reflection of the sky/fog color, only at low view angles.
+		float fres = pow( 1.0 - max( dot( csz_N, csz_V ), 0.0 ), 5.0 );
+		vec3  reflCol = u_fog.rgb * 1.1 + u_sunColor * 0.6;
+		col = mix( col, reflCol, clamp( fres * wet * 0.6, 0.0, 0.6 ) * ( 0.4 + 0.6 * csz_lmLum ));
+		// Tight specular glint from the directional light on wet floor, gated lit.
+		vec3  H = normalize( u_sunDir + csz_V );
+		float spec = pow( max( dot( csz_N, H ), 0.0 ), 80.0 );
+		col += u_sunColor * spec * wet * ( 0.3 + csz_lmLum );
+	}
+	if( u_snowAmount > 0.0 )
+	{
+		// Accumulate on up-facing surfaces: box tops, steps, ground get more;
+		// walls get ~none. u_snowColor is pre-cooled & not overexposed (the
+		// "暗处不过曝" requirement is handled upstream in WeatherRenderer).
+		float topMask = smoothstep( 0.35, 0.85, csz_up );
+		float snow = u_snowAmount * topMask;
+		// Near brighter than far: like the wetland branch, modulate the snow
+		// albedo by the baked lightmap (lit ground reads brighter than shaded)
+		// AND by a cheap distance falloff so the snow sheet recedes into the
+		// fog instead of staying a flat bright slab. Both terms are <= 1 so
+		// snow never over-brightens past u_snowColor.
+		float csz_snowDist = clamp( 1.0 - ( gl_FragCoord.z / gl_FragCoord.w ) / 1400.0, 0.45, 1.0 );
+		float csz_snowLit = ( 0.55 + 0.45 * csz_lmLum ) * csz_snowDist;
+		col = mix( col, u_snowColor * csz_snowLit, clamp( snow, 0.0, 0.9 ));
+	}
 	float fogDepth = gl_FragCoord.z / gl_FragCoord.w;      // cheap view depth (clean-room f)
 	float fogF = ( u_fog.w > 0.0 ) ? clamp( exp2( -u_fog.w * fogDepth ), 0.0, 1.0 ) : 1.0;
 	fragColor = vec4( mix( u_fog.rgb, col, fogF ), base.a * u_brushAlpha );

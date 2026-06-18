@@ -70,6 +70,7 @@ private:
 	int m_gpuGeneration;
 	bool m_handshakeOk, m_glReady;
 	cvar_t *m_cvarEnable;        // csz_renderer (dev-build escape hatch; release builds pin it, M2 concern)
+	cvar_t *m_cvarWater;         // csz_water (default 1): 0 skips the custom water pass (engine water shows)
 };
 extern Renderer g_renderer;
 }

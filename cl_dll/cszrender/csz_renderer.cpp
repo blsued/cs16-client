@@ -45,7 +45,9 @@
 #include "geom/csz_studio.h"
 #include "geom/csz_studio_texture.h"
 #include "geom/csz_viewmodel.h"
+#include "geom/csz_water.h"
 #include "geom/csz_world.h"
+#include "weather/csz_weather.h"
 #include "lighting/csz_light_pass.h"
 #include "lighting/csz_light_registry.h"
 #include "lighting/csz_shadowmap.h"
@@ -73,8 +75,8 @@ model_t *s_worldModel;
 // volume/delegate/triapi; sky until A3) simply accumulate zero.
 // ---------------------------------------------------------------------------
 enum PassTimer { kTmShadow, kTmSky, kTmWorld, kTmBrush, kTmDecal, kTmStudio,
-                 kTmLights, kTmVolume, kTmTrans, kTmDelegate, kTmTriapi,
-                 kTmViewmodel, kTmCount };
+                 kTmWater, kTmLights, kTmVolume, kTmTrans, kTmWeather,
+                 kTmDelegate, kTmTriapi, kTmViewmodel, kTmCount };
 
 double s_passAccumMs[kTmCount];
 double s_passBeginTime[kTmCount];
@@ -139,12 +141,13 @@ void SampleFps()
 			double inv = 1.0 / (double)s_frames;
 
 			CSZ_LogDev( "fps", "pass-ms avg: shadow=%.2f sky=%.2f world=%.2f brush=%.2f decal=%.2f "
-				"studio=%.2f lights=%.2f volume=%.2f trans=%.2f delegate=%.2f triapi=%.2f viewmodel=%.2f",
+				"studio=%.2f water=%.2f lights=%.2f volume=%.2f trans=%.2f weather=%.2f delegate=%.2f triapi=%.2f viewmodel=%.2f",
 				s_passAccumMs[kTmShadow] * inv, s_passAccumMs[kTmSky] * inv,
 				s_passAccumMs[kTmWorld] * inv, s_passAccumMs[kTmBrush] * inv,
 				s_passAccumMs[kTmDecal] * inv, s_passAccumMs[kTmStudio] * inv,
-				s_passAccumMs[kTmLights] * inv, s_passAccumMs[kTmVolume] * inv,
-				s_passAccumMs[kTmTrans] * inv, s_passAccumMs[kTmDelegate] * inv,
+				s_passAccumMs[kTmWater] * inv, s_passAccumMs[kTmLights] * inv,
+				s_passAccumMs[kTmVolume] * inv, s_passAccumMs[kTmTrans] * inv,
+				s_passAccumMs[kTmWeather] * inv, s_passAccumMs[kTmDelegate] * inv,
 				s_passAccumMs[kTmTriapi] * inv, s_passAccumMs[kTmViewmodel] * inv );
 		}
 
@@ -188,12 +191,19 @@ void Renderer::OnHudInit()
 	if( m_cvarEnable == NULL )
 		m_cvarEnable = gEngfuncs.pfnRegisterVariable( "csz_renderer", "1", FCVAR_CLIENTDLL );
 
+	// csz_water (default 1): toggles the custom turb/water pass. 0 fully skips
+	// DrawWater so the underlying surface / engine water shows -- the OFF baseline
+	// for A/B capture. Same FCVAR_CLIENTDLL convention as the other csz cvars.
+	if( m_cvarWater == NULL )
+		m_cvarWater = gEngfuncs.pfnRegisterVariable( "csz_water", "1", FCVAR_CLIENTDLL );
+
 	RegisterSpriteCommands();	// csz_testsprite (T5)
 	RegisterLightingCommands();	// csz_testspot + csz_testlight (T6)
 	RegisterStudioTextureCvars();	// csz_dev_armskin (spec 4.3.1 layer 1 dev probe)
 	RegisterViewmodelDevCvars();	// csz_dev_viewmodel (dev stand-in model)
 	g_fog.RegisterDevCommands();	// csz_devfog/csz_devtint/csz_devmoon (A1; CSZ_DEV_TOOLS only)
 	g_sky.RegisterDevCvars();	// csz_sky_phase (always) + csz_devsun (CSZ_DEV_TOOLS only)
+	g_weather.RegisterCvars();	// csz_weather/_intensity/_quality + csz_devweather (CSZ_DEV_TOOLS only)
 }
 
 void Renderer::OnVidInit()
@@ -216,6 +226,8 @@ void Renderer::Shutdown()
 		g_world.Destroy();
 		g_studio.DestroyAll();
 		g_spotShadow.Destroy();
+		g_water.Shutdown();
+		g_weather.Shutdown();
 		m_glReady = false;
 	}
 
@@ -295,6 +307,12 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 
 	g_lights.UpdateMatrices();					// slot 7.6: light matrix update
 
+	// slot 7.8: weather state update. Derives the WeatherSurfaceState contract
+	// (wetness/snowAmount/snowColor) from the csz_weather* cvars + published
+	// ambience tint BEFORE takeover; the world/turb shaders read it this frame.
+	g_weather.Update( view, ph, ClientTime() );
+	view.weather = g_weather.SurfaceState();			// geom reads wet/snow from the view (one-way layering)
+
 	EnterTakeover();						// slot 8
 
 	BeginPass( kTmShadow );
@@ -338,6 +356,12 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	g_studio.DrawOpaque( view, m_frame.studio, m_frame.numStudio );	// slot 12: studio opaque
 	EndPass( kTmStudio );
 
+	BeginPass( kTmWater );						// slot 12.5: animated turb/water surface (B1)
+	g_water.EnsureBuilt( world );					// same world model g_world.EnsureBuilt used (~252)
+	if( m_cvarWater == NULL || m_cvarWater->value != 0.0f )		// csz_water 0 = skip custom water (OFF baseline)
+		g_water.DrawWater( view, g_weather.RainIntensity(), ph );
+	EndPass( kTmWater );
+
 	BeginPass( kTmLights );
 	RunLightPasses( view, m_frame.studio, m_frame.numStudio );	// slot 13: additive light passes
 	EndPass( kTmLights );
@@ -345,6 +369,7 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	BeginPass( kTmTrans );
 	DrawSprites( view, m_frame.sprites, m_frame.numSprites );	// slot 14: sprites (trans domain)
 	g_world.DrawBrushTransparent( view, m_frame.brush, m_frame.numBrush );	// slot 14: transparent brush (trans domain, E1)
+	g_weather.DrawPrecip( view );					// slot 14.5: precipitation particles (trans domain, B2)
 	EndPass( kTmTrans );
 
 	BeginPass( kTmViewmodel );

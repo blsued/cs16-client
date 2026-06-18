@@ -35,6 +35,7 @@
 #pragma once
 #include "csz_math.h"
 #include "csz_ambience_types.h"
+#include "csz_weather_types.h"
 struct ref_viewpass_s;
 namespace csz
 {
@@ -50,6 +51,9 @@ struct ViewSetup
 	const unsigned char *pvs;      // fat PVS bytes; NULL = everything visible (shadow passes)
 	AmbienceParams ambience;       // BuildViewFromPass sets AmbienceNeutral();
 	                               // composition root overwrites from g_fog each frame
+	WeatherSurfaceState weather;   // wet/snow surface contract; composition root
+	                               // copies g_weather.SurfaceState() each frame (geom
+	                               // reads it here, never includes weather/)
 };
 void BuildViewFromPass( const struct ref_viewpass_s *rvp, ViewSetup &out );  // main view: zNear=4, zFar=16384
 void BuildSpotLightView( const float origin[3], const float anglesDeg[3],

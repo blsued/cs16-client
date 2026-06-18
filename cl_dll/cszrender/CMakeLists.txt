@@ -23,6 +23,8 @@ set(CSZRENDER_SRC
 	geom/csz_studio_mesh.cpp
 	geom/csz_studio_texture.cpp
 	geom/csz_viewmodel.cpp
+	geom/csz_water.cpp
+	weather/csz_weather.cpp
 	lighting/csz_light_registry.cpp
 	lighting/csz_light_pass.cpp
 	lighting/csz_shadowmap.cpp
