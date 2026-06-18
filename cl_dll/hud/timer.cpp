@@ -129,6 +129,15 @@ int CHudTimer::MsgFunc_ShowTimer(const char *pszName, int iSize, void *pbuf)
 	return 1;
 }
 
+bool CHudTimer::GetRoundTiming( float now, float &outDuration, float &outRemaining ) const
+{
+	if( !( m_iFlags & HUD_DRAW ) || m_iTime <= 0 )
+		return false;
+	outDuration = (float)m_iTime;
+	outRemaining = (float)m_iTime + m_fStartTime - now;
+	return true;
+}
+
 #define UPDATE_BOTPROGRESS 0
 #define CREATE_BOTPROGRESS 1
 #define REMOVE_BOTPROGRESS 2

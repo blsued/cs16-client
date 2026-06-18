@@ -397,6 +397,7 @@ void CHud :: Init( void )
 	m_Health.Init();
 	m_Radio.Init();
 	m_Timer.Init();
+	m_FPS.Init();
 	m_Money.Init();
 	m_AmmoSecondary.Init();
 	m_Train.Init();

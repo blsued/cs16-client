@@ -280,6 +280,36 @@ void DLLEXPORT HUD_Init( void )
 	LoadMenuInterface();
 	InitInput();
 	gHUD.Init();
+
+	// CSOZ: lift the launch-time FPS cap to 200 (user can still override via console/menu).
+	//
+	// Real clamp (Xash3D-FWGS, engine/common/host.c Host_CalcFPS): a CS
+	// listenserver+client (SV_Active(), maxclients>1, vsync off) runs the
+	// multiplayer "else" branch (host.c ~519-525):
+	//     double max_fps = fps_override.value ? MAX_FPS_HARD : MAX_FPS_SOFT; // 1000 : 200
+	//     fps = host_maxfps.value;               // the "fps_max" cvar
+	//     fps = bound( MIN_FPS, fps, max_fps );  // MIN_FPS = 20
+	// so the BINDING limit is the saved fps_max VALUE, not the 200 soft ceiling.
+	// The bundled config.cfg / userconfig.cfg ship "fps_max 99", which is exactly
+	// why the in-game counter sits at ~99. (gl_vsync is 0 in this build, so vsync
+	// is not the cap; the PROTO_GOLDSRC branch that returns 31 -- host.c:513 -- only
+	// applies while still loading, cls.state < ca_validate, not during gameplay.)
+	// Those configs exec at engine startup, so re-seeding fps_max here on the first
+	// connect runs after them and wins.
+	//
+	// fps_override 1 is the engine's documented unlock; 200 == MAX_FPS_SOFT so it is
+	// not strictly required to reach 200, but it makes the intent explicit and lets
+	// the user push past 200 if desired. Guarded to run ONCE per process so this only
+	// seeds the launch default and never clobbers a mid-session user change on every
+	// map load / reconnect.
+	static bool s_fpsDefaultSet = false;
+	if( !s_fpsDefaultSet )
+	{
+		s_fpsDefaultSet = true;
+		gEngfuncs.pfnClientCmd( "fps_override 1\n" );
+		gEngfuncs.pfnClientCmd( "fps_max 200\n" );
+	}
+
 	CSZ_HudInit(); // CSOZ hook: CSZ renderer cvars/commands + handshake sanity check
 
 	// Initialize menu if it's loaded

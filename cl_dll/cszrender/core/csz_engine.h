@@ -55,4 +55,8 @@ namespace csz
 model_t *WorldModel();                  // gRenderAPI.pfnGetModel( 1 ); NULL when no map
 int TexSlotToGlName( int texSlot );     // RenderGetParm( PARM_TEX_TEXNUM, texSlot ); 0 on failure
 float ClientTime();                     // gEngfuncs.GetClientTime()
+
+// Active round timing: round start=sunset, end=dawn. false when no round is
+// active (idle / between rounds) -> sky falls back to a free-running cycle.
+bool RoundTiming( float &outDuration, float &outRemaining );
 }

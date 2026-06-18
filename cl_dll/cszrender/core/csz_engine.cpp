@@ -33,6 +33,8 @@
  * exception statement from your version.
  */
 #include "csz_engine.h"
+#include "hud.h"        // gHUD: this is the ONLY cszrender TU allowed to touch it
+                        // (the GL-heavy TUs stay decoupled from hud.h on purpose)
 
 namespace csz
 {
@@ -57,6 +59,11 @@ int TexSlotToGlName( int texSlot )
 float ClientTime()
 {
 	return gEngfuncs.GetClientTime();
+}
+
+bool RoundTiming( float &outDuration, float &outRemaining )
+{
+	return gHUD.m_Timer.GetRoundTiming( ClientTime(), outDuration, outRemaining );
 }
 
 }

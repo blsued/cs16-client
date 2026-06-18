@@ -809,12 +809,32 @@ public:
 	CHudMsgFunc(ShowTimer);
 
 	int m_right;
+
+	// CSOZ sky: read-only round-timer access for the procedural day/night sky
+	// (round start = sunset, last 30s = dawn). false when no round is active.
+	// 'now' = current client time (gEngfuncs.GetClientTime()).
+	bool GetRoundTiming( float now, float &outDuration, float &outRemaining ) const;
 private:
 	int m_HUD_timer;
 	int m_iTime;
 	float m_fStartTime;
 	bool m_bPanicColorChange;
 	float m_flPanicTime;
+};
+//
+//-----------------------------------------------------
+//
+// CSOZ: real-time FPS counter, drawn in the top-right corner. ON by default
+// (toggle with csz_showfps). Mirrors CHudTimer; auto-drawn by CHud::Redraw.
+class CHudFPS: public CHudBase
+{
+public:
+	int Init( void );
+	int VidInit( void );
+	int Draw( float fTime );
+private:
+	float m_fps;		// exponential moving average of the instantaneous fps
+	bool m_bInit;		// false until the EMA has been seeded with the first frame
 };
 //
 //-----------------------------------------------------
@@ -1082,6 +1102,7 @@ public:
 	CHudMOTD        m_MOTD;
 	CHudMoney       m_Money;
 	CHudTimer       m_Timer;
+	CHudFPS         m_FPS;
 	CHudRadio       m_Radio;
 	CHudProgressBar m_ProgressBar;
 	CHudSniperScope m_SniperScope;
