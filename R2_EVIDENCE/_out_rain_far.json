@@ -1,0 +1,72 @@
+{
+  "engine_log": "D:/csoz-wt/weather/R2_EVIDENCE/engine_rain_far_de_dust2.log",
+  "used_markers": true,
+  "start_marker": "MATPERF-FPS-START",
+  "end_marker": "MATPERF-FPS-END",
+  "thresholds": {
+    "fps_cap": 200.0,
+    "min_avg": 199.0,
+    "min_1low": 195.0,
+    "min_samples": 55
+  },
+  "stats": {
+    "samples": 68,
+    "duration_s_approx": 68,
+    "avg_fps": 101.93676470588235,
+    "min_fps": 95.7,
+    "max_fps": 337.5,
+    "low_1pct_fps": 95.7,
+    "low_1pct_n": 1,
+    "worst_frame_ms": 218.09,
+    "mean_avg_ms": 10.054411764705883
+  },
+  "pass_ms": {
+    "order": [
+      "shadow",
+      "sky",
+      "world",
+      "brush",
+      "decal",
+      "studio",
+      "lights",
+      "volume",
+      "trans",
+      "delegate",
+      "triapi",
+      "viewmodel",
+      "water",
+      "weather"
+    ],
+    "means": {
+      "shadow": 0.0,
+      "sky": 0.00014705882352941178,
+      "world": 0.020147058823529414,
+      "brush": 0.003088235294117647,
+      "decal": 0.0,
+      "studio": 0.0,
+      "water": 0.0,
+      "lights": 0.0,
+      "volume": 0.0,
+      "trans": 0.33558823529411763,
+      "weather": 0.0,
+      "delegate": 0.0,
+      "triapi": 0.0,
+      "viewmodel": 0.01
+    }
+  },
+  "errors": {
+    "count": 0,
+    "samples": []
+  },
+  "warnings": [
+    "end marker 'MATPERF-FPS-END' not found; parsing from START to EOF"
+  ],
+  "gate": {
+    "passed": false,
+    "fail_reasons": [
+      "avg fps 101.9 < min-avg 199.0",
+      "1% low 95.7 < min-1low 195.0"
+    ],
+    "soft_warnings": []
+  }
+}

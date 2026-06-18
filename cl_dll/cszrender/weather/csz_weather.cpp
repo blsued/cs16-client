@@ -87,7 +87,10 @@ const float kBoxBot  = -200.0f;  // recycle floor below the camera
 // snow. The pool capacity (kMaxParticles) equals the largest of these so a tier
 // change only moves m_activeCount -- it never reallocates.
 const int kRainCount[3] = { 1200, 3500, 7000 };
-const int kSnowCount[3] = {  800, 2000, 4000 };
+// Snow raised (was {800,2000,4000}): airborne flakes read too sparse/faint, so
+// denser fields make snowfall convincing. Still <= kMaxParticles (7000) so the
+// preallocated pool/scratch never overflows.
+const int kSnowCount[3] = { 1600, 4000, 7000 };
 
 // Vertex layout shared by both programs: pos(3) + corner(2) + color(4) = 9.
 const int kVertFloats = 9;
@@ -226,7 +229,9 @@ void WeatherRenderer::Update( const ViewSetup &view, float phase, float time )
 		// the night darkening (its channels drop below 1 at night), so darken
 		// ONCE: base * tint, clamped <= 1. (Previously this also multiplied by the
 		// tint luminance, applying the night dim ~twice -> night snow far too dark.)
-		const float base[3] = { 0.85f, 0.88f, 0.95f };
+		// Base is a clear cool white (B > G > R) so accumulated snow reads as snow,
+		// not a grey slab; the world-shader snow branch carries the night floor.
+		const float base[3] = { 0.82f, 0.88f, 0.98f };
 		const float *tint = view.ambience.tint;
 
 		for( int i = 0; i < 3; i++ )
@@ -453,12 +458,19 @@ void WeatherRenderer::DrawPrecip( const ViewSetup &view )
 			float dz = p.pos[2] - org[2];
 			float dist = sqrtf( dx * dx + dy * dy + dz * dz );
 
-			// Depth layer: near (layer~1) = larger/brighter/longer streaks; far
-			// (layer~0) = thinner/dimmer. Width/length/alpha all scale by layer.
+			// Depth layer: near (layer~1) = thicker/longer streaks; far (layer~0) =
+			// thinner/shorter/dimmer = a finer rain veil behind the near curtain.
+			// Per-streak variation from the stable seed so no two streaks match
+			// (length/width/alpha jitter) -> reads as a natural curtain, not UI lines.
 			float layer = p.layer;
-			float halfWidth = 0.9f + layer * 1.9f;		// ~0.9..2.8 units
-			float length = 36.0f + layer * 60.0f;		// ~36..96 units
-			float baseAlpha = 0.16f + layer * 0.42f;	// near streaks far more readable
+			float jitter = p.seed;				// stable 0..1 per streak
+			// Thinner overall (was 0.9..2.8): near ~0.7..1.4, far ~0.4 -> hairline rain.
+			float halfWidth = 0.40f + layer * ( 0.75f + jitter * 0.35f );
+			// Length varies per streak AND by layer (near longer); far streaks short.
+			float length = 30.0f + layer * 70.0f + jitter * 28.0f;	// ~30..128 units
+			// Far layer DIMMER but still present (veil); near brighter. The far floor
+			// (0.10) keeps a frame-wide fine mist instead of clustering near camera.
+			float baseAlpha = 0.10f + layer * 0.30f + jitter * 0.06f;
 
 			// Fog factor (exp2 falloff with distance): FAR streaks get darkened and
 			// further faded so distant rain reads as compressed "rain mist", near
@@ -467,9 +479,11 @@ void WeatherRenderer::DrawPrecip( const ViewSetup &view )
 
 			fog = Clamp01( fog );
 
-			// Extra distance fade independent of map fog so far rain never clutters.
-			float distFade = Clamp01( 1.0f - dist / ( kBoxHalf * 1.25f ) );
-			float alpha = baseAlpha * fog * ( 0.35f + 0.65f * distFade );
+			// Gentle distance fade only: stretch the falloff to the full box diagonal
+			// (~1100u) with a 0.30 floor so rain is distributed across the WHOLE frame
+			// (a scene-wide curtain) instead of a tight cluster right at the camera.
+			float distFade = Clamp01( 1.0f - dist / 1100.0f );
+			float alpha = baseAlpha * fog * ( 0.30f + 0.70f * distFade );
 
 			if( alpha <= 0.004f )
 				continue;	// skip invisible far streaks (cheaper draw)
@@ -491,8 +505,11 @@ void WeatherRenderer::DrawPrecip( const ViewSetup &view )
 				cr = rainR; cg = rainG; cb = rainB;
 			}
 
-			// Streak axis: along world-up (Z). Half-extents from width/length.
-			float ax = 0.0f, ay = 0.0f, az = length * 0.5f;	// along-streak (Z up)
+			// Streak axis: mostly along world-up (Z) with a slight diagonal slant in
+			// the wind (+X) direction so rain falls at an angle instead of dead
+			// vertical. Slant ~16% of length; per-streak jitter varies the lean a hair.
+			float slant = length * ( 0.13f + jitter * 0.06f );
+			float ax = slant, ay = 0.0f, az = length * 0.5f;	// along-streak (slanted)
 			float rx = right[0] * halfWidth;		// across-streak (camera right)
 			float ry = right[1] * halfWidth;
 			float rz = right[2] * halfWidth;
@@ -538,10 +555,12 @@ void WeatherRenderer::DrawPrecip( const ViewSetup &view )
 			float dz = p.pos[2] - org[2];
 			float dist = sqrtf( dx * dx + dy * dy + dz * dz );
 
-			float size = 1.6f + p.seed * 2.2f;		// small flakes, varied
+			float size = 2.2f + p.seed * 3.0f;		// larger/varied so flakes read
 			float fog = ( fogDensity > 0.0f ) ? Clamp01( exp2f( -fogDensity * dist ) ) : 1.0f;
 			float distFade = Clamp01( 1.0f - dist / ( kBoxHalf * 1.25f ) );
-			float alpha = ( 0.55f + 0.35f * p.seed ) * fog * ( 0.4f + 0.6f * distFade );
+			// Brighter flakes + a higher near-floor (0.55) so snowfall stays clearly
+			// visible against the dark night scene rather than fading to nothing.
+			float alpha = ( 0.72f + 0.28f * p.seed ) * fog * ( 0.55f + 0.45f * distFade );
 
 			if( alpha <= 0.004f )
 				continue;

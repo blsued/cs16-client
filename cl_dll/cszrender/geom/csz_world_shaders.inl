@@ -133,34 +133,59 @@ void main()
 	if( u_wetness > 0.0 )
 	{
 		// Wet pooling mostly on near-horizontal surfaces ("积水" on floors/tops).
-		float ground = smoothstep( 0.5, 0.9, csz_up );
+		// Widen the ground band a touch (0.35..0.85) so sloped floor/steps also wet.
+		float ground = smoothstep( 0.35, 0.85, csz_up );
 		float wet = u_wetness * ground;
-		// Water absorbs -> darken albedo where wet (reflective dark bands).
-		col *= mix( 1.0, 0.65, wet );
-		// Grazing fresnel reflection of the sky/fog color, only at low view angles.
-		float fres = pow( 1.0 - max( dot( csz_N, csz_V ), 0.0 ), 5.0 );
-		vec3  reflCol = u_fog.rgb * 1.1 + u_sunColor * 0.6;
-		col = mix( col, reflCol, clamp( fres * wet * 0.6, 0.0, 0.6 ) * ( 0.4 + 0.6 * csz_lmLum ));
-		// Tight specular glint from the directional light on wet floor, gated lit.
+		// Water absorbs -> darken albedo where wet (reflective dark bands). The
+		// signature wet look = DARK base WITH bright reflective highlights, so we
+		// darken harder here and rely on the fresnel/spec terms below to punch the
+		// glossy streaks back up.
+		col *= mix( 1.0, 0.55, wet );
+		// Grazing fresnel reflection of the sky/fog color. Softer exponent (3.0)
+		// widens the grazing band so the sheen is visible across a low-angle view,
+		// not just at the silhouette edge. A small ambient floor (the 0.35 term)
+		// keeps wet streaks legible in shadow where csz_lmLum ~ 0 (night-dark fix:
+		// the wet sheen self-illuminates instead of vanishing in unlit areas).
+		float fres = pow( 1.0 - max( dot( csz_N, csz_V ), 0.0 ), 3.0 );
+		vec3  reflCol = u_fog.rgb * 1.3 + u_sunColor * 0.8 + vec3( 0.06, 0.08, 0.12 );
+		float reflAmt = clamp( fres * wet * 1.1, 0.0, 0.85 ) * ( 0.35 + 0.65 * csz_lmLum );
+		col = mix( col, reflCol, reflAmt );
+		// Tight specular glint from the directional light on wet floor. Broader
+		// lobe (exp 48) + stronger gain so the glint reads as a bright wet hotspot,
+		// with a small ambient floor so it does not require full lightmap to show.
 		vec3  H = normalize( u_sunDir + csz_V );
-		float spec = pow( max( dot( csz_N, H ), 0.0 ), 80.0 );
-		col += u_sunColor * spec * wet * ( 0.3 + csz_lmLum );
+		float spec = pow( max( dot( csz_N, H ), 0.0 ), 48.0 );
+		col += u_sunColor * spec * wet * ( 0.6 + 1.4 * csz_lmLum );
+		// Faint grazing self-lit rim: a cheap cool sheen tied purely to fresnel+wet
+		// (no light dependency) so wet ground in deep shadow still shows a glossy
+		// edge instead of reading as plain dark dirt.
+		col += vec3( 0.10, 0.13, 0.18 ) * fres * wet;
 	}
 	if( u_snowAmount > 0.0 )
 	{
 		// Accumulate on up-facing surfaces: box tops, steps, ground get more;
 		// walls get ~none. u_snowColor is pre-cooled & not overexposed (the
 		// "暗处不过曝" requirement is handled upstream in WeatherRenderer).
-		float topMask = smoothstep( 0.35, 0.85, csz_up );
+		// Up-facing surfaces accumulate strongly; broaden the mask floor (0.25)
+		// so even slightly-tilted tops (crate edges, steps) catch snow.
+		float topMask = smoothstep( 0.25, 0.75, csz_up );
 		float snow = u_snowAmount * topMask;
-		// Near brighter than far: like the wetland branch, modulate the snow
-		// albedo by the baked lightmap (lit ground reads brighter than shaded)
-		// AND by a cheap distance falloff so the snow sheet recedes into the
-		// fog instead of staying a flat bright slab. Both terms are <= 1 so
-		// snow never over-brightens past u_snowColor.
-		float csz_snowDist = clamp( 1.0 - ( gl_FragCoord.z / gl_FragCoord.w ) / 1400.0, 0.45, 1.0 );
-		float csz_snowLit = ( 0.55 + 0.45 * csz_lmLum ) * csz_snowDist;
-		col = mix( col, u_snowColor * csz_snowLit, clamp( snow, 0.0, 0.9 ));
+		// Near brighter than far: modulate the snow albedo by the baked lightmap
+		// (lit ground reads brighter than shaded) AND by a cheap distance falloff
+		// so the snow sheet recedes into the fog. CRITICAL night-legibility fix:
+		// the lightmap floor is raised to 0.80 (was 0.55) so accumulated snow stays
+		// a readable cool white even in unlit/shadowed areas instead of crushing to
+		// near-black -- snow self-illuminates as a soft sheet (like real snow holds
+		// ambient sky light). Distance floor raised to 0.60 so far snow still reads.
+		float csz_snowDist = clamp( 1.0 - ( gl_FragCoord.z / gl_FragCoord.w ) / 1600.0, 0.60, 1.0 );
+		float csz_snowLit = clamp( ( 0.80 + 0.30 * csz_lmLum ) * csz_snowDist, 0.0, 1.0 );
+		// Cool-white snow with a faint blue cast (NOT pure white) so it reads as
+		// snow, not a grey slab. u_snowColor is the night-cooled base; add a tiny
+		// constant blue lift that survives even when u_snowColor is dim at night.
+		vec3 csz_snowCol = u_snowColor * csz_snowLit + vec3( 0.04, 0.05, 0.08 ) * snow;
+		// Push coverage strength up (0.97) so accumulated snow clearly overwrites the
+		// ground albedo -- snow_cover must look obviously different from snow_fall.
+		col = mix( col, csz_snowCol, clamp( snow * 1.15, 0.0, 0.97 ));
 	}
 	float fogDepth = gl_FragCoord.z / gl_FragCoord.w;      // cheap view depth (clean-room f)
 	float fogF = ( u_fog.w > 0.0 ) ? clamp( exp2( -u_fog.w * fogDepth ), 0.0, 1.0 ) : 1.0;

@@ -75,8 +75,10 @@ void main()
 	// so streaks taper instead of ending abruptly.
 	float vy = v_corner.y;
 	float vGrad = smoothstep( 0.0, 0.15, vy ) * smoothstep( 1.0, 0.72, vy );
-	// Horizontal feather across the streak width (corner.x 0..1, center 0.5).
-	float hx = 1.0 - smoothstep( 0.30, 0.5, abs( v_corner.x - 0.5 ) );
+	// Horizontal feather across the streak width (corner.x 0..1, center 0.5): start
+	// fading from the center outward (0.05) so the streak has a thin soft core and
+	// no hard rectangular edge -> reads as a fine rain line, not a UI bar.
+	float hx = 1.0 - smoothstep( 0.05, 0.5, abs( v_corner.x - 0.5 ) );
 	float a = v_color.a * vGrad * hx;
 	if( a <= 0.003 )
 		discard;

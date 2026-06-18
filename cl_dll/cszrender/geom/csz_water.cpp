@@ -203,6 +203,35 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 	m_numFaces = faceCursor;
 	m_numVerts = vertCursor;
 
+	// One-time diagnostic: centroid + AABB of every built turb vertex, so the
+	// water channel can be framed for A/B capture (aim setpos/setang at the
+	// centroid). Info level + the same "water" channel as the build line; cheap
+	// (single pass over the staging buffer) and only runs on (re)build.
+	{
+		float mn[3] = {  1e30f,  1e30f,  1e30f };
+		float mx[3] = { -1e30f, -1e30f, -1e30f };
+		double sum[3] = { 0.0, 0.0, 0.0 };
+
+		for( int v = 0; v < m_numVerts; v++ )
+		{
+			const float *pp = &verts[(size_t)v * kWaterVertexFloats];
+
+			for( int c = 0; c < 3; c++ )
+			{
+				if( pp[c] < mn[c] ) mn[c] = pp[c];
+				if( pp[c] > mx[c] ) mx[c] = pp[c];
+				sum[c] += pp[c];
+			}
+		}
+
+		float cx = ( m_numVerts > 0 ) ? (float)( sum[0] / m_numVerts ) : 0.0f;
+		float cy = ( m_numVerts > 0 ) ? (float)( sum[1] / m_numVerts ) : 0.0f;
+		float cz = ( m_numVerts > 0 ) ? (float)( sum[2] / m_numVerts ) : 0.0f;
+
+		CSZ_LogInfo( "water", "turb centroid=(%.0f %.0f %.0f) min=(%.0f %.0f %.0f) max=(%.0f %.0f %.0f)",
+			cx, cy, cz, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2] );
+	}
+
 	// Upload the static VBO. Build runs outside the takeover window, so leave
 	// VAO/VBO unbound for the engine afterwards (matches the world build).
 	glGenVertexArrays( 1, &m_vao );
