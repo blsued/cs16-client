@@ -158,8 +158,12 @@ void main()
 		col += u_sunColor * spec * wet * ( 0.6 + 1.4 * csz_lmLum );
 		// Faint grazing self-lit rim: a cheap cool sheen tied purely to fresnel+wet
 		// (no light dependency) so wet ground in deep shadow still shows a glossy
-		// edge instead of reading as plain dark dirt.
+		// edge instead of reading as plain dark dirt. fres*fres adds a sharp
+		// glancing-angle lobe (no new pow) so the very-grazing rim punches a glossy
+		// damp highlight, while the linear fres term keeps the broad sheen.
+		float graze = fres * fres;                                  // tight grazing lobe (cheap)
 		col += vec3( 0.10, 0.13, 0.18 ) * fres * wet;
+		col += vec3( 0.14, 0.18, 0.26 ) * graze * wet;
 	}
 	if( u_snowAmount > 0.0 )
 	{
@@ -183,9 +187,11 @@ void main()
 		// snow, not a grey slab. u_snowColor is the night-cooled base; add a tiny
 		// constant blue lift that survives even when u_snowColor is dim at night.
 		vec3 csz_snowCol = u_snowColor * csz_snowLit + vec3( 0.04, 0.05, 0.08 ) * snow;
-		// Push coverage strength up (0.97) so accumulated snow clearly overwrites the
-		// ground albedo -- snow_cover must look obviously different from snow_fall.
-		col = mix( col, csz_snowCol, clamp( snow * 1.15, 0.0, 0.97 ));
+		// Push coverage strength so accumulated snow clearly overwrites the ground
+		// albedo (snow_cover must look obviously different from snow_fall), but cap at
+		// 0.9 so the surface never goes pure white -- it keeps a trace of the cool
+		// u_snowColor cast and the underlying ground tint (readability requirement).
+		col = mix( col, csz_snowCol, clamp( snow * 1.15, 0.0, 0.9 ));
 	}
 	float fogDepth = gl_FragCoord.z / gl_FragCoord.w;      // cheap view depth (clean-room f)
 	float fogF = ( u_fog.w > 0.0 ) ? clamp( exp2( -u_fog.w * fogDepth ), 0.0, 1.0 ) : 1.0;
