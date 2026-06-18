@@ -50,6 +50,32 @@ public:
 	void Shutdown();                     // destroy GL objects
 	void MarkNotDrawn() { m_lastDrawBatches = 0; }  // csz_water 0 path: water pass skipped this frame
 
+	// --- planar reflection / refraction (Source-style real render-to-texture) --
+	// The composition root drives the actual mirrored scene render and the
+	// scene-color copy (it owns g_sky/g_world); this class owns the GL targets
+	// (FBO + engine-slot color textures) so the generation/teardown rules stay in
+	// one place (matches the shadow-map idiom). reflect=0 (cvar) -> the root never
+	// calls these and DrawWater falls back to the analytic sky path.
+	//
+	// EnsureReflectTargets: lazily create / resize the reflection FBO (color +
+	// depth renderbuffer, half-res of mainW x mainH) and the refraction color
+	// texture (same half-res). Returns false on any GL failure (caller skips the
+	// real-reflection path that frame; analytic fallback). Idempotent per size.
+	bool EnsureReflectTargets( int mainW, int mainH );
+	unsigned int ReflFbo() const { return m_reflFbo; }   // 0 when not created
+	int ReflWidth() const { return m_reflW; }
+	int ReflHeight() const { return m_reflH; }
+	int ReflTexSlot() const { return m_reflTexSlot; }    // engine slot, 0 = none
+	int RefrTexSlot() const { return m_refrTexSlot; }    // engine slot, 0 = none
+	// Copy the CURRENTLY BOUND framebuffer's color (the main scene, world+studio
+	// opaque already drawn) into the refraction texture. Call right before
+	// DrawWater while the main FBO is bound. srcW/srcH = main viewport size.
+	void CopyRefraction( int srcX, int srcY, int srcW, int srcH );
+	// Arm the real reflection/refraction sample path for the NEXT DrawWater:
+	// pass the water plane Z and whether the targets are valid this frame.
+	// reflectOn=false restores the analytic-sky fallback.
+	void SetReflection( bool reflectOn, float planeZ ) { m_reflectOn = reflectOn; m_reflPlaneZ = planeZ; }
+
 	// Draw metrics (kept as SEPARATE fields, never conflated):
 	int TurbVerts() const { return m_numVerts; }              // triangle-list vertex count in the VBO
 	int DrawBatches() const { return m_numBatches; }          // batched draw count (== glDrawArrays calls)
@@ -111,6 +137,21 @@ private:
 	int m_gpuGeneration;		// GPU generation that owns the GL names
 	bool m_built;
 
+	// --- planar reflection / refraction GL targets (owned here; created lazily,
+	// resized on viewport change, generation-safe teardown -- shadow-map idiom).
+	unsigned int m_reflFbo;		// 0 = none
+	int m_reflDepthSlot;		// engine slot of the reflection FBO's depth texture (0 = none)
+	int m_reflTexSlot;		// engine slot of the reflection color texture (0 = none)
+	int m_refrTexSlot;		// engine slot of the refraction color texture (0 = none)
+	int m_reflW, m_reflH;		// reflection FBO size (half-res of the main viewport)
+	int m_refrW, m_refrH;		// refraction texture size (FULL res: glCopyTexSubImage2D is 1:1, no downscale)
+	int m_reflGpuGeneration;	// generation the refl GL names belong to
+	bool m_reflFailLogged;		// one failure report per context
+
+	// Per-frame reflection arming (set by the composition root before DrawWater).
+	bool m_reflectOn;		// true = sample real refl/refr; false = analytic fallback
+	float m_reflPlaneZ;		// water plane Z (top of water body)
+
 	// Cached uniform locations (resolved once per program build).
 	int m_uViewProj;
 	int m_uTime;
@@ -121,6 +162,10 @@ private:
 	int m_uMoonColor;
 	int m_uRain;
 	int m_uPhase;
+	int m_uReflTex;		// sampler2D, TMU 1
+	int m_uRefrTex;		// sampler2D, TMU 2
+	int m_uReflectOn;	// int 0/1 -- gate the real-sample path
+	int m_uViewport;	// vec2 viewport size (screen-space UV from gl_FragCoord)
 };
 extern WaterRenderer g_water;
 }

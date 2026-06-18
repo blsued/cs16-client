@@ -36,6 +36,7 @@
 #include "core/csz_engine.h"
 namespace csz
 {
+struct ViewSetup;   // core/csz_view.h (full def pulled in by csz_renderer.cpp)
 struct FrameEntities
 {
 	static const int kMaxEntities = 1024;
@@ -71,11 +72,19 @@ public:
 	int CameraGateContents() const { return m_camGateContents; }
 private:
 	bool EnsureGlReady();        // one-shot lazy GL init (loader+caps+shaders); FATAL inside on hard fail
+	// Real planar-reflection pass: build a mirrored view about the water plane,
+	// render sky + world (+ brush) into g_water's half-res reflection FBO with a
+	// clip plane that keeps only above-water geometry. Returns true when the
+	// reflection textures are valid this frame (arms the water shader's real
+	// refl/refr path); false -> water uses the analytic-sky fallback. Restores
+	// the main framebuffer/viewport + all touched GL state before returning.
+	bool RenderWaterReflection( const ViewSetup &view, const ref_viewpass_t *rvp, float skyPhase );
 	FrameEntities m_frame;
 	int m_gpuGeneration;
 	bool m_handshakeOk, m_glReady;
 	cvar_t *m_cvarEnable;        // csz_renderer (dev-build escape hatch; release builds pin it, M2 concern)
 	cvar_t *m_cvarWater;         // csz_water (default 1): 0 skips the custom water pass (engine water shows)
+	cvar_t *m_cvarWaterReflect;  // csz_water_reflect (default 1): 0 = analytic-sky fallback (no FBO refl/refr passes)
 	cvar_t *m_cvarDebugCam;      // csz_debugcam (default 0): 1 = override view origin/angles from the cfg below
 	cvar_t *m_cvarDebugCamPos;   // csz_debugcam_pos "X Y Z" world position (debug aim, no setpos in this build)
 	cvar_t *m_cvarDebugCamAng;   // csz_debugcam_ang "pitch yaw roll" view angles (matches rvp->viewangles order)

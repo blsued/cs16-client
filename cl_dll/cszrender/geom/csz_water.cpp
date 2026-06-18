@@ -81,6 +81,26 @@ int WaterEdgeVertex( const EngModel *bsp, int surfEdge )
 	return (int)bsp->edges16[-surfEdge].v[1];
 }
 
+// Drop the reflection/refraction GL targets. sameContext=false -> forget the
+// names (the context that made them is gone), matching the T1 generation rule.
+void DestroyReflectTargets( unsigned int &fbo, int &reflSlot, int &refrSlot,
+	int &depthSlot, bool sameContext )
+{
+	if( fbo != 0 && sameContext )
+		glDeleteFramebuffers( 1, &fbo );
+	fbo = 0;
+
+	if( sameContext && gRenderAPI.GL_FreeTexture != NULL )
+	{
+		if( reflSlot != 0 ) gRenderAPI.GL_FreeTexture( (unsigned int)reflSlot );
+		if( refrSlot != 0 ) gRenderAPI.GL_FreeTexture( (unsigned int)refrSlot );
+		if( depthSlot != 0 ) gRenderAPI.GL_FreeTexture( (unsigned int)depthSlot );
+	}
+	reflSlot = 0;
+	refrSlot = 0;
+	depthSlot = 0;
+}
+
 }	// anonymous namespace
 
 void WaterRenderer::EnsureBuilt( model_s *world )
@@ -139,9 +159,15 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 	m_uMoonColor = UniformLoc( m_program, "u_moonColor" );
 	m_uRain      = UniformLoc( m_program, "u_rain" );
 	m_uPhase     = UniformLoc( m_program, "u_phase" );
+	m_uReflTex   = UniformLoc( m_program, "u_reflTex" );
+	m_uRefrTex   = UniformLoc( m_program, "u_refrTex" );
+	m_uReflectOn = UniformLoc( m_program, "u_reflectOn" );
+	m_uViewport  = UniformLoc( m_program, "u_viewport" );
 
 	UseProgram( m_program.program );
 	glUniform1i( UniformLoc( m_program, "u_tex" ), 0 );	// diffuse on TMU 0
+	glUniform1i( m_uReflTex, 1 );	// real planar reflection on TMU 1
+	glUniform1i( m_uRefrTex, 2 );	// scene-behind refraction copy on TMU 2
 	UseProgram( 0 );
 
 	// Stash the pre-batch per-face count (old path = one fan draw per turb face)
@@ -412,6 +438,20 @@ void WaterRenderer::DrawWater( const ViewSetup &view, float rainIntensity, float
 	glUniform1f( m_uRain, rainIntensity );
 	glUniform1f( m_uPhase, skyPhase );
 
+	// Real planar reflection / refraction arming. The composition root sets
+	// m_reflectOn (and built the targets) this frame; when off (cvar 0 or a GL
+	// failure) the shader takes the analytic-sky fallback and never touches
+	// TMU 1/2. Bind the real targets only when armed AND valid.
+	bool realReflect = m_reflectOn && m_reflTexSlot != 0 && m_refrTexSlot != 0;
+	glUniform1i( m_uReflectOn, realReflect ? 1 : 0 );
+	if( m_uViewport >= 0 )
+		glUniform2f( m_uViewport, (float)view.viewport[2], (float)view.viewport[3] );
+	if( realReflect )
+	{
+		BindTextureSlot( 1, m_reflTexSlot );
+		BindTextureSlot( 2, m_refrTexSlot );
+	}
+
 	// On-screen water evidence: count per-face AABBs that survive the view
 	// frustum. The build-time centroid line proves water EXISTS; this proves it
 	// is in the shot. CullBox returns true when fully outside, so a face is
@@ -436,6 +476,10 @@ void WaterRenderer::DrawWater( const ViewSetup &view, float rainIntensity, float
 		s_lastLogPos[2] = view.origin[2];
 		CSZ_LogInfo( "water", "visible_water_faces=%d of %d (frustum-tested)",
 			visibleFaces, m_numFaceBounds );
+		// Reflection/refraction legitimacy line (one per camera move): proves the
+		// real render-to-texture path is active and which targets feed it.
+		CSZ_LogInfo( "water", "reflect=%d planeZ=%.1f reflTex=%d refrTex=%d reflRes=(%dx%d)",
+			realReflect ? 1 : 0, m_reflPlaneZ, m_reflTexSlot, m_refrTexSlot, m_reflW, m_reflH );
 	}
 
 	// One glDrawArrays per distinct texture slot. The whole turb surface was
@@ -454,7 +498,13 @@ void WaterRenderer::DrawWater( const ViewSetup &view, float rainIntensity, float
 	// + write on, blend none, cull off (it was already off here). TMU0 was just
 	// bound to a water texture above; LeaveTakeover restores the engine's binding
 	// at end-of-frame, but unbind here too so a CSZ pass that follows in the same
-	// takeover window never inherits a stale water texture on slot 0.
+	// takeover window never inherits a stale water texture on slot 0. Likewise
+	// release TMU 1/2 (reflection/refraction) when we used them.
+	if( realReflect )
+	{
+		BindTextureSlot( 1, 0 );
+		BindTextureSlot( 2, 0 );
+	}
 	BindTextureSlot( 0, 0 );
 	BindVao( 0 );
 	UseProgram( 0 );
@@ -503,8 +553,127 @@ void WaterRenderer::Shutdown()
 	m_visibleFacesLastFrame = -1;
 	m_hasWater = false;
 
+	// Reflection/refraction targets follow the SAME generation rule, keyed off
+	// THEIR OWN generation stamp (may differ from the VBO/program's): forget the
+	// names on a foreign context, delete properly on the live one.
+	bool reflSameContext = ( m_reflGpuGeneration == GpuGeneration() );
+	DestroyReflectTargets( m_reflFbo, m_reflTexSlot, m_refrTexSlot, m_reflDepthSlot, reflSameContext );
+	m_reflW = m_reflH = m_refrW = m_refrH = 0;
+	m_reflFailLogged = false;
+	m_reflectOn = false;
+
 	m_model = NULL;
 	m_built = false;
+}
+
+bool WaterRenderer::EnsureReflectTargets( int mainW, int mainH )
+{
+	if( gRenderAPI.GL_CreateTexture == NULL )
+	{
+		if( !m_reflFailLogged )
+		{
+			m_reflFailLogged = true;
+			CSZ_LogError( "water", "reflection unavailable: GL_CreateTexture is NULL" );
+		}
+		return false;
+	}
+
+	// Reflection FBO is half-res (cheap; the mirrored scene is heavily distorted
+	// by ripples so detail is wasted). Refraction is FULL res because
+	// glCopyTexSubImage2D is a 1:1 pixel copy (no downscale) -- a half-res refr
+	// texture would only capture the screen's bottom-left quarter. Clamp to a
+	// sane floor so a 1px viewport can't make a degenerate FBO.
+	int fullW = ( mainW > 16 ) ? mainW : 16;
+	int fullH = ( mainH > 16 ) ? mainH : 16;
+	int w = fullW / 2; if( w < 16 ) w = 16;	// reflection (half-res)
+	int h = fullH / 2; if( h < 16 ) h = 16;
+
+	bool sameContext = ( m_reflGpuGeneration == GpuGeneration() );
+
+	// Already current: same context AND same sizes -> nothing to do.
+	if( sameContext && m_reflFbo != 0 && m_reflTexSlot != 0 && m_refrTexSlot != 0
+		&& m_reflW == w && m_reflH == h && m_refrW == fullW && m_refrH == fullH )
+		return true;
+
+	// Stale context: forget the old names (never glDelete a foreign context's).
+	if( !sameContext )
+		DestroyReflectTargets( m_reflFbo, m_reflTexSlot, m_refrTexSlot, m_reflDepthSlot, false );
+	else
+		// Same context, different size (viewport change): properly free + rebuild.
+		DestroyReflectTargets( m_reflFbo, m_reflTexSlot, m_refrTexSlot, m_reflDepthSlot, true );
+
+	m_reflGpuGeneration = GpuGeneration();
+	m_reflFailLogged = false;
+
+	// Color targets: plain RGBA8 (NULL buffer), no mips, clamp so the distorted
+	// screen-space sample never wraps. TF_NEAREST off -> linear filtering for a
+	// smooth half-res upsample.
+	const texFlags_t kColorFlags = (texFlags_t)( TF_CLAMP | TF_NOMIPMAP );
+	m_reflTexSlot = gRenderAPI.GL_CreateTexture( "csz_water_refl", w, h, NULL, kColorFlags );
+	m_refrTexSlot = gRenderAPI.GL_CreateTexture( "csz_water_refr", fullW, fullH, NULL, kColorFlags );
+	// Depth attachment for the reflection FBO (we never sample it; TF_NOCOMPARE
+	// keeps it a plain depth texture). Reuses the engine slot idiom so teardown
+	// stays uniform with the color targets.
+	m_reflDepthSlot = gRenderAPI.GL_CreateTexture( "csz_water_refl_depth", w, h, NULL,
+		(texFlags_t)( TF_DEPTHMAP | TF_NOMIPMAP | TF_CLAMP | TF_NOCOMPARE ));
+
+	int reflGl  = TexSlotToGlName( m_reflTexSlot );
+	int depthGl = TexSlotToGlName( m_reflDepthSlot );
+
+	if( m_reflTexSlot == 0 || m_refrTexSlot == 0 || m_reflDepthSlot == 0
+		|| reflGl == 0 || depthGl == 0 )
+	{
+		DestroyReflectTargets( m_reflFbo, m_reflTexSlot, m_refrTexSlot, m_reflDepthSlot, true );
+		m_reflFailLogged = true;
+		CSZ_LogError( "water", "reflection target texture creation failed; analytic-sky fallback" );
+		return false;
+	}
+
+	glGenFramebuffers( 1, &m_reflFbo );
+	BindFbo( m_reflFbo );
+	glFramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, (GLuint)reflGl, 0 );
+	glFramebufferTexture2D( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, (GLuint)depthGl, 0 );
+
+	GLenum status = glCheckFramebufferStatus( GL_FRAMEBUFFER );
+	BindFbo( 0 );
+
+	if( status != GL_FRAMEBUFFER_COMPLETE )
+	{
+		DestroyReflectTargets( m_reflFbo, m_reflTexSlot, m_refrTexSlot, m_reflDepthSlot, true );
+		m_reflFailLogged = true;
+		CSZ_LogError( "water", "reflection FBO incomplete (status 0x%x); analytic-sky fallback",
+			(unsigned int)status );
+		return false;
+	}
+
+	m_reflW = w;
+	m_reflH = h;
+	m_refrW = fullW;
+	m_refrH = fullH;
+	CSZ_LogInfo( "water", "reflect targets ready reflTex=%d refrTex=%d reflRes=(%dx%d) refrRes=(%dx%d)",
+		m_reflTexSlot, m_refrTexSlot, w, h, fullW, fullH );
+	return true;
+}
+
+void WaterRenderer::CopyRefraction( int srcX, int srcY, int srcW, int srcH )
+{
+	if( m_refrTexSlot == 0 || gRenderAPI.GL_CreateTexture == NULL )
+		return;
+
+	// 1:1 copy of the main scene color (world+studio opaque already drawn) into
+	// the (full-res) refraction texture. Bind through the engine wrapper (keeps
+	// the ref-side TMU cache coherent -- raw glActiveTexture desync is
+	// unrecoverable, T2 finding), then CopyTexSubImage from the bound (main)
+	// framebuffer. glCopyTexSubImage2D does NOT downscale, so the texture matches
+	// the viewport pixel-for-pixel and screen UV (gl_FragCoord/u_viewport) aligns.
+	int cw = ( srcW < m_refrW ) ? srcW : m_refrW;
+	int ch = ( srcH < m_refrH ) ? srcH : m_refrH;
+	BindTextureSlot( 0, m_refrTexSlot );
+	glCopyTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, srcX, srcY, cw, ch );
+	// Leave TMU0 unbound so a following CSZ pass never inherits this texture
+	// (DrawWater rebinds slot 0 to the diffuse anyway; LeaveTakeover does the
+	// final engine-side cleanup).
+	BindTextureSlot( 0, 0 );
 }
 
 void WaterRenderer::GetWaterBounds( float center[3], float mins[3], float maxs[3], bool &hasWater ) const

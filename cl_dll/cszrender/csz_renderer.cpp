@@ -354,6 +354,13 @@ void Renderer::OnHudInit()
 	if( m_cvarWater == NULL )
 		m_cvarWater = gEngfuncs.pfnRegisterVariable( "csz_water", "1", FCVAR_CLIENTDLL );
 
+	// csz_water_reflect (default 1): toggles the REAL planar reflection + scene
+	// refraction passes (Source-style render-to-texture). 0 = analytic-sky
+	// fallback (no FBO render, no scene copy) so reflection cost can be A/B'd or
+	// disabled if it tanks FPS. Same FCVAR_CLIENTDLL convention.
+	if( m_cvarWaterReflect == NULL )
+		m_cvarWaterReflect = gEngfuncs.pfnRegisterVariable( "csz_water_reflect", "1", FCVAR_CLIENTDLL );
+
 	// Renderer-side debug camera (capture-rig aim): setpos/setang are
 	// "Unknown command" in this build, so an external cfg drives the view by
 	// setting these cvars. RenderFrame overrides view.origin/angles when
@@ -405,6 +412,97 @@ void Renderer::Shutdown()
 
 	s_worldModel = NULL;
 	CSZ_LogDev( "core", "shutdown" );
+}
+
+bool Renderer::RenderWaterReflection( const ViewSetup &view, const ref_viewpass_t *rvp, float skyPhase )
+{
+	// Water plane = top of the water body (dominant/top plane for multi-height
+	// water; other-Z faces get an approximate mirror -- accepted for v6).
+	float wc[3], wmin[3], wmax[3];
+	bool hasWater = false;
+	g_water.GetWaterBounds( wc, wmin, wmax, hasWater );
+
+	if( !hasWater )
+	{
+		g_water.SetReflection( false, 0.0f );
+		return false;	// no water -> no reflection/refraction (analytic fallback never sampled)
+	}
+
+	const float planeZ = wmax[2];
+
+	int mainW = rvp->viewport[2];
+	int mainH = rvp->viewport[3];
+
+	if( !g_water.EnsureReflectTargets( mainW, mainH ))
+	{
+		g_water.SetReflection( false, planeZ );
+		return false;	// GL failure already logged; analytic fallback
+	}
+
+	// --- mirrored view: reflect the eye about the horizontal water plane ------
+	ViewSetup mirror = view;		// copy fov/zNear/zFar/viewport/ambience/weather
+	mirror.origin[0] = view.origin[0];
+	mirror.origin[1] = view.origin[1];
+	mirror.origin[2] = 2.0f * planeZ - view.origin[2];	// reflect Z about the plane
+	mirror.angles[0] = -view.angles[0];			// invert pitch
+	mirror.angles[1] = view.angles[1];			// yaw unchanged
+	mirror.angles[2] = view.angles[2];			// roll unchanged
+	Mat4ViewQuake( mirror.origin, mirror.angles, mirror.matView );
+	mirror.matProj = view.matProj;				// same projection
+	Mat4Multiply( mirror.matProj, mirror.matView, mirror.matViewProj );
+	FrustumFromMatrix( mirror.matViewProj, false, mirror.frustum );
+	// Reflection-pass viewport is the half-res FBO.
+	mirror.viewport[0] = 0;
+	mirror.viewport[1] = 0;
+	mirror.viewport[2] = g_water.ReflWidth();
+	mirror.viewport[3] = g_water.ReflHeight();
+
+	// Visible set for the mirrored view (the world CPU backface cull and the
+	// frustum cull both key off this view's origin/frustum). Rebuilt for the
+	// MAIN view by the caller afterward so the main pass is unaffected.
+	g_world.BuildVisibleSet( mirror );
+
+	// --- render the mirrored scene into the reflection FBO --------------------
+	BindFbo( g_water.ReflFbo() );
+	glViewport( 0, 0, g_water.ReflWidth(), g_water.ReflHeight() );
+	// Clear to the fog/sky backdrop (matches the main clear intent).
+	const AmbienceParams &amb = view.ambience;
+	if( amb.fogDensity > 0.0f )
+		glClearColor( amb.fogColor[0], amb.fogColor[1], amb.fogColor[2], 1.0f );
+	else
+		glClearColor( 0.05f, 0.05f, 0.08f, 1.0f );
+	glClearDepth( 1.0 );	// CSZ-PORT: GLES3 uses *f variant
+	glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
+
+	// Sky first (depth off; fills the backdrop). No clip plane: the sky VS has no
+	// clip output, so GL_CLIP_DISTANCE0 stays DISABLED while drawing it.
+	g_sky.EnsureBuilt();	// reflection runs before slot 10.5; ensure sky GL is ready
+	g_sky.DrawSky( mirror );
+
+	// Now clip below-water geometry so it cannot leak into the mirror. Plane
+	// points UP (keep z >= planeZ): dot((0,0,1,-planeZ),(x,y,z,1)) = z - planeZ.
+	const float clip[4] = { 0.0f, 0.0f, 1.0f, -planeZ };
+	g_world.SetClipPlane( clip );
+	glEnable( GL_CLIP_DISTANCE0 );
+
+	g_world.DrawOpaque( mirror );
+	g_world.DrawBrushOpaque( mirror, m_frame.brush, m_frame.numBrush );
+	// Studio (player/props) reflection is OPTIONAL for v6; skipped to keep the
+	// reflection cost minimal. NOTE: characters do not appear in the mirror yet.
+
+	glDisable( GL_CLIP_DISTANCE0 );
+	// Restore the no-op clip plane so the main pass is byte-identical even if the
+	// capability gate were ever bypassed (defense in depth).
+	const float clipNoOp[4] = { 0.0f, 0.0f, 0.0f, 1.0e9f };
+	g_world.SetClipPlane( clipNoOp );
+
+	// Restore the MAIN framebuffer + viewport for the normal pass that follows.
+	BindFbo( 0 );
+	glViewport( rvp->viewport[0], rvp->viewport[1], rvp->viewport[2], rvp->viewport[3] );
+
+	g_water.SetReflection( true, planeZ );
+	(void)skyPhase;
+	return true;
 }
 
 int Renderer::RenderFrame( const ref_viewpass_t *rvp )
@@ -583,6 +681,31 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	RenderShadowMaps( view, m_frame.studio, m_frame.numStudio );	// slot 9: shadow maps (before main clear)
 	EndPass( kTmShadow );
 
+	// Slot 9.5: REAL planar reflection (Source-style render-to-texture). Render
+	// the mirrored scene into g_water's reflection FBO BEFORE the main clear, so
+	// the main framebuffer is untouched (the pass restores FBO 0 + viewport). The
+	// refraction copy happens later, right before DrawWater. Gated on csz_water
+	// AND csz_water_reflect; either off -> water uses the analytic-sky fallback.
+	bool reflectArmed = false;
+	bool waterOn = ( m_cvarWater == NULL || m_cvarWater->value != 0.0f );
+	bool reflectCvarOn = ( m_cvarWaterReflect == NULL || m_cvarWaterReflect->value != 0.0f );
+
+	BeginPass( kTmWater );
+	g_water.EnsureBuilt( world );	// build now so GetWaterBounds + targets are ready
+	if( waterOn && reflectCvarOn )
+	{
+		reflectArmed = RenderWaterReflection( view, rvp, ph );
+		// The reflection pass rebuilt the visible set for the MIRROR view; restore
+		// it for the MAIN view so the world/brush opaque passes below are correct.
+		g_world.BuildVisibleSet( view );
+	}
+	else
+	{
+		g_water.SetReflection( false, 0.0f );	// analytic fallback this frame
+	}
+	EndPass( kTmWater );
+	(void)reflectArmed;
+
 	// Slot 10 clear: with fog on, the clear color IS the fog color -- the sky
 	// region is still an M1 gap, and a fog-colored backdrop is the correct
 	// intermediate state until A3 lands the sky pass. Without fog keep the
@@ -622,8 +745,19 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 
 	BeginPass( kTmWater );						// slot 12.5: animated turb/water surface (B1)
 	g_water.EnsureBuilt( world );					// same world model g_world.EnsureBuilt used (~252)
-	if( m_cvarWater == NULL || m_cvarWater->value != 0.0f )		// csz_water 0 = skip custom water (OFF baseline)
+	if( waterOn )							// csz_water 0 = skip custom water (OFF baseline)
+	{
+		// REFRACTION COPY: snapshot the main scene color (world+studio opaque now
+		// in the main framebuffer, FBO 0 bound) into the refraction texture right
+		// before the water draws over it. Only when the real refl/refr path is
+		// armed; the analytic fallback never samples it. Depth-aware edge masking
+		// is NOT done (no scene-depth copy) -> APPROXIMATION: the water edge has no
+		// soft depth fade. NOTE for next agent.
+		if( reflectArmed )
+			g_water.CopyRefraction( rvp->viewport[0], rvp->viewport[1],
+				rvp->viewport[2], rvp->viewport[3] );
 		g_water.DrawWater( view, g_weather.RainIntensity(), ph );
+	}
 	else
 		g_water.MarkNotDrawn();					// OFF baseline: water pass skipped -> draw_batches=0
 	EndPass( kTmWater );

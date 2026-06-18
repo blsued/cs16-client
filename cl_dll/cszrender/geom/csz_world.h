@@ -53,6 +53,10 @@ public:
 	// share the trans domain with sprites, sorted back-to-front internally.
 	void DrawBrushOpaque( const ViewSetup &view, cl_entity_s *const *ents, int count );
 	void DrawBrushTransparent( const ViewSetup &view, cl_entity_s *const *ents, int count );
+	// Set the base-pass reflection clip plane (a,b,c,d) on the world program.
+	// Pass {0,0,0,1e9} to restore the no-op. Only clips when the caller has also
+	// enabled GL_CLIP_DISTANCE0 (reflection pass); harmless otherwise.
+	void SetClipPlane( const float plane[4] );
 	void DrawDepth( const ViewSetup &lightView, const Frustum &lightCull );
 	void DrawLitAdditive( const ViewSetup &view, const SpotLightParams &light );
 	bool IsBuilt() const;

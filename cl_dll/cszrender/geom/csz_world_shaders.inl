@@ -57,6 +57,12 @@ layout(location = 2) in vec2 a_lmuv;
 layout(location = 3) in vec3 a_normal;
 uniform mat4 u_viewProj;
 uniform mat4 u_model;
+// Additive planar-reflection clip plane (a*x+b*y+c*z+d): only takes effect when
+// the renderer enables GL_CLIP_DISTANCE0 (reflection pass). Default no-op
+// (0,0,0,1e9) keeps gl_ClipDistance[0] hugely positive so NOTHING is clipped,
+// AND the capability is disabled on the main pass anyway -> the main world pass
+// is byte-identical regardless of this value.
+uniform vec4 u_clipPlane;
 out vec2 v_uv;
 out vec2 v_lmuv;
 out vec3 v_normal;
@@ -72,8 +78,12 @@ void main()
 	v_normal = a_normal;
 	// World-space fragment position for the weather wet/snow splice (view vector,
 	// fresnel). u_model IS applied here so brush submodels get correct positions.
-	v_worldPos = ( u_model * vec4( a_pos, 1.0 )).xyz;
-	gl_Position = u_viewProj * ( u_model * vec4( a_pos, 1.0 ));
+	vec4 wp = u_model * vec4( a_pos, 1.0 );
+	v_worldPos = wp.xyz;
+	// Clip below-water geometry out of the reflection pass (kept above-water only).
+	// No-op on the main pass (GL_CLIP_DISTANCE0 disabled there).
+	gl_ClipDistance[0] = dot( u_clipPlane, vec4( wp.xyz, 1.0 ) );
+	gl_Position = u_viewProj * wp;
 }
 )GLSL";
 

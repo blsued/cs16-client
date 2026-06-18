@@ -102,6 +102,7 @@ struct WorldState
 	int uCamPos;			// world-space view origin (weather wet fresnel/view vector)
 	int uWetness, uSnowAmount;	// weather surface state (0 => splice is a no-op, safety contract)
 	int uSnowColor;			// pre-cooled snow albedo (linear RGB)
+	int uClipPlane;			// planar-reflection clip plane (no-op unless GL_CLIP_DISTANCE0 enabled)
 	ShaderProgram litProgram;	// additive per-light pass (T6)
 	int litUViewProj, litUAlphaTest;
 	int litULightOrigin, litULightDir, litULightColor;
@@ -782,12 +783,17 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.uWetness = UniformLoc( s_world.program, "u_wetness" );
 	s_world.uSnowAmount = UniformLoc( s_world.program, "u_snowAmount" );
 	s_world.uSnowColor = UniformLoc( s_world.program, "u_snowColor" );
+	s_world.uClipPlane = UniformLoc( s_world.program, "u_clipPlane" );
 
 	UseProgram( s_world.program.program );
 	glUniform1i( UniformLoc( s_world.program, "u_texDiffuse" ), 0 );
 	glUniform1i( UniformLoc( s_world.program, "u_texLightmap" ), 1 );
 	glUniform1f( s_world.uAlphaTest, 0.0f );
 	glUniform1f( s_world.uBrushAlpha, 1.0f );	// opaque/world default; per-entity feed in DrawBrushTransparent
+	// Clip plane defaults to a no-op (huge positive distance for all geometry);
+	// the reflection pass overwrites it and re-enables GL_CLIP_DISTANCE0.
+	const float kClipNoOp[4] = { 0.0f, 0.0f, 0.0f, 1.0e9f };
+	glUniform4fv( s_world.uClipPlane, 1, kClipNoOp );
 
 	Mat4 identity;
 	Mat4Identity( identity );
@@ -865,6 +871,15 @@ void WorldRenderer::BuildVisibleSet( const ViewSetup &view )
 				s_world.visible[local] = 1;
 		}
 	}
+}
+
+void WorldRenderer::SetClipPlane( const float plane[4] )
+{
+	if( !s_world.built || s_world.uClipPlane < 0 )
+		return;
+
+	UseProgram( s_world.program.program );
+	glUniform4fv( s_world.uClipPlane, 1, plane );
 }
 
 void WorldRenderer::DrawOpaque( const ViewSetup &view )
