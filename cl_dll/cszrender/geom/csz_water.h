@@ -45,25 +45,29 @@ namespace csz
 class WaterRenderer
 {
 public:
-	void EnsureBuilt( model_s *world );  // B1: build turb-surface VBO (lazy, keyed on GPU gen)
-	void DrawWater( const ViewSetup &view, float rainIntensity, float skyPhase );  // B1: water pass
-	void Shutdown();                     // destroy GL objects (B1)
+	void EnsureBuilt( model_s *world );  // build turb-surface VBO (lazy, keyed on GPU gen)
+	void DrawWater( const ViewSetup &view, float rainIntensity, float skyPhase );  // water pass
+	void Shutdown();                     // destroy GL objects
 
 private:
-	// One static triangle-fan face per turb surface, drawn from a single VBO.
-	struct WaterFace
+	// One draw batch = all triangle-list vertices that share a single diffuse
+	// texture slot, stored as a CONTIGUOUS run in the VBO. The turb faces are
+	// pre-triangulated (fan -> triangle list) and sorted by texSlot at build
+	// time, so each batch renders as ONE glDrawArrays(GL_TRIANGLES,...). A
+	// typical liquid map has a single water texture -> a single draw call.
+	struct WaterBatch
 	{
-		int firstVert;	// first vertex in the VBO (GL_TRIANGLE_FAN start)
-		int vertCount;	// numedges of the source surface
+		int firstVert;	// first vertex of this batch's run in the VBO
+		int vertCount;	// triangle-list vertex count (multiple of 3)
 		int texSlot;	// engine diffuse texture slot (gl_texturenum)
 	};
 
 	ShaderProgram m_program;	// program.program == 0 until built
 	unsigned int m_vao;		// 0 = none
 	unsigned int m_vbo;		// 0 = none
-	WaterFace *m_faces;		// owned; NULL when no turb surfaces
-	int m_numFaces;
-	int m_numVerts;
+	WaterBatch *m_batches;		// owned; NULL when no turb surfaces
+	int m_numBatches;		// distinct texture slots (== draw calls)
+	int m_numVerts;			// total triangle-list vertices in the VBO
 
 	model_s *m_model;		// map identity (rebuild on change)
 	int m_gpuGeneration;		// GPU generation that owns the GL names

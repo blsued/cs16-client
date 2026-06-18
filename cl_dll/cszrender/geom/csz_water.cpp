@@ -55,8 +55,12 @@ WaterRenderer g_water;	// zero-initialized (static storage duration)
 namespace
 {
 
-// Interleaved vertex: pos(3) + uv(2) + worldNormal(3) = 8 floats / 32-byte stride.
-const int kWaterVertexFloats = 8;
+// Interleaved vertex: pos(3) + uv(2) + worldNormal(3) + faceCenter(2) = 10 floats
+// / 40-byte stride. faceCenter is the source surface's world-XY centroid, baked
+// per-vertex so the rain ring term stays concentric per face after all faces are
+// merged into one batched triangle-list draw (no per-face uniform / no per-face
+// draw call).
+const int kWaterVertexFloats = 10;
 const int kWaterVertexStride = kWaterVertexFloats * (int)sizeof( float );
 
 // surfedges sign selects edge direction; QBSP2 maps widen the edge union to
@@ -96,8 +100,11 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 	m_model = world;
 	m_gpuGeneration = GpuGeneration();
 
-	// First pass: count turb surfaces and their total vertices so the VBO and
-	// face table are each sized once.
+	// First pass: count turb surfaces and their total TRIANGLE-LIST vertices so
+	// the VBO is sized once. Each N-gon fan triangulates into (N-2) triangles =
+	// 3*(N-2) vertices. We pre-triangulate and batch by texture so the whole
+	// water surface renders in one (or a few) glDrawArrays instead of one fan
+	// per face -- de_aztec had 324 turb faces => 324 draw calls => CPU-bound.
 	int totalSurfaces = bsp->numsurfaces;
 	int turbFaces = 0;
 	int totalVerts = 0;
@@ -109,8 +116,14 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 		if(( surf.flags & kSurfDrawTurb ) == 0 )
 			continue;
 
+		if( surf.numedges < 3 )
+			continue;	// degenerate; cannot triangulate
+
+		// Face scratch in the build loop caps at 64 verts; mirror that here so the
+		// VBO is sized to exactly what the build emits.
+		int nE = ( surf.numedges <= 64 ) ? surf.numedges : 64;
 		turbFaces++;
-		totalVerts += surf.numedges;
+		totalVerts += 3 * ( nE - 2 );
 	}
 
 	// Build the program regardless (so DrawWater can early-return cleanly and a
@@ -134,8 +147,8 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 	// No water on this map: empty set, DrawWater early-returns. Still "built".
 	if( turbFaces == 0 )
 	{
-		m_faces = NULL;
-		m_numFaces = 0;
+		m_batches = NULL;
+		m_numBatches = 0;
 		m_numVerts = 0;
 		m_built = true;
 		CSZ_LogDev( "water", "built %s: no turb surfaces", bsp->name );
@@ -143,24 +156,73 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 	}
 
 	float *verts = new( std::nothrow ) float[(size_t)totalVerts * kWaterVertexFloats];
-	m_faces = new( std::nothrow ) WaterFace[turbFaces];
 
-	if( verts == NULL || m_faces == NULL )
+	// Index of every turb surface, sorted by texture slot so faces sharing a
+	// slot land contiguously in the VBO -> one glDrawArrays per distinct slot.
+	int *faceIdx = new( std::nothrow ) int[turbFaces];
+
+	if( verts == NULL || faceIdx == NULL )
 		CSZ_FatalInit( "water", "out of memory building water surface buffers" );
 
-	int vertCursor = 0;
-	int faceCursor = 0;
-
+	// Collect turb surface indices.
+	int collected = 0;
 	for( int g = 0; g < totalSurfaces; g++ )
 	{
 		const EngSurface &surf = bsp->surfaces[g];
-
-		if(( surf.flags & kSurfDrawTurb ) == 0 )
+		if(( surf.flags & kSurfDrawTurb ) == 0 || surf.numedges < 3 )
 			continue;
+		faceIdx[collected++] = g;
+	}
+
+	// Insertion sort by texSlot (turbFaces is small; avoids pulling in <algorithm>
+	// / a comparator, and the build runs once per map).
+	for( int a = 1; a < collected; a++ )
+	{
+		int key = faceIdx[a];
+		const EngTexture *kt = bsp->surfaces[key].texinfo->texture;
+		int kslot = ( kt != NULL ) ? kt->gl_texturenum : 0;
+		int b = a - 1;
+		while( b >= 0 )
+		{
+			const EngTexture *bt = bsp->surfaces[faceIdx[b]].texinfo->texture;
+			int bslot = ( bt != NULL ) ? bt->gl_texturenum : 0;
+			if( bslot <= kslot )
+				break;
+			faceIdx[b + 1] = faceIdx[b];
+			b--;
+		}
+		faceIdx[b + 1] = key;
+	}
+
+	// Worst case every face has a distinct slot, so size the batch table to
+	// turbFaces; m_numBatches records the actual (usually 1) count.
+	m_batches = new( std::nothrow ) WaterBatch[turbFaces];
+	if( m_batches == NULL )
+		CSZ_FatalInit( "water", "out of memory building water surface buffers" );
+
+	int vertCursor = 0;
+	int numBatches = 0;
+	int curSlot = -1;
+
+	for( int s = 0; s < collected; s++ )
+	{
+		const EngSurface &surf = bsp->surfaces[faceIdx[s]];
 
 		const EngTexinfo *ti = surf.texinfo;
 		const EngTexture *tex = ti->texture;
 		const mplane_t *plane = surf.plane;
+		int slot = ( tex != NULL ) ? tex->gl_texturenum : 0;
+
+		// Open a new batch whenever the (sorted) texture slot changes.
+		if( numBatches == 0 || slot != curSlot )
+		{
+			WaterBatch &nb = m_batches[numBatches];
+			nb.firstVert = vertCursor;
+			nb.vertCount = 0;
+			nb.texSlot = slot;
+			numBatches++;
+			curSlot = slot;
+		}
 
 		// Outward world normal: flip when the face is on the plane's back side.
 		bool planeBack = ( surf.flags & kSurfPlaneBack ) != 0;
@@ -168,39 +230,57 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 		float ny = planeBack ? -plane->normal[1] : plane->normal[1];
 		float nz = planeBack ? -plane->normal[2] : plane->normal[2];
 
-		WaterFace &f = m_faces[faceCursor];
-		f.firstVert = vertCursor;
-		f.vertCount = surf.numedges;
-		f.texSlot = ( tex != NULL ) ? tex->gl_texturenum : 0;
+		// First gather the face's polygon vertices (pos + uv), then fan-triangulate
+		// into the VBO. Compute the world-XY centroid for the rain ring center.
+		const int nE = surf.numedges;
+		// Stack scratch for one face. Turb faces are small polygons; cap defensively.
+		float fx[64], fy[64], fz[64], fu[64], fv[64];
+		const int maxE = ( nE <= 64 ) ? nE : 64;
+		float ccx = 0.0f, ccy = 0.0f;
 
-		for( int e = 0; e < surf.numedges; e++ )
+		for( int e = 0; e < maxE; e++ )
 		{
 			int vi = WaterEdgeVertex( bsp, bsp->surfedges[surf.firstedge + e] );
 			const float *pos = bsp->vertexes[vi].position;
-			float *out = &verts[(size_t)( vertCursor + e ) * kWaterVertexFloats];
-
-			out[0] = pos[0];
-			out[1] = pos[1];
-			out[2] = pos[2];
-
+			fx[e] = pos[0];
+			fy[e] = pos[1];
+			fz[e] = pos[2];
 			float su = pos[0] * ti->vecs[0][0] + pos[1] * ti->vecs[0][1] +
 				pos[2] * ti->vecs[0][2] + ti->vecs[0][3];
 			float tv = pos[0] * ti->vecs[1][0] + pos[1] * ti->vecs[1][1] +
 				pos[2] * ti->vecs[1][2] + ti->vecs[1][3];
-
-			out[3] = ( tex != NULL ) ? su / (float)tex->width : 0.0f;
-			out[4] = ( tex != NULL ) ? tv / (float)tex->height : 0.0f;
-
-			out[5] = nx;
-			out[6] = ny;
-			out[7] = nz;
+			fu[e] = ( tex != NULL ) ? su / (float)tex->width : 0.0f;
+			fv[e] = ( tex != NULL ) ? tv / (float)tex->height : 0.0f;
+			ccx += pos[0];
+			ccy += pos[1];
 		}
 
-		vertCursor += surf.numedges;
-		faceCursor++;
+		ccx /= (float)maxE;
+		ccy /= (float)maxE;
+
+		// Fan triangulation: (0, e, e+1) for e in 1..maxE-2 -> triangle list.
+		// Preserves the same winding as the original GL_TRIANGLE_FAN.
+		for( int e = 1; e <= maxE - 2; e++ )
+		{
+			const int idx[3] = { 0, e, e + 1 };
+			for( int k = 0; k < 3; k++ )
+			{
+				int j = idx[k];
+				float *out = &verts[(size_t)vertCursor * kWaterVertexFloats];
+				out[0] = fx[j]; out[1] = fy[j]; out[2] = fz[j];
+				out[3] = fu[j]; out[4] = fv[j];
+				out[5] = nx;    out[6] = ny;    out[7] = nz;
+				out[8] = ccx;   out[9] = ccy;	// per-face ring center (world XY)
+				vertCursor++;
+			}
+		}
+
+		m_batches[numBatches - 1].vertCount += 3 * ( maxE - 2 );
 	}
 
-	m_numFaces = faceCursor;
+	delete[] faceIdx;
+
+	m_numBatches = numBatches;
 	m_numVerts = vertCursor;
 
 	// One-time diagnostic: centroid + AABB of every built turb vertex, so the
@@ -247,18 +327,20 @@ void WaterRenderer::EnsureBuilt( model_s *world )
 	glVertexAttribPointer( 1, 2, GL_FLOAT, GL_FALSE, kWaterVertexStride, (const void *)( 3 * sizeof( float )));
 	glEnableVertexAttribArray( 2 );
 	glVertexAttribPointer( 2, 3, GL_FLOAT, GL_FALSE, kWaterVertexStride, (const void *)( 5 * sizeof( float )));
+	glEnableVertexAttribArray( 3 );
+	glVertexAttribPointer( 3, 2, GL_FLOAT, GL_FALSE, kWaterVertexStride, (const void *)( 8 * sizeof( float )));
 
 	BindVao( 0 );
 	glBindBuffer( GL_ARRAY_BUFFER, 0 );
 	delete[] verts;
 
 	m_built = true;
-	CSZ_LogInfo( "water", "built %s: %d turb surfaces, %d verts", bsp->name, m_numFaces, m_numVerts );
+	CSZ_LogInfo( "water", "built %s: %d turb verts, %d draw batch(es)", bsp->name, m_numVerts, m_numBatches );
 }
 
 void WaterRenderer::DrawWater( const ViewSetup &view, float rainIntensity, float skyPhase )
 {
-	if( !m_built || m_numFaces == 0 || m_program.program == 0 || m_vao == 0 )
+	if( !m_built || m_numBatches == 0 || m_program.program == 0 || m_vao == 0 )
 		return;
 
 	// Water is solid (opaque): depth test + write ON, no blend, cull OFF so a
@@ -285,23 +367,22 @@ void WaterRenderer::DrawWater( const ViewSetup &view, float rainIntensity, float
 	glUniform1f( m_uRain, rainIntensity );
 	glUniform1f( m_uPhase, skyPhase );
 
-	int curTex = -1;
-
-	for( int i = 0; i < m_numFaces; i++ )
+	// One glDrawArrays per distinct texture slot. The whole turb surface was
+	// pre-triangulated and grouped by texture at build time, so a single-texture
+	// liquid map (de_aztec) collapses 324 per-face fan draws into ONE draw call.
+	for( int i = 0; i < m_numBatches; i++ )
 	{
-		const WaterFace &f = m_faces[i];
-
-		if( f.texSlot != curTex )
-		{
-			BindTextureSlot( 0, f.texSlot );
-			curTex = f.texSlot;
-		}
-
-		glDrawArrays( GL_TRIANGLE_FAN, f.firstVert, f.vertCount );
+		const WaterBatch &b = m_batches[i];
+		BindTextureSlot( 0, b.texSlot );
+		glDrawArrays( GL_TRIANGLES, b.firstVert, b.vertCount );
 	}
 
 	// Restore the EnterTakeover baseline for the passes that follow: depth test
-	// + write on, blend none, cull off (it was already off here).
+	// + write on, blend none, cull off (it was already off here). TMU0 was just
+	// bound to a water texture above; LeaveTakeover restores the engine's binding
+	// at end-of-frame, but unbind here too so a CSZ pass that follows in the same
+	// takeover window never inherits a stale water texture on slot 0.
+	BindTextureSlot( 0, 0 );
 	BindVao( 0 );
 	UseProgram( 0 );
 	SetDepthTest( true );
@@ -338,9 +419,9 @@ void WaterRenderer::Shutdown()
 			m_program.program = 0;
 	}
 
-	delete[] m_faces;
-	m_faces = NULL;
-	m_numFaces = 0;
+	delete[] m_batches;
+	m_batches = NULL;
+	m_numBatches = 0;
 	m_numVerts = 0;
 	m_model = NULL;
 	m_built = false;
