@@ -277,6 +277,12 @@ void SyncDemoLight()
 			s_demoLightOn = true;
 			CSZ_LogInfo( "lighting", "spot light slot=%d key=%d origin=(%.0f %.0f %.0f) fov=%.0f radius=%.0f",
 				slot, kTestLightKey, desc.origin[0], desc.origin[1], desc.origin[2], desc.fov, desc.radius );
+			// Debug aid (capture verification): emit the computed world transform
+			// once per (re)sync -- this block runs only on turn-on / after a map
+			// change resets s_demoLightOn, so it never spams per frame.
+			CSZ_LogDev( "testlight", "testlight origin=%.1f %.1f %.1f ang=%.1f %.1f %.1f",
+				desc.origin[0], desc.origin[1], desc.origin[2],
+				desc.angles[0], desc.angles[1], desc.angles[2] );
 		}
 	}
 	else if( !wantOn && s_demoLightOn )

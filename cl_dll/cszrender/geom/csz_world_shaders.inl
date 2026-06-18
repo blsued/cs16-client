@@ -163,12 +163,20 @@ void main()
 	L /= max( d, 1e-4 );
 	float atten = clamp( 1.0 - d / u_lightRadius, 0.0, 1.0 );
 	atten *= atten;
-	float cone = clamp(( dot( -L, u_lightDir ) - u_cosOuter ) / max( u_cosInner - u_cosOuter, 1e-4 ), 0.0, 1.0 );
+	// Cone falloff: smoothstep over the inner..outer band instead of a linear
+	// ramp so the inner plateau eases in (no hard-edged flat bright disk).
+	float cone = smoothstep( u_cosOuter, u_cosInner, dot( -L, u_lightDir ));
 	float ndotl = max( dot( normalize( v_worldNormal ), L ), 0.0 );
 	float shadow = 1.0;
 	if( u_hasShadow != 0 )
 		shadow = textureProj( u_shadowMap, u_matShadow * vec4( v_worldPos, 1.0 ));
-	fragColor = vec4( base.rgb * u_lightColor * ( atten * cone * ndotl * shadow ), 1.0 );
+	// Per-fragment lit term (premultiplied light color may exceed 1). Apply a
+	// per-channel Reinhard soft-cap (lit/(1+lit)) so the bright core never
+	// saturates to flat pure white -- base.rgb texture detail rides through the
+	// curve, and the warm tint of u_lightColor is preserved at the core.
+	vec3 lit = base.rgb * u_lightColor * ( atten * cone * ndotl * shadow );
+	lit = lit / ( 1.0 + lit );
+	fragColor = vec4( lit, 1.0 );
 }
 )GLSL";
 

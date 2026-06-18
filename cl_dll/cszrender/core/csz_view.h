@@ -57,4 +57,5 @@ void BuildSpotLightView( const float origin[3], const float anglesDeg[3],
 const unsigned char *UpdateFatPvs( const float origin[3] );  // gRenderAPI.R_FatPVS(org, 2.0, buf, false, false)
 const unsigned char *CurrentFatPvs();                        // last result or NULL; feeds Mod_GetCurrentVis
 void ResetFatPvs();                                          // map change: never serve a stale cross-map PVS
+void RegisterViewDevCvars();                                 // csz_debugcam (+ pos/ang/dist/side/height): deterministic capture camera
 }

@@ -39,6 +39,7 @@
 #include "core/csz_log.h"
 #include "core/csz_fatal.h"
 #include "core/csz_view.h"
+#include "flashlight/csz_flashlight.h"
 #include "fog/csz_fog.h"
 #include "geom/csz_sky.h"
 #include "geom/csz_sprite.h"
@@ -49,6 +50,7 @@
 #include "lighting/csz_light_pass.h"
 #include "lighting/csz_light_registry.h"
 #include "lighting/csz_shadowmap.h"
+#include "lighting/csz_volumetric.h"
 
 namespace csz
 {
@@ -194,6 +196,9 @@ void Renderer::OnHudInit()
 	RegisterViewmodelDevCvars();	// csz_dev_viewmodel (dev stand-in model)
 	g_fog.RegisterDevCommands();	// csz_devfog/csz_devtint/csz_devmoon (A1; CSZ_DEV_TOOLS only)
 	g_sky.RegisterDevCvars();	// csz_sky_phase (always) + csz_devsun (CSZ_DEV_TOOLS only)
+	g_flashlight.RegisterCvars();	// csz_flashlight (master toggle) + tunables (CSZ_DEV_TOOLS only)
+	g_volumetric.RegisterCvars();	// csz_flashlight_volumetric (+ steps; strength is CSZ_DEV_TOOLS)
+	RegisterViewDevCvars();		// csz_debugcam (+ pos/ang/dist/side/height): deterministic capture camera
 }
 
 void Renderer::OnVidInit()
@@ -293,6 +298,11 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 		}
 	}
 
+	// Re-publish the view-locked player torch (registry key=-3) AFTER the
+	// ambience/sky publish and BEFORE UpdateMatrices, so the spot gets its
+	// view/proj/shadow matrices built the same frame it is placed.
+	g_flashlight.Update( view );
+
 	g_lights.UpdateMatrices();					// slot 7.6: light matrix update
 
 	EnterTakeover();						// slot 8
@@ -341,6 +351,10 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	BeginPass( kTmLights );
 	RunLightPasses( view, m_frame.studio, m_frame.numStudio );	// slot 13: additive light passes
 	EndPass( kTmLights );
+
+	BeginPass( kTmVolume );
+	g_volumetric.Render( view );					// slot 13.5: volumetric light cone (in-scatter shaft)
+	EndPass( kTmVolume );
 
 	BeginPass( kTmTrans );
 	DrawSprites( view, m_frame.sprites, m_frame.numSprites );	// slot 14: sprites (trans domain)
@@ -393,6 +407,7 @@ void Renderer::NewMap()
 	// happens eagerly when GL is ready, else lazily in frame slot 6.
 	ResetFatPvs();
 	g_fog.Reset();		// never carry one map's ambience into the next (A1)
+	g_fog.ApplyDefaultNight();	// rendering-line black-fog default (WS2); server AMBIENCE (A5) overrides
 	g_world.Destroy();
 	s_worldModel = NULL;
 

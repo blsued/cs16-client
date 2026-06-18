@@ -33,9 +33,13 @@
  * exception statement from your version.
  */
 #include "csz_view.h"
-#include "csz_engine.h"		// gRenderAPI.R_FatPVS, ref_viewpass_t
+#include "csz_engine.h"		// gRenderAPI.R_FatPVS, ref_viewpass_t, gEngfuncs
 #include "csz_fatal.h"
+#include "csz_math.h"		// AngleVectors
+#include "../lighting/csz_light_registry.h"	// g_lights, kTestLightKey orbit target
 
+#include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 namespace csz
@@ -53,6 +57,136 @@ const int kFatPvsBufferSize = 16384;
 unsigned char s_fatPvs[kFatPvsBufferSize];
 bool s_fatPvsValid;
 
+// ---------------------------------------------------------------------------
+// csz_debugcam: deterministic capture camera. Overrides the render view at the
+// TOP of BuildViewFromPass (before matrices/frustum/PVS) so PVS + frustum +
+// projection all follow the new camera and world geometry renders around it.
+//   0 = off (engine view)   1 = explicit pos/ang   2 = orbit the testlight
+// ---------------------------------------------------------------------------
+const int kTestLightKey = -2;	// csz_testlight demo spot (orbit target in mode 2)
+
+cvar_t *s_cvarDebugCam;		// csz_debugcam
+cvar_t *s_cvarDebugCamPos;	// csz_debugcam_pos  "x y z"
+cvar_t *s_cvarDebugCamAng;	// csz_debugcam_ang  "pitch yaw roll"
+cvar_t *s_cvarDebugCamDist;	// csz_debugcam_dist (orbit: distance back along beam)
+cvar_t *s_cvarDebugCamSide;	// csz_debugcam_side (orbit: perpendicular offset)
+cvar_t *s_cvarDebugCamHeight;	// csz_debugcam_height (orbit: vertical lift)
+
+// Mode 1: parse the explicit pos/ang cvar strings. Returns false (no override)
+// if either string is empty or malformed -- never overrides on garbage.
+bool DebugCamExplicit( float origin[3], float angles[3] )
+{
+	if( s_cvarDebugCamPos == NULL || s_cvarDebugCamAng == NULL )
+		return false;
+
+	const char *posStr = s_cvarDebugCamPos->string;
+	const char *angStr = s_cvarDebugCamAng->string;
+
+	if( posStr == NULL || posStr[0] == '\0' || angStr == NULL || angStr[0] == '\0' )
+		return false;
+
+	if( sscanf( posStr, "%f %f %f", &origin[0], &origin[1], &origin[2] ) != 3 )
+		return false;
+	if( sscanf( angStr, "%f %f %f", &angles[0], &angles[1], &angles[2] ) != 3 )
+		return false;
+
+	return true;
+}
+
+// Mode 2: frame the csz_testlight cone SIDE-ON. Reads the testlight (key -2)
+// from the registry; falls back to no override if its slot is absent.
+bool DebugCamOrbit( float origin[3], float angles[3] )
+{
+	ActiveLight *target = NULL;
+
+	for( int i = 0; i < LightRegistry::kMaxLights; i++ )
+	{
+		ActiveLight *light = g_lights.Slot( i );
+
+		if( light->used && light->key == kTestLightKey )
+		{
+			target = light;
+			break;
+		}
+	}
+
+	if( target == NULL )
+		return false;	// testlight not present -> leave the engine view alone
+
+	float dist = ( s_cvarDebugCamDist != NULL ) ? s_cvarDebugCamDist->value : 260.0f;
+	float side = ( s_cvarDebugCamSide != NULL ) ? s_cvarDebugCamSide->value : 260.0f;
+	float height = ( s_cvarDebugCamHeight != NULL ) ? s_cvarDebugCamHeight->value : 80.0f;
+
+	const float *L = target->desc.origin;
+
+	float fwd[3], right[3], up[3];
+	AngleVectors( target->desc.angles, fwd, right, up );
+
+	// Horizontal vector perpendicular to the beam direction (project the light
+	// "right" onto the ground plane; fall back to world +X if degenerate).
+	float perp[3] = { right[0], right[1], 0.0f };
+	float plen = sqrtf( perp[0] * perp[0] + perp[1] * perp[1] );
+	if( plen < 1e-3f )
+	{
+		perp[0] = 1.0f; perp[1] = 0.0f; plen = 1.0f;
+	}
+	perp[0] /= plen; perp[1] /= plen;
+
+	// Camera: out to the side, back down the beam axis, lifted up.
+	origin[0] = L[0] + perp[0] * side - fwd[0] * dist;
+	origin[1] = L[1] + perp[1] * side - fwd[1] * dist;
+	origin[2] = L[2] - fwd[2] * dist + height;
+
+	// Look toward a point partway down the beam so the whole shaft is framed.
+	float look[3] = { L[0] + fwd[0] * 200.0f, L[1] + fwd[1] * 200.0f, L[2] + fwd[2] * 200.0f };
+	float dir[3] = { look[0] - origin[0], look[1] - origin[1], look[2] - origin[2] };
+	float dlen = sqrtf( dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2] );
+	if( dlen < 1e-3f )
+		return false;
+	dir[0] /= dlen; dir[1] /= dlen; dir[2] /= dlen;
+
+	float yaw = atan2f( dir[1], dir[0] ) * ( 180.0f / 3.14159265358979323846f );
+	float pitch = -atan2f( dir[2], sqrtf( dir[0] * dir[0] + dir[1] * dir[1] )) * ( 180.0f / 3.14159265358979323846f );
+
+	angles[0] = pitch;	// quake +pitch = downward
+	angles[1] = yaw;
+	angles[2] = 0.0f;
+
+	return true;
+}
+
+// Returns true and fills origin/angles when an override is active and valid.
+bool DebugCamOverride( float origin[3], float angles[3] )
+{
+	if( s_cvarDebugCam == NULL )
+		return false;
+
+	int mode = (int)s_cvarDebugCam->value;
+
+	if( mode == 1 )
+		return DebugCamExplicit( origin, angles );
+	if( mode == 2 )
+		return DebugCamOrbit( origin, angles );
+
+	return false;
+}
+
+}
+
+void RegisterViewDevCvars()
+{
+	if( s_cvarDebugCam == NULL )
+		s_cvarDebugCam = gEngfuncs.pfnRegisterVariable( "csz_debugcam", "0", FCVAR_CLIENTDLL );
+	if( s_cvarDebugCamPos == NULL )
+		s_cvarDebugCamPos = gEngfuncs.pfnRegisterVariable( "csz_debugcam_pos", "", FCVAR_CLIENTDLL );
+	if( s_cvarDebugCamAng == NULL )
+		s_cvarDebugCamAng = gEngfuncs.pfnRegisterVariable( "csz_debugcam_ang", "", FCVAR_CLIENTDLL );
+	if( s_cvarDebugCamDist == NULL )
+		s_cvarDebugCamDist = gEngfuncs.pfnRegisterVariable( "csz_debugcam_dist", "260", FCVAR_CLIENTDLL );
+	if( s_cvarDebugCamSide == NULL )
+		s_cvarDebugCamSide = gEngfuncs.pfnRegisterVariable( "csz_debugcam_side", "260", FCVAR_CLIENTDLL );
+	if( s_cvarDebugCamHeight == NULL )
+		s_cvarDebugCamHeight = gEngfuncs.pfnRegisterVariable( "csz_debugcam_height", "80", FCVAR_CLIENTDLL );
 }
 
 void BuildViewFromPass( const struct ref_viewpass_s *rvp, ViewSetup &out )
@@ -63,6 +197,22 @@ void BuildViewFromPass( const struct ref_viewpass_s *rvp, ViewSetup &out )
 	{
 		out.origin[i] = rvp->vieworigin[i];
 		out.angles[i] = rvp->viewangles[i];
+	}
+
+	// csz_debugcam: deterministic capture override. Replaces origin/angles
+	// BEFORE matrices/frustum are built (and before the caller derives PVS from
+	// out.origin), so PVS + frustum + projection all follow the debug camera.
+	{
+		float dbgOrigin[3], dbgAngles[3];
+
+		if( DebugCamOverride( dbgOrigin, dbgAngles ))
+		{
+			for( int i = 0; i < 3; i++ )
+			{
+				out.origin[i] = dbgOrigin[i];
+				out.angles[i] = dbgAngles[i];
+			}
+		}
 	}
 
 	for( int i = 0; i < 4; i++ )
