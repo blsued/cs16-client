@@ -100,6 +100,12 @@ uniform float u_skyAmbScale;      // L3b sky-ambient cloud dimmer; 1.0 neutral (
 uniform vec3 u_sunDir;            // surface -> dominant body, normalized; base pass only
 uniform vec3 u_sunColor;          // intensity-premultiplied light color; (0,0,0) = off
 uniform float u_brushAlpha;       // per-entity translucency (curstate.renderamt/255); 1.0 = opaque/world
+// fog M1 L4 -- moonlight Tyndall air-glow (forward HG fog in-scatter). All three
+// default to the no-op identity (enable*mask*color all 0 => exactly the pre-L4
+// in-scatter), so at csz_moonshaft 0 the result is byte-for-byte the legacy look.
+uniform vec3  u_moonInScatter;    // L2 moonFogInScatter * intensity (premultiplied, linear); (0,0,0)=off
+uniform float u_shaftMask;        // L3a cloud-gap gating: gap=1, thick cloud=0; 1.0 neutral
+uniform float u_moonShaft;        // csz_moonshaft master toggle: 1=enhanced glow, 0=exact pre-L4
 out vec4 fragColor;
 // Analytic base-fog transmittance (fog M1 spec 4.3): closed-form integral of an
 // exponential-height density d(z)=a*e^(-b*z) along the camera->surface ray, with
@@ -180,8 +186,21 @@ void main()
 	float tLen = length( toFrag );
 	vec3 rd = ( tLen > 1e-4 ) ? toFrag / tLen : vec3( 0.0 );    // guard normalize-of-zero (NaN)
 	float T = cszFogT( v_worldPos, u_camPos, u_fog.w, u_fogParams.x, u_fogParams.z );
-	float glow = pow( max( dot( rd, u_sunDir ), 0.0 ), 8.0 ) * u_fogParams.y;
+	float cosT = max( dot( rd, u_sunDir ), 0.0 );                // toward the moon = +1
+	float glow = pow( cosT, 8.0 ) * u_fogParams.y;               // legacy cheap forward glow (unchanged)
 	vec3 inscatter = u_fog.rgb + u_sunColor * glow;
+	// fog M1 L4 -- OBVIOUS moonlight Tyndall: Henyey-Greenstein forward single
+	// in-scatter (g=0.8) of the DEDICATED moon channel (u_moonInScatter, decoupled
+	// from the surface-coupled u_sunColor so brightening the air never lifts the
+	// ground). Looking toward the moon the fog visibly halos. Gated by the cloud-gap
+	// shaftMask (thick cloud suppresses) and the csz_moonshaft master toggle. Energy
+	// stays bounded: the whole in-scatter is weighted by (1-T), the out-scattered
+	// fraction the base-fog extinction already removed, so sigma_s <= sigma_t holds
+	// and brightness can never run past the fog's own opacity budget.
+	const float CSZ_HG_G = 0.8;
+	float hgDen = 1.0 + CSZ_HG_G * CSZ_HG_G - 2.0 * CSZ_HG_G * cosT;
+	float hg = ( 1.0 - CSZ_HG_G * CSZ_HG_G ) / ( 4.0 * 3.14159265 * pow( max( hgDen, 1e-4 ), 1.5 ) );
+	inscatter += ( u_moonShaft * u_shaftMask * hg ) * u_moonInScatter;
 	col = col * T + inscatter * ( 1.0 - T );
 	fragColor = vec4( col, base.a * u_brushAlpha );
 }

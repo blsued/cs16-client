@@ -101,6 +101,12 @@ uniform vec3 u_ambTint;           // night tint; (1,1,1) neutral
 uniform float u_skyAmbScale;      // L3b sky-ambient cloud dimmer; 1.0 neutral (>=0.6 floor on CPU)
 uniform vec3 u_sunDir;            // surface -> dominant body, normalized; base pass only
 uniform vec3 u_sunColor;          // intensity-premultiplied light color; (0,0,0) = off
+// fog M1 L4 -- moonlight Tyndall air-glow (forward HG fog in-scatter); mirrors the
+// world base pass so both surfaces scatter identically. All three default to the
+// no-op identity so at csz_moonshaft 0 the in-scatter is byte-for-byte pre-L4.
+uniform vec3  u_moonInScatter;    // L2 moonFogInScatter * intensity (premultiplied, linear); (0,0,0)=off
+uniform float u_shaftMask;        // L3a cloud-gap gating: gap=1, thick cloud=0; 1.0 neutral
+uniform float u_moonShaft;        // csz_moonshaft master toggle: 1=enhanced glow, 0=exact pre-L4
 out vec4 fragColor;
 // Analytic base-fog transmittance (fog M1 spec 4.3) -- closed-form exponential
 // height+distance with the |b|<eps and |rd.z|<eps guards; world up axis is Z.
@@ -164,8 +170,17 @@ void main()
 	float tLen = length( toFrag );
 	vec3 rd = ( tLen > 1e-4 ) ? toFrag / tLen : vec3( 0.0 );    // guard normalize-of-zero (NaN)
 	float T = cszFogT( v_worldPos, u_camPos, u_fog.w, u_fogParams.x, u_fogParams.z );
-	float glow = pow( max( dot( rd, u_sunDir ), 0.0 ), 8.0 ) * u_fogParams.y;
+	float cosT = max( dot( rd, u_sunDir ), 0.0 );                // toward the moon = +1
+	float glow = pow( cosT, 8.0 ) * u_fogParams.y;               // legacy cheap forward glow (unchanged)
 	vec3 inscatter = u_fog.rgb + u_sunColor * glow;
+	// fog M1 L4 -- moonlight Tyndall (Henyey-Greenstein g=0.8 forward single
+	// in-scatter of the dedicated u_moonInScatter channel), gated by the cloud-gap
+	// shaftMask and the csz_moonshaft toggle. Weighted by (1-T) so sigma_s<=sigma_t
+	// and the air-glow stays inside the fog's own opacity budget (no runaway).
+	const float CSZ_HG_G = 0.8;
+	float hgDen = 1.0 + CSZ_HG_G * CSZ_HG_G - 2.0 * CSZ_HG_G * cosT;
+	float hg = ( 1.0 - CSZ_HG_G * CSZ_HG_G ) / ( 4.0 * 3.14159265 * pow( max( hgDen, 1e-4 ), 1.5 ) );
+	inscatter += ( u_moonShaft * u_shaftMask * hg ) * u_moonInScatter;
 	col = col * T + inscatter * ( 1.0 - T );
 	fragColor = vec4( col, 1.0 );
 }

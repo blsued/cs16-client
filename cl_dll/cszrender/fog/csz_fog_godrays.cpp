@@ -328,6 +328,14 @@ void FogGodraysRender( const ViewSetup &view )
 	const float sourceIntensity = 1.0f;   // spec §6 default (clamped [0..4]); fixed.
 	float intensity = Clampf( ReadCvar( s_cvarIntensity, 1.0f ), 0.0f, 4.0f );
 	float exposure  = Clampf( 0.30f * intensity, 0.0f, 3.0f );
+	// fog M1 L4: cloud-gap gating of the screen-space radial. The occlusion stage
+	// already sky-masks (geometry/viewmodel/near walls < far depth emit 0 -> no
+	// foreground smeared into fake shafts), so the radial source is sky/moon only.
+	// Here we additionally suppress the shaft under thick cloud (L3a shaftMask:
+	// gap=1, thick=0), consumed NOT recomputed. Gated by csz_moonshaft so at 0 the
+	// gate is exactly 1.0 -> byte-for-byte the pre-L4 Step-4 behaviour (clean A/B).
+	float shaftGate = ( CszMoonShaftEnabled() != 0.0f ) ? Clampf( view.ambience.shaftMask, 0.0f, 1.0f ) : 1.0f;
+	exposure *= shaftGate;
 
 	float aspect = ( viewH > 0 ) ? ( (float)viewW / (float)viewH ) : 1.0f;
 	const float kSkyDepthEps = 0.999999f;

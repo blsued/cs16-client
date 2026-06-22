@@ -59,4 +59,12 @@ float ClientTime();                     // gEngfuncs.GetClientTime()
 // Active round timing: round start=sunset, end=dawn. false when no round is
 // active (idle / between rounds) -> sky falls back to a free-running cycle.
 bool RoundTiming( float &outDuration, float &outRemaining );
+
+// fog M1 L4 moonlight Tyndall air-glow master toggle (cvar csz_moonshaft).
+// Registered once at HUD init (csz_renderer OnHudInit). Returns 1.0 when the
+// enhanced HG forward-scatter glow + cloud-gap gating are on (default), 0.0 for
+// the EXACT pre-L4 behaviour (byte-identical clean A/B). Read live each frame by
+// the surface in-scatter feed (world/studio) and the screen-space god rays.
+float CszMoonShaftEnabled();
+void  CszRegisterMoonShaftCvar();   // registers csz_moonshaft (default "1"); OnHudInit
 }

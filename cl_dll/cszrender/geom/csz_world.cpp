@@ -99,6 +99,7 @@ struct WorldState
 	int uSkyAmbScale;		// L3b sky-ambient cloud dimmer scalar (base pass only); 1.0 neutral
 	int uFogParams, uCamPos;	// analytic base fog (fog M1 Step 2): height b/sunGlow/maxOpacity + ray origin
 	int uSunDir, uSunColor;		// base pass only (sky 档1 directional N.L; lit/depth exempt, pitfall 23)
+	int uMoonInScatter, uShaftMask, uMoonShaft;	// fog M1 L4 moon Tyndall air-glow (base pass only; identity until fed)
 	int uBrushAlpha;		// per-entity translucency for blended brush modes (renderamt); 1.0 = opaque/world
 	ShaderProgram litProgram;	// additive per-light pass (T6)
 	int litUViewProj, litUAlphaTest;
@@ -127,6 +128,23 @@ struct WorldState
 };
 
 WorldState s_world;
+
+// fog M1 L4: feed the moon Tyndall air-glow uniforms to the world base program.
+// One chokepoint shared by all three base-pass feed sites (DrawOpaque /
+// DrawBrushOpaque / DrawBrushTransparent). The dedicated L2 moonFogInScatter
+// channel (decoupled from the surface-coupled moonlightColor) is premultiplied by
+// its intensity here; the cloud-gap shaftMask (L3a single-ownership, consumed not
+// recomputed) and the csz_moonshaft master toggle gate it. csz_moonshaft 0 ->
+// u_moonShaft 0 -> the in-scatter term cancels to byte-identical pre-L4.
+void FeedMoonShaft( const WorldState &w, const AmbienceParams &amb )
+{
+	float moonRGB[3];
+	float intensity = CszMoonInScatter( amb, moonRGB );	// returns scalar; outColor = unit-ish tint
+	float premul[3] = { moonRGB[0] * intensity, moonRGB[1] * intensity, moonRGB[2] * intensity };
+	if( w.uMoonInScatter >= 0 ) glUniform3fv( w.uMoonInScatter, 1, premul );
+	if( w.uShaftMask >= 0 )     glUniform1f( w.uShaftMask, amb.shaftMask );	// L3a gap=1/thick=0 (consume)
+	if( w.uMoonShaft >= 0 )     glUniform1f( w.uMoonShaft, CszMoonShaftEnabled() );	// csz_moonshaft toggle
+}
 
 // Conversion scratch for one lightmap block (engine standard maps: smax/tmax
 // <= 17; clamp guard in csz_lightmap.cpp covers exotic sample sizes).
@@ -778,6 +796,9 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.uSkyAmbScale = UniformLoc( s_world.program, "u_skyAmbScale" );
 	s_world.uSunDir = UniformLoc( s_world.program, "u_sunDir" );
 	s_world.uSunColor = UniformLoc( s_world.program, "u_sunColor" );
+	s_world.uMoonInScatter = UniformLoc( s_world.program, "u_moonInScatter" );	// L4
+	s_world.uShaftMask = UniformLoc( s_world.program, "u_shaftMask" );		// L4
+	s_world.uMoonShaft = UniformLoc( s_world.program, "u_moonShaft" );		// L4
 	s_world.uBrushAlpha = UniformLoc( s_world.program, "u_brushAlpha" );
 
 	UseProgram( s_world.program.program );
@@ -800,6 +821,10 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	glUniform3fv( s_world.uCamPos, 1, kCamPosZero );
 	glUniform3fv( s_world.uAmbTint, 1, kTintNeutral );
 	glUniform1f( s_world.uSkyAmbScale, 1.0f );	// L3b: neutral until fed (no sky-ambient dimming)
+	const float kMoonInScatterZero[3] = { 0.0f, 0.0f, 0.0f };	// L4: no moon in-scatter until fed (no-op)
+	if( s_world.uMoonInScatter >= 0 ) glUniform3fv( s_world.uMoonInScatter, 1, kMoonInScatterZero );
+	if( s_world.uShaftMask >= 0 )     glUniform1f( s_world.uShaftMask, 1.0f );	// L4: gaps-pass identity
+	if( s_world.uMoonShaft >= 0 )     glUniform1f( s_world.uMoonShaft, 0.0f );	// L4: disabled until fed (no-op)
 	UseProgram( 0 );
 
 	// Lit-additive program (T6 spot pass); init-time, so failure is FATAL.
@@ -902,6 +927,7 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 	glUniform1f( s_world.uSkyAmbScale, amb.skyAmbientScale );	// L3b sky-ambient cloud dimmer (1.0 when clouds off; floored >=0.6 in L3a)
 	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
 	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
+	FeedMoonShaft( s_world, amb );	// fog M1 L4 moon Tyndall air-glow (base pass only)
 
 	BindVao( s_world.vao );
 	SetCull( false );	// BSP faces are culled per-face below (plan step 3)
@@ -1094,6 +1120,7 @@ void WorldRenderer::DrawBrushOpaque( const ViewSetup &view, cl_entity_s *const *
 	glUniform1f( s_world.uSkyAmbScale, amb.skyAmbientScale );	// L3b sky-ambient cloud dimmer (1.0 when clouds off; floored >=0.6 in L3a)
 	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
 	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
+	FeedMoonShaft( s_world, amb );	// fog M1 L4 moon Tyndall air-glow (base pass only)
 
 	BindVao( s_world.vao );
 	SetCull( false );		// per-face plane-side cull (model space) below
@@ -1211,6 +1238,7 @@ void WorldRenderer::DrawBrushTransparent( const ViewSetup &view, cl_entity_s *co
 	glUniform3fv( s_world.uCamPos, 1, view.origin );
 	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
 	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
+	FeedMoonShaft( s_world, amb );	// fog M1 L4 moon Tyndall air-glow (base pass only)
 
 	BindVao( s_world.vao );
 	SetCull( false );

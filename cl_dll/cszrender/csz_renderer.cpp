@@ -283,6 +283,7 @@ void Renderer::OnHudInit()
 	PanoramaRegisterCvars();	// MW-rework: csz_pano/pano_intensity/pano_lon_offset (must follow StarsRegisterCvars: fetches the moon-wash cvar pointers it registers)
 	FogVolumeRegisterCvars();	// fog M1 Step 3: csz_fog_quality/steps/halfres/march_intensity/march_g
 	FogGodraysRegisterCvars();	// fog M1 Step 4: csz_fog_godrays/_intensity/_dev (sun/moon god rays)
+	CszRegisterMoonShaftCvar();	// fog M1 L4: csz_moonshaft (default 1 = enhanced moon Tyndall air-glow; 0 = exact pre-L4)
 	gEngfuncs.pfnRegisterVariable( "csz_sky_glcheck", "0", FCVAR_CLIENTDLL );	// A2: per-sky-pass glGetError bisection (dev, default off)
 }
 

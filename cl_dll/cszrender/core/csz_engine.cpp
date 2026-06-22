@@ -66,4 +66,24 @@ bool RoundTiming( float &outDuration, float &outRemaining )
 	return gHUD.m_Timer.GetRoundTiming( ClientTime(), outDuration, outRemaining );
 }
 
+// fog M1 L4 moonlight Tyndall air-glow toggle (csz_moonshaft). Default "1" =
+// enhanced HG forward-scatter glow + cloud-gap gating; "0" = EXACT pre-L4 look
+// (the new in-scatter / god-ray-gating terms all multiply by this -> 0 cancels
+// them to byte-identity). Registered once at HUD init; read live each frame.
+static cvar_t *s_cvarMoonShaft = NULL;
+
+void CszRegisterMoonShaftCvar()
+{
+	if( s_cvarMoonShaft == NULL )
+		s_cvarMoonShaft = gEngfuncs.pfnRegisterVariable( "csz_moonshaft", "1", FCVAR_CLIENTDLL );
+}
+
+float CszMoonShaftEnabled()
+{
+	// Treat any nonzero value as ENABLED (1.0); only an explicit 0 disables.
+	if( s_cvarMoonShaft == NULL || s_cvarMoonShaft->value == 0.0f )
+		return 0.0f;
+	return 1.0f;
+}
+
 }

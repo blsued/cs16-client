@@ -70,6 +70,7 @@ struct PassLocs
 	int uSkyAmbScale;						// L3b sky-ambient cloud dimmer scalar (base program only); 1.0 neutral
 	int uFogParams, uCamPos;					// analytic base fog (fog M1 Step 2): height b/sunGlow/maxOpacity + ray origin
 	int uSunDir, uSunColor;						// base program only (sky 档1 directional N.L; lit/depth exempt, pitfall 23)
+	int uMoonInScatter, uShaftMask, uMoonShaft;			// fog M1 L4 moon Tyndall air-glow (base program only; identity until fed)
 	int uLightOrigin, uLightDir, uLightColor;			// lit program only
 	int uLightRadius, uCosInner, uCosOuter, uMatShadow, uHasShadow;	// lit program only
 };
@@ -113,6 +114,9 @@ void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 	out.uSkyAmbScale = UniformLoc( prog, "u_skyAmbScale" );
 	out.uSunDir = UniformLoc( prog, "u_sunDir" );
 	out.uSunColor = UniformLoc( prog, "u_sunColor" );
+	out.uMoonInScatter = UniformLoc( prog, "u_moonInScatter" );	// L4
+	out.uShaftMask = UniformLoc( prog, "u_shaftMask" );		// L4
+	out.uMoonShaft = UniformLoc( prog, "u_moonShaft" );		// L4
 	out.uLightOrigin = UniformLoc( prog, "u_lightOrigin" );
 	out.uLightDir = UniformLoc( prog, "u_lightDir" );
 	out.uLightColor = UniformLoc( prog, "u_lightColor" );
@@ -160,6 +164,10 @@ void EnsureShader()
 	glUniform3fv( s_studio.baseLocs.uCamPos, 1, kCamPosZero );
 	glUniform3fv( s_studio.baseLocs.uAmbTint, 1, kTintNeutral );
 	glUniform1f( s_studio.baseLocs.uSkyAmbScale, 1.0f );	// L3b: neutral until fed (no sky-ambient dimming)
+	const float kMoonInScatterZero[3] = { 0.0f, 0.0f, 0.0f };	// L4: no moon in-scatter until fed (no-op)
+	if( s_studio.baseLocs.uMoonInScatter >= 0 ) glUniform3fv( s_studio.baseLocs.uMoonInScatter, 1, kMoonInScatterZero );
+	if( s_studio.baseLocs.uShaftMask >= 0 )     glUniform1f( s_studio.baseLocs.uShaftMask, 1.0f );	// gaps-pass identity
+	if( s_studio.baseLocs.uMoonShaft >= 0 )     glUniform1f( s_studio.baseLocs.uMoonShaft, 0.0f );	// disabled until fed
 
 	BuildProgram( "csz_studio_lit", kStudioLitVs, kStudioLitFs, true, s_studio.litProgram );
 	QueryPassLocs( s_studio.litProgram, s_studio.litLocs );
@@ -494,6 +502,16 @@ void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, cons
 	// lit/depth locs are -1 (glUniform* no-op), so those passes stay exempt (pitfall 23).
 	glUniform3fv( locs.uSunDir, 1, amb.moonlightDir );
 	glUniform3fv( locs.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
+	// fog M1 L4 moon Tyndall air-glow: dedicated L2 in-scatter channel (premultiplied),
+	// cloud-gap shaftMask (L3a, consumed), csz_moonshaft toggle (0 -> exact pre-L4).
+	{
+		float moonRGB[3];
+		float intensity = CszMoonInScatter( amb, moonRGB );
+		float premul[3] = { moonRGB[0] * intensity, moonRGB[1] * intensity, moonRGB[2] * intensity };
+		if( locs.uMoonInScatter >= 0 ) glUniform3fv( locs.uMoonInScatter, 1, premul );
+		if( locs.uShaftMask >= 0 )     glUniform1f( locs.uShaftMask, amb.shaftMask );
+		if( locs.uMoonShaft >= 0 )     glUniform1f( locs.uMoonShaft, CszMoonShaftEnabled() );
+	}
 
 	float fwd[3], right[3], up[3];
 
