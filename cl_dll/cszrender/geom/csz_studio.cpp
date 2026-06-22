@@ -67,6 +67,7 @@ struct PassLocs
 	int uViewProj, uBones, uAlphaTest, uChrome, uViewRight, uViewUp;
 	int uAmbient, uShadeColor;					// base program only
 	int uFog, uAmbTint;						// base program only (M2a fog/night; lit/depth fog-free, pitfall 23)
+	int uSkyAmbScale;						// L3b sky-ambient cloud dimmer scalar (base program only); 1.0 neutral
 	int uFogParams, uCamPos;					// analytic base fog (fog M1 Step 2): height b/sunGlow/maxOpacity + ray origin
 	int uSunDir, uSunColor;						// base program only (sky 档1 directional N.L; lit/depth exempt, pitfall 23)
 	int uLightOrigin, uLightDir, uLightColor;			// lit program only
@@ -109,6 +110,7 @@ void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 	out.uFogParams = UniformLoc( prog, "u_fogParams" );
 	out.uCamPos = UniformLoc( prog, "u_camPos" );
 	out.uAmbTint = UniformLoc( prog, "u_ambTint" );
+	out.uSkyAmbScale = UniformLoc( prog, "u_skyAmbScale" );
 	out.uSunDir = UniformLoc( prog, "u_sunDir" );
 	out.uSunColor = UniformLoc( prog, "u_sunColor" );
 	out.uLightOrigin = UniformLoc( prog, "u_lightOrigin" );
@@ -157,6 +159,7 @@ void EnsureShader()
 	glUniform4fv( s_studio.baseLocs.uFogParams, 1, kFogParamsDefault );
 	glUniform3fv( s_studio.baseLocs.uCamPos, 1, kCamPosZero );
 	glUniform3fv( s_studio.baseLocs.uAmbTint, 1, kTintNeutral );
+	glUniform1f( s_studio.baseLocs.uSkyAmbScale, 1.0f );	// L3b: neutral until fed (no sky-ambient dimming)
 
 	BuildProgram( "csz_studio_lit", kStudioLitVs, kStudioLitFs, true, s_studio.litProgram );
 	QueryPassLocs( s_studio.litProgram, s_studio.litLocs );
@@ -486,6 +489,7 @@ void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, cons
 	glUniform4fv( locs.uFogParams, 1, fogParams );
 	glUniform3fv( locs.uCamPos, 1, view.origin );	// ray origin for the height-fog integral
 	glUniform3fv( locs.uAmbTint, 1, amb.tint );
+	glUniform1f( locs.uSkyAmbScale, amb.skyAmbientScale );	// L3b sky-ambient cloud dimmer (1.0 when clouds off; floored >=0.6 in L3a)
 	// Directional N.L (sky 档1): only the base program declares u_sunDir/u_sunColor;
 	// lit/depth locs are -1 (glUniform* no-op), so those passes stay exempt (pitfall 23).
 	glUniform3fv( locs.uSunDir, 1, amb.moonlightDir );

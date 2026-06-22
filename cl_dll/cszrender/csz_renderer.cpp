@@ -356,17 +356,25 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 
 	view.ambience = g_fog.Current();				// slot 7.2: ambience snapshot (A1)
 
-	// Sky overwrites the snapshot with the phase-driven night tint + dominant
-	// celestial light dir/color BEFORE any pass uploads it (A3): the world/
-	// studio base passes consume amb.tint + amb.moonlightDir/Color.
+	// Phase drives both the cloud-state scalars and the published night tint /
+	// celestial light below, all BEFORE any pass uploads the snapshot (A3): the
+	// world/studio base passes consume amb.tint + amb.moonlightDir/Color.
 	float ph = g_sky.ComputePhase();
-	g_sky.PublishLighting( view.ambience, ph );
 
-	// L3a: compute the 3 OWNED cloud-state scalars (directTransmittance /
-	// skyAmbientScale / shaftMask) into the ambience snapshot AFTER PublishLighting.
-	// SINGLE OWNERSHIP -- L3a only WRITES them for L3b/L4; it does NOT apply any
-	// darkening here, so the published moonlight/tint above are untouched.
+	// L3a: compute the OWNED cloud-state scalars (directTransmittance /
+	// skyAmbientScale / shaftMask) AND the L3b moon dimmer (cloudDim) into the
+	// ambience snapshot BEFORE PublishLighting. ORDERING (L3b): PublishLighting
+	// reads amb.cloudDim (csz_sky.cpp: moonLit *= cloudDim), so the writer MUST run
+	// first. UpdateScalars computes purely from cvars+phase and does NOT read any
+	// field PublishLighting writes, so the swap is safe (disjoint read/write sets).
+	// SINGLE OWNERSHIP -- L3a still only WRITES these; clouds off => every scalar is
+	// the neutral 1.0 identity (c=cloudsOn*cover*night=0), so the approved look holds.
 	g_clouds.UpdateScalars( view.ambience, ph );
+
+	// Sky overwrites the snapshot with the phase-driven night tint + dominant
+	// celestial light dir/color. PublishLighting consumes amb.cloudDim (set just
+	// above) to dim the moon-direct term under cloud cover.
+	g_sky.PublishLighting( view.ambience, ph );
 
 	// L0 black-fog decouple seam (CONVENTIONS.md). SINGLE chokepoint: every fog
 	// consumer -- world/studio/sprite analytic-fog uniforms (CszFogUniformVecs),
@@ -504,8 +512,10 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	// L3a: drifting night cloud dome. Drawn AFTER the panorama backdrop + live stars
 	// (so the clouds alpha-over-occlude the Milky Way / stars) and BEFORE the moon
 	// disc (which then renders crisply on top). csz_clouds 0 early-outs (A/B-off =
-	// current sky exactly). EnsureBuilt is lazy inside Contribute.
-	g_clouds.EnsureBuilt();
+	// current sky exactly). Nit 1 (L3b): the unconditional g_clouds.EnsureBuilt()
+	// was removed -- Contribute lazily calls EnsureCreated() AFTER its csz_clouds/
+	// night early-outs, so csz_clouds=0 now does ZERO cloud GL (no program/noise/VAO
+	// build). The sky-dome build (g_sky.EnsureBuilt above) is separate and untouched.
 	g_clouds.Contribute( view );
 	if( glCheck )
 		SkyGlCheck( "night clouds (L3a)" );

@@ -98,6 +98,7 @@ uniform vec4 u_fog;               // rgb = fog color (linear), w = extinction a 
 uniform vec4 u_fogParams;         // x = height falloff b, y = sun glow, z = maxOpacity, w = reserved
 uniform vec3 u_camPos;            // camera world position (ray origin)
 uniform vec3 u_ambTint;           // night tint; (1,1,1) neutral
+uniform float u_skyAmbScale;      // L3b sky-ambient cloud dimmer; 1.0 neutral (>=0.6 floor on CPU)
 uniform vec3 u_sunDir;            // surface -> dominant body, normalized; base pass only
 uniform vec3 u_sunColor;          // intensity-premultiplied light color; (0,0,0) = off
 out vec4 fragColor;
@@ -142,7 +143,11 @@ void main()
 	float csz_sky = smoothstep( CSZ_SKY_LO, CSZ_SKY_HI, csz_lmLum );
 	const float CSZ_INDOOR_AMB = 0.25;                  // night indoor ambient floor (DARK end)
 	float csz_amb = mix( 1.0, mix( CSZ_INDOOR_AMB, 1.0, csz_sky ), csz_night );
-	col *= u_ambTint * csz_amb;
+	// L3b: sky-ambient cloud dimming (mirrors the world base pass for a consistent
+	// darkened look). SEPARATE scalar multiplied AFTER csz_night is derived from the
+	// RAW u_ambTint above -- never folded into u_ambTint (would break day-for-night).
+	// 1.0 = clear sky (identity); CPU floors at 0.6 so enemy models stay readable.
+	col *= u_ambTint * csz_amb * u_skyAmbScale;
 	// Shadowless directional sun/moon (Option A, base pass only, pitfall 23):
 	// add N.L on top of the model's own lambert before the fog mix. v_normal is
 	// bone-transformed to world space (kStudioVs), same space as u_sunDir.

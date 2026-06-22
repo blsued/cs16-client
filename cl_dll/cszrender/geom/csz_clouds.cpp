@@ -412,6 +412,16 @@ void CloudRenderer::UpdateScalars( AmbienceParams &amb, float phase )
 	amb.skyAmbientScale     = skyAmbientScale;
 	amb.shaftMask           = shaftMask;
 
+	// L3b: drive the existing L2 moon-cover hook (csz_sky.cpp PublishLighting:
+	// moonLit *= cloudDim) with the cloud direct-transmittance. This dims the
+	// MOON DIRECTIONAL term ONLY (and the moon-derived channels) under cloud
+	// cover; the warm sun term, day-for-night tint, and indoor occlusion are
+	// untouched (separate/downstream). Clouds off => directTransmittance=1.0 =>
+	// cloudDim=1.0 = IEEE-exact identity (approved look unchanged). Read-after-
+	// write is satisfied: UpdateScalars now runs BEFORE PublishLighting (csz_
+	// renderer.cpp), so this write is visible to the moonLit dimming this frame.
+	amb.cloudDim            = directTransmittance;
+
 	// Throttled scalar dump (csz_clouds_dump != 0) so self-test can confirm sane
 	// values. Once/sec off ClientTime, never per-frame.
 	if( s_cvarDump != NULL && s_cvarDump->value != 0.0f )

@@ -164,7 +164,13 @@ void main()
 	// uniform ambient glow so cloud masses read as dim silver-grey everywhere, not
 	// pure-black star holes. Both gated by the moon's illuminated fraction.
 	float ambient = 0.06;
-	vec3 cloudRadiance = u_moonColor * u_moonLitFrac * ( phase * kGain + ambient ) * starOcclusion;
+	// Nit 2 (L3b): do NOT pre-multiply cloudRadiance by starOcclusion. The cloud
+	// draw uses standard NON-premultiplied alpha (SetBlend kBlendAlpha ->
+	// glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)), so the on-screen source
+	// term is cloudRadiance*visualAlpha. visualAlpha already carries starOcclusion
+	// (below); folding it in here too made thin clouds read as starOcclusion^2 ->
+	// too dark. Occlusion is now carried ONCE (by alpha) -> brighter silver lining.
+	vec3 cloudRadiance = u_moonColor * u_moonLitFrac * ( phase * kGain + ambient );
 
 	// visualAlpha: keep even thick local clouds translucent so the Milky Way stays
 	// mostly visible (USER: <~90% cover). Cap peak alpha < 0.9.

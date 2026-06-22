@@ -96,6 +96,7 @@ struct WorldState
 	int uViewProj, uAlphaTest;
 	int uModel;			// base-pass model->world transform (identity for world; per-entity for brush, E1)
 	int uFog, uAmbTint;		// base pass only (M2a fog/night; lit/depth stay fog-free, pitfall 23)
+	int uSkyAmbScale;		// L3b sky-ambient cloud dimmer scalar (base pass only); 1.0 neutral
 	int uFogParams, uCamPos;	// analytic base fog (fog M1 Step 2): height b/sunGlow/maxOpacity + ray origin
 	int uSunDir, uSunColor;		// base pass only (sky 档1 directional N.L; lit/depth exempt, pitfall 23)
 	int uBrushAlpha;		// per-entity translucency for blended brush modes (renderamt); 1.0 = opaque/world
@@ -774,6 +775,7 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.uFogParams = UniformLoc( s_world.program, "u_fogParams" );
 	s_world.uCamPos = UniformLoc( s_world.program, "u_camPos" );
 	s_world.uAmbTint = UniformLoc( s_world.program, "u_ambTint" );
+	s_world.uSkyAmbScale = UniformLoc( s_world.program, "u_skyAmbScale" );
 	s_world.uSunDir = UniformLoc( s_world.program, "u_sunDir" );
 	s_world.uSunColor = UniformLoc( s_world.program, "u_sunColor" );
 	s_world.uBrushAlpha = UniformLoc( s_world.program, "u_brushAlpha" );
@@ -797,6 +799,7 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	glUniform4fv( s_world.uFogParams, 1, kFogParamsDefault );
 	glUniform3fv( s_world.uCamPos, 1, kCamPosZero );
 	glUniform3fv( s_world.uAmbTint, 1, kTintNeutral );
+	glUniform1f( s_world.uSkyAmbScale, 1.0f );	// L3b: neutral until fed (no sky-ambient dimming)
 	UseProgram( 0 );
 
 	// Lit-additive program (T6 spot pass); init-time, so failure is FATAL.
@@ -896,6 +899,7 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 	glUniform4fv( s_world.uFogParams, 1, fogParams );
 	glUniform3fv( s_world.uCamPos, 1, view.origin );		// ray origin for the height-fog integral
 	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
+	glUniform1f( s_world.uSkyAmbScale, amb.skyAmbientScale );	// L3b sky-ambient cloud dimmer (1.0 when clouds off; floored >=0.6 in L3a)
 	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
 	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
 
@@ -1087,6 +1091,7 @@ void WorldRenderer::DrawBrushOpaque( const ViewSetup &view, cl_entity_s *const *
 	glUniform4fv( s_world.uFogParams, 1, fogParams );
 	glUniform3fv( s_world.uCamPos, 1, view.origin );
 	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
+	glUniform1f( s_world.uSkyAmbScale, amb.skyAmbientScale );	// L3b sky-ambient cloud dimmer (1.0 when clouds off; floored >=0.6 in L3a)
 	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
 	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
 
@@ -1200,6 +1205,7 @@ void WorldRenderer::DrawBrushTransparent( const ViewSetup &view, cl_entity_s *co
 	const float fogOff[4] = { 0.0f, 0.0f, 0.0f, 0.0f };	// additive fades to black, not fog color
 
 	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
+	glUniform1f( s_world.uSkyAmbScale, amb.skyAmbientScale );	// L3b sky-ambient cloud dimmer (1.0 when clouds off; floored >=0.6 in L3a)
 	glUniform4fv( s_world.uFog, 1, fogVec );	// fog on baseline (per-mode toggles off below)
 	glUniform4fv( s_world.uFogParams, 1, fogParams );	// height b / sunGlow / maxOpacity (constant per mode)
 	glUniform3fv( s_world.uCamPos, 1, view.origin );
