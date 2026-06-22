@@ -43,6 +43,7 @@
 #include "fog/csz_fog_volume.h"
 #include "fog/csz_fog_godrays.h"
 #include "geom/csz_sky.h"
+#include "geom/csz_clouds.h"
 #include "geom/csz_sky_compose.h"
 #include "geom/csz_sprite.h"
 #include "geom/csz_studio.h"
@@ -274,6 +275,7 @@ void Renderer::OnHudInit()
 	g_fog.RegisterDevCommands();	// csz_devfog/csz_devtint/csz_devmoon (A1; CSZ_DEV_TOOLS only)
 	CszFogRegisterCvars();		// L0: csz_fog_server_mask (black-fog decouple seam; always, Release-safe)
 	g_sky.RegisterDevCvars();	// csz_sky_phase (always) + csz_devsun (CSZ_DEV_TOOLS only)
+	g_clouds.RegisterCvars();	// L3a: csz_clouds (default 1) + csz_cloud_cover + csz_clouds_dump
 	SkyComposeRegisterCvars();	// csz_hdr/exposure/tonemap/encode/dither/hdr_timing (C1)
 	AtmosRegisterCvars();		// csz_atmos/atmos_exposure/atmos_ms/atmos_timing (C2)
 	SunMoonRegisterCvars();		// csz_moon/sun + gain/size/halo/aureole/debug (C3)
@@ -309,6 +311,7 @@ void Renderer::Shutdown()
 		AtmosShutdown();	// atmosphere LUTs + programs + GPU timer (C2, generation-safe)
 		StarsShutdown();	// star field twinkle VAOs/VBO/programs (C4, generation-safe)
 		PanoramaShutdown();	// MW-rework panorama texture/VAO/program (generation-safe)
+		g_clouds.Shutdown();	// L3a: cloud noise texture/VAO/program (generation-safe)
 		SkyComposeShutdown();	// HDR FBO + resolve program + GPU timer (C1, generation-safe)
 		m_glReady = false;
 	}
@@ -358,6 +361,12 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	// studio base passes consume amb.tint + amb.moonlightDir/Color.
 	float ph = g_sky.ComputePhase();
 	g_sky.PublishLighting( view.ambience, ph );
+
+	// L3a: compute the 3 OWNED cloud-state scalars (directTransmittance /
+	// skyAmbientScale / shaftMask) into the ambience snapshot AFTER PublishLighting.
+	// SINGLE OWNERSHIP -- L3a only WRITES them for L3b/L4; it does NOT apply any
+	// darkening here, so the published moonlight/tint above are untouched.
+	g_clouds.UpdateScalars( view.ambience, ph );
 
 	// L0 black-fog decouple seam (CONVENTIONS.md). SINGLE chokepoint: every fog
 	// consumer -- world/studio/sprite analytic-fog uniforms (CszFogUniformVecs),
@@ -492,6 +501,14 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	StarsContribute( view );
 	if( glCheck )
 		SkyGlCheck( atmos ? "sky background (atmos dome + stars)" : "sky background (legacy fallback)" );
+	// L3a: drifting night cloud dome. Drawn AFTER the panorama backdrop + live stars
+	// (so the clouds alpha-over-occlude the Milky Way / stars) and BEFORE the moon
+	// disc (which then renders crisply on top). csz_clouds 0 early-outs (A/B-off =
+	// current sky exactly). EnsureBuilt is lazy inside Contribute.
+	g_clouds.EnsureBuilt();
+	g_clouds.Contribute( view );
+	if( glCheck )
+		SkyGlCheck( "night clouds (L3a)" );
 	// C3 sun/moon bodies draw additively after EITHER sky background. The legacy
 	// fallback FS retired its own discs (C3 owns the physically-based bodies), so
 	// without this the sun/moon would VANISH whenever the atmosphere path is not

@@ -24,6 +24,7 @@ set(CSZRENDER_SRC
 	geom/csz_sunmoon.cpp
 	geom/csz_stars.cpp
 	geom/csz_panorama.cpp
+	geom/csz_clouds.cpp
 	geom/csz_sprite.cpp
 	geom/csz_studio.cpp
 	geom/csz_studio_bones.cpp

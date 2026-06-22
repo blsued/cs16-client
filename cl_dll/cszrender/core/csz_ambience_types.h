@@ -86,6 +86,18 @@ struct AmbienceParams
 	// publisher applies it to moonLit so surface-direct, the blended directional, and
 	// the exposed channels all dim coherently from one knob. Sun term is untouched.
 	float cloudDim;
+	// --- L3a OWNED cloud-state scalars (sky-base D layer L3a). The cloud dome
+	// (geom/csz_clouds.cpp) computes these coarse GLOBAL average-cloud-state hints
+	// each frame for DOWNSTREAM layers L3b (world/moon darkening) and L4 (light
+	// shafts). SINGLE OWNERSHIP: L3a only WRITES them; it does NOT read them back to
+	// dim anything, so at every default (clouds off / day) they are computed-but-
+	// unconsumed and the approved look is unchanged. Identity = 1.0 (clear sky).
+	//   * directTransmittance = moonlight direct transmission through cloud (1=clear)
+	//   * skyAmbientScale     = sky-ambient multiplier (1=clear; dims gently to ~0.6)
+	//   * shaftMask           = light-shaft gating (cloud-gap=1 / thick cloud=0)
+	float directTransmittance;
+	float skyAmbientScale;
+	float shaftMask;
 	// --- Analytic base fog (fog M1 Step 2, spec 3.6/4.3). Extends the legacy
 	// exp2 fog with exponential height falloff, a directional sun/moon in-scatter
 	// glow, and the server-controlled black-fog reveal floor. ---
@@ -105,6 +117,9 @@ inline AmbienceParams AmbienceNeutral()
 	p.tint[2] = 1.0f;
 	p.maxOpacity = 1.0f;	// no reveal floor by default: fog may fully occlude (env look unchanged)
 	p.cloudDim = 1.0f;	// L2: clear sky = no moonlight dimming (IEEE-exact identity until L3 drives it)
+	p.directTransmittance = 1.0f;	// L3a: clear sky = full moonlight transmission (identity; computed-not-applied)
+	p.skyAmbientScale     = 1.0f;	// L3a: clear sky = no sky-ambient dimming (identity)
+	p.shaftMask           = 1.0f;	// L3a: clear sky = light shafts fully pass (identity)
 	return p;
 }
 // Legacy exp2 fog rendered 2^(-density*d); the analytic base fog renders the
