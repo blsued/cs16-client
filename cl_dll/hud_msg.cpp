@@ -31,6 +31,7 @@
 #include <cstring>
 
 #include "events.h"
+#include "cszrender/csz_render_iface.h" // CSOZ Step6: CszFog channel entry point
 
 #define MAX_CLIENTS 32
 
@@ -178,11 +179,13 @@ int CHud::MsgFunc_Fog( const char *pszName, int iSize, void *pbuf )
 {
 	//int flags;
 
-	// L0 RESERVED HOOK (black-fog decouple seam, CONVENTIONS.md): this gmsgFog
-	// path is where a future server-authoritative black-fog blackout would drive
-	// the cszrender fog visibility, by mapping its intent to
-	// csz::CszFogSetServerMask( mask ). NOT wired this period -- serverFogMask
-	// stays 1.0 (identity) and the cszrender ambience fog is unaffected here.
+	// Legacy environmental fog (gmsgFog): populates g_FogParameters / cl_fog_* for
+	// the back-compat TriAPI path only. It deliberately does NOT write the cszrender
+	// ambience (FogController::Current()), so it can never overwrite an active CszFog
+	// state -- spec 3.9 precedence is enforced structurally (see MsgFunc_CszFog).
+	// OBSOLETE: the L0 "map to csz::CszFogSetServerMask()" reserved hook is SUPERSEDED
+	// by the Step6 CszFog channel (server-authoritative black fog now drives the full
+	// AmbienceParams path via CSZ_OnCszFogMessage, not the density-only serverFogMask).
 
 	memset( &g_FogParameters, 0, sizeof(FogParameters));
 
@@ -217,6 +220,16 @@ int CHud::MsgFunc_Fog( const char *pszName, int iSize, void *pbuf )
 	
 	if( cl_fog_b )
 		gEngfuncs.Cvar_SetValue( cl_fog_b->name, g_FogParameters.color[2] );
-	
+
+	return 1;
+}
+
+// CSOZ Step6: server-authoritative black-fog channel (spec 4.6'). Forwards the
+// raw usermsg bytes to the versioned, length-tolerant decoder, which validates
+// and feeds the existing RawAmbience -> ApplyRaw -> s_current path. Malformed
+// packets are logged + ignored there (prior fog state kept; no null fallback).
+int CHud::MsgFunc_CszFog( const char *pszName, int iSize, void *pbuf )
+{
+	CSZ_OnCszFogMessage( (const unsigned char *)pbuf, iSize );
 	return 1;
 }

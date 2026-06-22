@@ -308,6 +308,7 @@ void CHud :: Init( void )
 	gEngfuncs.pfnHookUserMsg( "Spectator", __MsgFunc_Spectator );
 
 	HOOK_MESSAGE( gHUD, Fog );
+	HOOK_MESSAGE( gHUD, CszFog ); // CSOZ Step6: server-authoritative black-fog channel
 
 	gEngfuncs.pfnHookUserMsg( "Rain", __MsgFunc_Rain );
 	gEngfuncs.pfnHookUserMsg( "Snow", __MsgFunc_Snow );

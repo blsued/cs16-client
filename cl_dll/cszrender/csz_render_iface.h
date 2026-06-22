@@ -51,6 +51,9 @@ void CSZ_HudInit( void );    // from HUD_Init: register cvars/commands; FATAL if
 void CSZ_VidInit( void );    // from HUD_VidInit: invalidate ALL GPU resources (vid_restart safety)
 void CSZ_Shutdown( void );   // from HUD_Shutdown: destroy GL objects and caches
 void CSZ_AddEntity( int type, struct cl_entity_s *ent );  // from HUD_AddEntity (wired in T3)
+// From CHud::MsgFunc_CszFog: raw bytes of a server "CszFog" usermsg (Step 6,
+// spec 4.6'); decoded + applied to the server-authoritative black-fog ambience.
+void CSZ_OnCszFogMessage( const unsigned char *payload, int size );
 // From CHudMOTD::MsgFunc_MOTD: CSOZ ships an empty motd.txt (no join
 // announcement window, M1 defect batch 2 #14); returns nonzero when the
 // assembled MOTD has no printable content so the HUD skips showing it

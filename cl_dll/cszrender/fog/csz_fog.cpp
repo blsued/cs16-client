@@ -35,6 +35,7 @@
 // Dependency rule (plan 2.1 / spec 4.6): fog/ includes core/ ONLY. Ambience
 // flows to geom/lighting through ViewSetup.ambience, never through this file.
 #include "csz_fog.h"
+#include "csz_fog_net.h"			// Step 6 CszFog decoder + dev self-test command
 #include "../core/csz_engine.h"		// gEngfuncs (commands, Cmd_Argv)
 #include "../core/csz_log.h"
 
@@ -117,6 +118,18 @@ RawAmbience NeutralRaw()
 // can therefore never observe a zeroed (tint-black) snapshot.
 RawAmbience s_raw = NeutralRaw();
 AmbienceParams s_current = AmbienceNeutral();
+
+// spec 3.9 precedence latch (fog M1 Step 6): set once an active CszFog is applied,
+// cleared by Reset() (map change / disconnect). Legacy Fog never writes s_current
+// (it only drives g_FogParameters/cl_fog_*, see hud_msg.cpp), so CszFog authority
+// is enforced structurally; this latch makes the invariant explicit and queryable.
+bool s_hasCszState = false;
+
+// ln(2): the analytic base shader's extinction is FogExtinctionFromDensity(density)
+// = density*ln2 (csz_ambience_types.h). CszFog wires the natural extinction a
+// directly (F8), so we store fogDensity = a/ln2 and the existing single chokepoint
+// reproduces exactly a -- the server never deals in legacy exp2 density.
+const float kCszLn2 = 0.6931471805599453f;
 
 int ClampByte( int v )
 {
@@ -343,7 +356,45 @@ void FogController::Reset()
 	// Map change / disconnect: never carry one map's night into the next.
 	s_raw = NeutralRaw();
 	s_current = AmbienceNeutral();
+	s_hasCszState = false;	// drop CszFog authority (spec 3.9 latch cleared)
 	CSZ_LogDev( "fog", "ambience reset to neutral" );
+}
+
+// fog M1 Step 6: apply a decoded server CszFog state. active=false is an explicit
+// "clear black fog" -> neutral + latch dropped. active=true maps the wire fields
+// through the shared ApplyRaw mapping (one chokepoint) and latches CszFog authority
+// so a later legacy Fog cannot downgrade the ambience (spec 3.9). The non-fog
+// ambience (tint/moon) starts from Neutral: CszFog is the authoritative fog source
+// for M1 and there is no other production ambience writer (OnAmbienceEnvelope dead).
+void FogController::ApplyCszFog( const CszFogState &st )
+{
+	if( !st.active )
+	{
+		Reset();	// clears ambience to neutral and drops the latch
+		return;
+	}
+
+	RawAmbience raw = NeutralRaw();
+
+	raw.fogR = st.fogR;
+	raw.fogG = st.fogG;
+	raw.fogB = st.fogB;
+	// Store extinction as legacy exp2 density so the single shader chokepoint
+	// (FogExtinctionFromDensity = density*ln2) reproduces the wired extinction a.
+	raw.fogDensity = st.extinctionA / kCszLn2;
+	raw.heightFalloff = st.heightFalloffB;
+	raw.sunGlow = st.sunGlow;
+	raw.maxOpacity = st.maxOpacity;	// ApplyRaw guards 0 -> 1
+	raw.fogBypassTint = st.blackFog;
+	raw.fogPreset = st.preset;
+
+	ApplyRaw( raw );	// maps into s_current + Info-level decoded-value echo
+	s_hasCszState = true;
+}
+
+bool FogController::HasCszState() const
+{
+	return s_hasCszState;
 }
 
 void FogController::OnAmbienceEnvelope( const unsigned char *payload, int size )
@@ -412,6 +463,7 @@ void FogController::RegisterDevCommands()
 	gEngfuncs.pfnAddCommand( "csz_devfogx", DevFogXCommand );
 	gEngfuncs.pfnAddCommand( "csz_devtint", DevTintCommand );
 	gEngfuncs.pfnAddCommand( "csz_devmoon", DevMoonCommand );
+	CszFogNetRegisterDevCommands();		// csz_devfognet_test (Step 6 protocol self-test)
 	CSZ_LogDev( "fog", "dev ambience commands registered (CSZ_DEV_TOOLS build)" );
 #endif
 }

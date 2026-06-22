@@ -14,6 +14,7 @@ set(CSZRENDER_SRC
 	core/csz_math.cpp
 	core/csz_view.cpp
 	fog/csz_fog.cpp
+	fog/csz_fog_net.cpp
 	fog/csz_fog_volume.cpp
 	fog/csz_fog_godrays.cpp
 	geom/csz_world.cpp

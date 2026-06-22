@@ -34,6 +34,7 @@
  */
 #include "csz_render_iface.h"
 #include "csz_renderer.h"
+#include "fog/csz_fog_net.h"		// Step 6: server CszFog channel decoder
 #include "core/csz_engine.h"
 #include "core/csz_log.h"
 #include "core/csz_fatal.h"
@@ -256,6 +257,14 @@ void CSZ_Shutdown( void )
 void CSZ_AddEntity( int type, struct cl_entity_s *ent )
 {
 	csz::g_renderer.AddEntity( type, ent );
+}
+
+// From CHud::MsgFunc_CszFog: the raw bytes of a server "CszFog" usermsg (Step 6,
+// spec 4.6'). Forwarded to the versioned, length-tolerant decoder; malformed
+// packets are logged + ignored there (prior fog state kept).
+void CSZ_OnCszFogMessage( const unsigned char *payload, int size )
+{
+	csz::CszFogOnMessage( payload, size );
 }
 
 int CSZ_MotdContentIsBlank( const char *text )

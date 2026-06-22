@@ -1124,6 +1124,7 @@ public:
 	CHudMsgFunc(ServerName);
 
 	CHudMsgFunc(Fog);
+	CHudMsgFunc(CszFog); // CSOZ Step6: server-authoritative black-fog channel
 
 	// Screen information
 	SCREENINFO	m_scrinfo;

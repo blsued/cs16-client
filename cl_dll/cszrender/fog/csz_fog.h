@@ -36,6 +36,22 @@
 #include "../core/csz_ambience_types.h"
 namespace csz
 {
+// Decoded + validated server CszFog state (fog M1 Step 6, spec 4.6'). Produced by
+// the versioned wire decoder (fog/csz_fog_net.cpp) and applied by ApplyCszFog.
+// Colors are bytes 0..255 (ApplyRaw divides by 255); extinction/falloff are the
+// natural-exp coefficients in 1/units; maxOpacity/sunGlow are 0..1.
+struct CszFogState
+{
+	bool  active;          // flags bit0; false => clear black fog back to neutral
+	bool  blackFog;        // flags bit1: bypass the sky phase-tint (only on a black preset)
+	int   preset;          // resolved kCszFogPreset* (unknown wire value -> environmental)
+	float maxOpacity;      // reveal floor 0..1 (0 guarded to 1 downstream)
+	int   fogR, fogG, fogB; // base fog color bytes 0..255
+	float extinctionA;     // natural extinction a (1/units); black fog wants LARGE a
+	float heightFalloffB;  // height falloff b (1/units); 0 = uniform density
+	float sunGlow;         // directional in-scatter strength 0..1
+};
+
 // Client-side ambience state. The ONLY production writer is the server "CSZ"
 // envelope (spec 3.2); there is no enable/disable cvar (A-class, spec 4.1).
 // csz_devfog/csz_devtint/csz_devmoon (A1) and csz_devmoonlight (A4) exist
@@ -43,10 +59,18 @@ namespace csz
 class FogController
 {
 public:
-	void Reset();                          // map change / disconnect -> Neutral
+	void Reset();                          // map change / disconnect -> Neutral (clears the CszFog latch)
 	// payload = AMBIENCE cmd body (45 bytes, layout 2.6), cmd/version already
 	// stripped by the dispatcher. Logs decoded values once at Info level.
 	void OnAmbienceEnvelope( const unsigned char *payload, int size );
+	// fog M1 Step 6: apply a decoded server CszFog state into the ambience
+	// snapshot via the shared ApplyRaw mapping, and latch CszFog authority so a
+	// later legacy Fog cannot downgrade it (spec 3.9). active=false clears to
+	// neutral and drops the latch.
+	void ApplyCszFog( const CszFogState &st );
+	// spec 3.9 precedence latch: true once any active CszFog has been received and
+	// not yet Reset(); legacy Fog must not overwrite ambience while this holds.
+	bool HasCszState() const;
 	const AmbienceParams &Current() const;
 	void RegisterDevCommands();            // no-op unless CSZ_DEV_TOOLS
 };
