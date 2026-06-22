@@ -51,6 +51,8 @@ struct LightDesc
 	float fov;          // full cone angle, degrees (spot)
 	float die;          // absolute client time to expire; 0 = persistent
 	bool castShadow;
+	bool isLocal;       // L6b: the local player's own beam -> budget top priority
+	                    // (decoupled flashlight state sets it; default false)
 };
 
 struct ActiveLight
@@ -62,6 +64,8 @@ struct ActiveLight
 	Mat4 matView, matProj, matShadow;
 	Frustum frustum;        // far plane disabled (numPlanes=5, notes-mechanisms e)
 	int shadowTexSlot;      // set by shadow pass each frame; 0 = none
+	int budgetTier;         // L6b: filled per-frame by LightBudgetCompute
+	                        // (csz_light_budget.h LightBudgetTier; 0 = full = pre-L6b default)
 };
 
 class LightRegistry

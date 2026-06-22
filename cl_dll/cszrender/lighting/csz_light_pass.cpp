@@ -33,6 +33,8 @@
  * exception statement from your version.
  */
 #include "csz_light_pass.h"
+#include "csz_light_budget.h"
+#include "csz_flashlight_state.h"
 #include "csz_light_registry.h"
 #include "csz_shadowmap.h"
 #include "../core/csz_engine.h"
@@ -289,37 +291,9 @@ void SyncDemoLight()
 	}
 }
 
-// Conservative world-space bounds of the spot cone: apex + the four corners
-// of the (square) far plane. Used for light-vs-view visibility only.
-void SpotConeBounds( const LightDesc &d, float mins[3], float maxs[3] )
-{
-	float fwd[3], right[3], up[3];
-
-	AngleVectors( d.angles, fwd, right, up );
-
-	float halfTan = tanf( d.fov * 0.5f * kDegToRad );
-
-	for( int j = 0; j < 3; j++ )
-	{
-		mins[j] = d.origin[j];
-		maxs[j] = d.origin[j];
-	}
-
-	for( int sx = -1; sx <= 1; sx += 2 )
-	{
-		for( int sy = -1; sy <= 1; sy += 2 )
-		{
-			for( int j = 0; j < 3; j++ )
-			{
-				float v = d.origin[j] + ( fwd[j] + right[j] * (float)sx * halfTan +
-					up[j] * (float)sy * halfTan ) * d.radius;
-
-				if( v < mins[j] ) mins[j] = v;
-				if( v > maxs[j] ) maxs[j] = v;
-			}
-		}
-	}
-}
+// (L6a SpotConeBounds removed in L6b: the light-vs-view cone-bbox cull now lives
+// once in the budgeter -- csz_light_budget.cpp ConeBounds -- which feeds budgetTier
+// to both the shadow and direct passes here. Same math, single owner.)
 
 void TestSpotCommand()
 {
@@ -421,6 +395,87 @@ void TestBeamCommand()
 	}
 }
 
+// L6b multi-flashlight test fixture. Exercises the DECOUPLED state table
+// (csz_flashlight_state.h -- the server-authoritative seam) AND the hard-cap
+// budgeter end to end: "csz_flashlight_test N" populates N beams (owner #1 is the
+// local player's beam at the eye, isLocal -> always top priority; the rest fan out
+// ahead at staggered ranges so the budgeter has a clear priority order to cap on).
+// The renderer then mirrors the table into g_lights (FlashlightPublishToRegistry)
+// and LightBudgetCompute tiers them. "csz_flashlight_test off" clears the table.
+void FlashlightTestCommand()
+{
+	if( gEngfuncs.Cmd_Argc() >= 2 && strcmp( gEngfuncs.Cmd_Argv( 1 ), "off" ) == 0 )
+	{
+		FlashlightClearAll();
+		CSZ_LogInfo( "flashlight", "test flashlights cleared" );
+		return;
+	}
+
+	if( !s_haveView )
+	{
+		CSZ_LogWarn( "flashlight", "csz_flashlight_test: no taken-over frame yet (enter a map with csz_renderer 1)" );
+		return;
+	}
+
+	int count = ( gEngfuncs.Cmd_Argc() >= 2 ) ? atoi( gEngfuncs.Cmd_Argv( 1 ) ) : 12;
+
+	if( count < 1 )  count = 1;
+	if( count > 24 ) count = 24;	// state table holds 32; cap the fixture below that
+
+	FlashlightClearAll();
+
+	float fwd[3], right[3], up[3];
+
+	AngleVectors( s_viewAngles, fwd, right, up );
+
+	for( int i = 0; i < count; i++ )
+	{
+		FlashlightState st;
+
+		memset( &st, 0, sizeof( st ));
+		st.enabled = true;
+		st.owner = i + 1;
+
+		if( i == 0 )
+		{
+			// The viewer's own beam: at the eye, aimed along the view, isLocal so the
+			// budgeter pins it to the full tier no matter how crowded it gets.
+			st.isLocal = true;
+			for( int j = 0; j < 3; j++ )
+				st.origin[j] = s_viewOrigin[j] + up[j] * 8.0f + fwd[j] * 8.0f;
+			st.angles[0] = s_viewAngles[0];
+			st.angles[1] = s_viewAngles[1];
+			st.angles[2] = 0.0f;
+		}
+		else
+		{
+			// Fan the rest around the view ahead, on a ring, at staggered forward
+			// distances so each has a distinct camera distance -> a deterministic
+			// budget priority order (closest survive full, mid go cheap, far cull).
+			float az = ( (float)i / (float)count ) * 2.0f * 3.14159265f;
+			float fwdDist = 120.0f + (float)( i % 6 ) * 110.0f;	// 120..670
+			float ringR = 140.0f;
+
+			for( int j = 0; j < 3; j++ )
+				st.origin[j] = s_viewOrigin[j] + fwd[j] * fwdDist
+					+ right[j] * cosf( az ) * ringR
+					+ up[j] * ( 50.0f + sinf( az ) * 40.0f );
+
+			st.angles[0] = s_viewAngles[0] + 35.0f;	// pitch down into the floor ahead
+			st.angles[1] = s_viewAngles[1] + cosf( az ) * 25.0f;
+			st.angles[2] = 0.0f;
+		}
+
+		st.range = 0.0f;	// module defaults (warm-white, 700u, 50deg)
+		st.fov = 0.0f;
+
+		FlashlightSet( st );
+	}
+
+	CSZ_LogInfo( "flashlight", "placed %d test flashlights (owner #1 = local, isLocal); state table count=%d",
+		count, FlashlightCount() );
+}
+
 }
 
 void RenderShadowMaps( const ViewSetup &mainView, cl_entity_s *const *studioEnts, int studioCount )
@@ -448,13 +503,11 @@ void RenderShadowMaps( const ViewSetup &mainView, cl_entity_s *const *studioEnts
 		if( light->desc.type != kLightSpot || !light->desc.castShadow )
 			continue;
 
-		// Lights that cannot affect the main view get no depth pass (same
-		// conservative cone-bbox test RunLightPasses uses for drawing).
-		float mins[3], maxs[3];
-
-		SpotConeBounds( light->desc, mins, maxs );
-
-		if( mainView.frustum.CullBox( mins, maxs ))
+		// L6b: only a full-tier beam may claim the single shadow map. The budgeter
+		// already culled off-screen + over-budget lights (kBudgetCull) and demoted
+		// the lower-priority ones to kBudgetCheap (shadowless by contract), so the
+		// map always lands on a top-priority visible beam.
+		if( light->budgetTier != kBudgetFull )
 			continue;
 
 		wanted++;
@@ -515,13 +568,14 @@ void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, 
 		if( light->desc.type != kLightSpot )
 			continue;	// M1 implements spot only (plan 2.2 LightType note)
 
-		// Light-vs-view visibility: cone corner bbox against the main view
-		// frustum (plan section 9 step 2).
-		float mins[3], maxs[3];
-
-		SpotConeBounds( light->desc, mins, maxs );
-
-		if( mainView.frustum.CullBox( mins, maxs ))
+		// L6b hard cap (LightBudgetCompute, run earlier this frame): skip culled
+		// beams -- both off-screen (the budgeter ran the same cone-bbox vs main
+		// frustum test) and the lowest-priority ones beyond the full+cheap cap.
+		// This bounds the per-light world+studio direct add the same way the cone
+		// volume is bounded. Full + cheap both light the holder + struck surfaces;
+		// cheap is shadowless automatically (the shadow pass skipped it, so
+		// shadowTexSlot stays 0 and BuildSpotParams yields a shadowless light).
+		if( light->budgetTier == kBudgetCull )
 			continue;
 
 		SpotLightParams params;
@@ -546,6 +600,9 @@ void RegisterLightingCommands()
 {
 	gEngfuncs.pfnAddCommand( "csz_testspot", TestSpotCommand );
 	gEngfuncs.pfnAddCommand( "csz_testbeam", TestBeamCommand );	// L6a third-person beam fixture
+	gEngfuncs.pfnAddCommand( "csz_flashlight_test", FlashlightTestCommand );	// L6b multi-beam + cap fixture
+
+	LightBudgetRegisterCvars();	// L6b: csz_flashlight_max_full / _max_cheap
 
 	if( s_cvarTestLight == NULL )
 		s_cvarTestLight = gEngfuncs.pfnRegisterVariable( "csz_testlight", "0", FCVAR_CLIENTDLL );

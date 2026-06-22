@@ -52,6 +52,8 @@
 #include "geom/csz_world.h"
 #include "lighting/csz_light_pass.h"
 #include "lighting/csz_light_cone.h"
+#include "lighting/csz_light_budget.h"
+#include "lighting/csz_flashlight_state.h"
 #include "lighting/csz_light_registry.h"
 #include "lighting/csz_shadowmap.h"
 
@@ -429,7 +431,12 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 		}
 	}
 
+	FlashlightPublishToRegistry();					// slot 7.55: L6b -- mirror the decoupled
+									// per-flashlight state table into g_lights
+									// (server-authoritative seam; fed by csz_flashlight_test now)
 	g_lights.UpdateMatrices();					// slot 7.6: light matrix update
+	LightBudgetCompute( view );					// slot 7.65: L6b -- rank visible beams,
+									// assign budgetTier (full/cheap/cull) before any pass reads it
 
 	EnterTakeover();						// slot 8
 

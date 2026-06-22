@@ -39,6 +39,7 @@
 // direct add matches the plan ordering (opaque -> spot direct -> cone additive ->
 // dust L7). Reuses g_lights (the spot registry) + the fog Step-1 depth helpers.
 #include "csz_light_cone.h"
+#include "csz_light_budget.h"
 #include "csz_light_registry.h"
 #include "../core/csz_engine.h"
 #include "../core/csz_glcaps.h"
@@ -193,7 +194,7 @@ void BasisFromAxis( const float d[3], float right[3], float up[3] )
 // Draw ONE spot's beam volume. State (FBO/viewport/blend/depth/program/VAO/depth
 // tex) is set up once by the caller; this only pushes per-spot uniforms + draws.
 void DrawConeForSpot( const ViewSetup &view, const SpotLightParams &spot,
-                      float range, float intensity )
+                      float range, float intensity, int steps )
 {
 	float len = spot.radius;
 	if( range > 0.0f && range < len )
@@ -230,6 +231,8 @@ void DrawConeForSpot( const ViewSetup &view, const SpotLightParams &spot,
 	if( s_gpu.uCosOuter >= 0 )    glUniform1f( s_gpu.uCosOuter, spot.cosOuter );
 	if( s_gpu.uColor >= 0 )       glUniform3fv( s_gpu.uColor, 1, spot.color );
 	if( s_gpu.uIntensity >= 0 )   glUniform1f( s_gpu.uIntensity, intensity );
+	// Per-spot march steps: full tier = kConeSteps, cheap tier = reduced (L6b budget).
+	if( s_gpu.uSteps >= 0 )       glUniform1i( s_gpu.uSteps, steps );
 
 	glDrawArrays( GL_TRIANGLES, 0, 3 * kConeSegments );
 }
@@ -310,16 +313,19 @@ void LightConeRender( const ViewSetup &view )
 	if( s_gpu.uViewSize >= 0 )    glUniform2fv( s_gpu.uViewSize, 1, fViewSize );
 	if( s_gpu.uCamPos >= 0 )      glUniform3fv( s_gpu.uCamPos, 1, view.origin );
 	if( s_gpu.uHgG >= 0 )         glUniform1f( s_gpu.uHgG, kConeHgG );
-	if( s_gpu.uSteps >= 0 )       glUniform1i( s_gpu.uSteps, kConeSteps );
 	if( s_gpu.uInvViewProj >= 0 ) glUniformMatrix4fv( s_gpu.uInvViewProj, 1, GL_FALSE, invViewProj.m );
 	if( s_gpu.uZNear >= 0 )       glUniform1f( s_gpu.uZNear, view.zNear );
 	if( s_gpu.uZFar >= 0 )        glUniform1f( s_gpu.uZFar, view.zFar );
 
-	// One beam per registered spot light (L6a: single test spot in practice; the
-	// multi-light entity interface + hard cap is L6b). No view-cull here -- the GPU
-	// clips off-screen cones cheaply and a flashlight cone is tiny on screen.
+	// One beam per registered spot light. L6b hard cap (LightBudgetCompute, run
+	// earlier this frame): full-tier beams march kConeSteps, cheap-tier beams march
+	// the reduced step count, culled beams (off-screen or over budget) are skipped
+	// entirely -- bounding the expensive volumetric work to maxFull+maxCheap cones
+	// no matter how many players light up. A single beam is always tier full ->
+	// identical to L6a.
 	float now = ClientTime();
-	int drawn = 0;
+	int cheapSteps = LightBudgetCheapSteps();
+	int drawnFull = 0, drawnCheap = 0;
 	for( int i = 0; i < LightRegistry::kMaxLights; i++ )
 	{
 		ActiveLight *light = g_lights.Slot( i );
@@ -327,12 +333,19 @@ void LightConeRender( const ViewSetup &view )
 			continue;
 		if( light->desc.die > 0.0f && light->desc.die < now )
 			continue;
+		if( light->budgetTier == kBudgetCull )
+			continue;	// over budget or off-screen: no air volume
+
+		int steps = ( light->budgetTier == kBudgetCheap ) ? cheapSteps : kConeSteps;
 
 		SpotLightParams spot;
 		g_lights.BuildSpotParams( *light, spot );
-		DrawConeForSpot( view, spot, range, intensity );
-		drawn++;
+		DrawConeForSpot( view, spot, range, intensity, steps );
+
+		if( light->budgetTier == kBudgetCheap ) drawnCheap++;
+		else                                    drawnFull++;
 	}
+	int drawn = drawnFull + drawnCheap;
 
 	BindVao( 0 );
 	UseProgram( 0 );
@@ -347,7 +360,7 @@ void LightConeRender( const ViewSetup &view )
 	if( drawn > 0 && now >= s_nextStats )
 	{
 		s_nextStats = now + 1.0f;
-		CSZ_LogDev( "lightcone", "world beams drawn: %d", drawn );
+		CSZ_LogDev( "lightcone", "world beams drawn: %d (full %d + cheap %d)", drawn, drawnFull, drawnCheap );
 	}
 }
 
