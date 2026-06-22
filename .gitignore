@@ -64,3 +64,9 @@ release/
 *.tasks
 regamebuild/
 .vs/
+# Night-sky bake INPUTS — large, re-downloadable Public Domain (NASA SVS / ESO); not committed.
+# The runtime asset cl_dll/cszrender/geom/bake/out/mw_panorama.bin IS committed (via LFS).
+cl_dll/cszrender/geom/bake/panorama_src/*.exr
+cl_dll/cszrender/geom/bake/panorama_src/*.tif
+cl_dll/cszrender/geom/bake/__pycache__/
+*.bak-pretune

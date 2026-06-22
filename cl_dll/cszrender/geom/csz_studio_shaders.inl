@@ -53,11 +53,13 @@ uniform vec3 u_viewRight;
 uniform vec3 u_viewUp;
 out vec2 v_uv;
 out vec3 v_normal;
+out vec3 v_worldPos;
 void main()
 {
 	int b = a_bone * 3;
 	vec4 p = vec4( a_pos, 1.0 );
 	vec3 worldPos = vec3( dot( u_bones[b], p ), dot( u_bones[b + 1], p ), dot( u_bones[b + 2], p ));
+	v_worldPos = worldPos;	// analytic base fog (fog M1 Step 2): camera->surface ray origin
 	vec3 n = vec3( dot( u_bones[b].xyz, a_normal ),
 	               dot( u_bones[b + 1].xyz, a_normal ),
 	               dot( u_bones[b + 2].xyz, a_normal ));
@@ -86,16 +88,39 @@ void main()
 static const char kStudioFs[] = R"GLSL(#version 330 core
 in vec2 v_uv;
 in vec3 v_normal;
+in vec3 v_worldPos;
 uniform sampler2D u_texDiffuse;   // unit 0
 uniform float u_alphaTest;        // 0 = off, else discard threshold (0.25)
 uniform vec3 u_ambient;
 uniform vec3 u_shadeColor;
 uniform vec3 u_shadeDir;
-uniform vec4 u_fog;               // rgb = fog color (linear), w = density; w<=0 -> off
+uniform vec4 u_fog;               // rgb = fog color (linear), w = extinction a (1/units); w<=0 -> off
+uniform vec4 u_fogParams;         // x = height falloff b, y = sun glow, z = maxOpacity, w = reserved
+uniform vec3 u_camPos;            // camera world position (ray origin)
 uniform vec3 u_ambTint;           // night tint; (1,1,1) neutral
 uniform vec3 u_sunDir;            // surface -> dominant body, normalized; base pass only
 uniform vec3 u_sunColor;          // intensity-premultiplied light color; (0,0,0) = off
 out vec4 fragColor;
+// Analytic base-fog transmittance (fog M1 spec 4.3) -- closed-form exponential
+// height+distance with the |b|<eps and |rd.z|<eps guards; world up axis is Z.
+// (Identical to the world base pass so both surfaces eat fog the same way.)
+float cszFogT( vec3 worldPos, vec3 camPos, float a, float b, float maxOpacity )
+{
+	if( a <= 0.0 )
+		return 1.0;
+	vec3 d = worldPos - camPos;
+	float t = length( d );
+	float rdz = ( t > 1e-4 ) ? d.z / t : 0.0;
+	float F;
+	if( abs( b ) < 1e-4 )
+		F = a * t;                                           // b->0 uniform density (divide-by-b guard)
+	else if( abs( rdz ) < 1e-4 )
+		F = a * exp( -b * camPos.z ) * t;                    // near-horizontal ray (divide-by-rd.z guard)
+	else
+		F = ( a / b ) * exp( -b * camPos.z ) * ( 1.0 - exp( -b * t * rdz )) / rdz;
+	float T = exp( -max( F, 0.0 ));
+	return max( T, 1.0 - maxOpacity );
+}
 void main()
 {
 	vec4 base = texture( u_texDiffuse, v_uv );
@@ -104,15 +129,40 @@ void main()
 	vec3 n = normalize( v_normal );
 	float ndl = max( dot( n, u_shadeDir ), 0.0 );
 	vec3 col = base.rgb * ( u_ambient + u_shadeColor * ndl );
-	col *= u_ambTint;
+	// Indoor sky-occlusion (Chunk C, defect 8): studio meshes have no lightmap,
+	// so use the per-entity baked u_ambient luminance as the DAYTIME sky-access
+	// proxy (the engine samples it from the lightmap at the entity origin: bright
+	// -> outdoor, dim -> indoor). The window is shifted up vs the world pass
+	// because u_ambient carries the overbright factor. csz_night gates so DAYTIME
+	// stays EXACT identity, and everything is multiplicative so it composes with
+	// Chunk A's phase-scaled moonlight (via u_sunColor). DARK / flashlight-required.
+	float csz_night = smoothstep( 0.0, 0.10, u_ambTint.b - u_ambTint.r );
+	float csz_lmLum = dot( u_ambient, vec3( 0.2126, 0.7152, 0.0722 ));
+	const float CSZ_SKY_LO = 0.25, CSZ_SKY_HI = 0.90;   // u_ambient window (overbright): below=indoor, above=outdoor
+	float csz_sky = smoothstep( CSZ_SKY_LO, CSZ_SKY_HI, csz_lmLum );
+	const float CSZ_INDOOR_AMB = 0.25;                  // night indoor ambient floor (DARK end)
+	float csz_amb = mix( 1.0, mix( CSZ_INDOOR_AMB, 1.0, csz_sky ), csz_night );
+	col *= u_ambTint * csz_amb;
 	// Shadowless directional sun/moon (Option A, base pass only, pitfall 23):
 	// add N.L on top of the model's own lambert before the fog mix. v_normal is
 	// bone-transformed to world space (kStudioVs), same space as u_sunDir.
 	// u_sunColor is 0 when the body light is off, so the term vanishes.
-	col += base.rgb * u_sunColor * max( dot( n, u_sunDir ), 0.0 );
-	float fogDepth = gl_FragCoord.z / gl_FragCoord.w;      // cheap view depth (clean-room f)
-	float fogF = ( u_fog.w > 0.0 ) ? clamp( exp2( -u_fog.w * fogDepth ), 0.0, 1.0 ) : 1.0;
-	fragColor = vec4( mix( u_fog.rgb, col, fogF ), 1.0 );
+	// Gated by sky-access (scoped to night via the outer mix): outdoor full,
+	// indoor a faint reflected fraction; dusk/dawn not regressed (csz_night~0).
+	const float CSZ_INDOOR_MOON = 0.08;                 // night indoor directional floor (DARK end)
+	float csz_moon = mix( 1.0, mix( CSZ_INDOOR_MOON, 1.0, csz_sky ), csz_night );
+	col += base.rgb * u_sunColor * max( dot( n, u_sunDir ), 0.0 ) * csz_moon;
+	// Analytic base fog (fog M1 Step 2): single extinction + directional in-scatter
+	// glow, composited in linear HDR (replaces the old exp2 mix). Viewmodel rides
+	// this program: at arm's reach t~0 -> T~1 -> visually fog-free, as before.
+	vec3 toFrag = v_worldPos - u_camPos;
+	float tLen = length( toFrag );
+	vec3 rd = ( tLen > 1e-4 ) ? toFrag / tLen : vec3( 0.0 );    // guard normalize-of-zero (NaN)
+	float T = cszFogT( v_worldPos, u_camPos, u_fog.w, u_fogParams.x, u_fogParams.z );
+	float glow = pow( max( dot( rd, u_sunDir ), 0.0 ), 8.0 ) * u_fogParams.y;
+	vec3 inscatter = u_fog.rgb + u_sunColor * glow;
+	col = col * T + inscatter * ( 1.0 - T );
+	fragColor = vec4( col, 1.0 );
 }
 )GLSL";
 

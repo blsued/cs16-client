@@ -92,16 +92,27 @@ inline void ArcBasis( float H[3], float P[3] )
 	P[0] = cosf( ay ) * cosf( me );  P[1] = sinf( ay ) * cosf( me );  P[2] = sinf( me );
 }
 
-// Sun angle along the circle vs phase, two-segment so the geometry's key looks
-// land on clean phase values:
+// Sun angle along the circle vs phase, now THREE-segment so the round can FREEZE
+// at a warm low GOLDEN-HOUR sun at the end instead of the old blue overhead
+// daylight (USER DECISION 2026-06-18, Option A). The key looks still land on clean
+// phase anchors:
 // theta: 174deg (sunset, just above WEST horizon) -> 270 (nadir/anti-apex =
-// MIDNIGHT, moon at apex/highest) at ph0.5
-//        -> 360 (sunrise, EAST horizon) at ph0.86 -> ~395 (sun up east, daylight) at ph1.
+// MIDNIGHT, moon at apex/highest) at ph0.5 -> 360 (sunrise, EAST horizon) at
+// ph0.86 -> kDaylightThetaDeg (~370 = sun ~5.7deg, GOLDEN HOUR) at ph1. The final
+// segment CAPS the rise so the round-end sun stays low (the atmosphere reddens/
+// warms physically there, Belt-of-Venus); the old curve overshot to ~395deg
+// (~19deg elevation) = a flat blue overhead daylight, past the warm window.
+const float kSunrisePhase     = 0.86f;	// east-horizon crossing (sunrise); a contract anchor (the unit test pins it).
+const float kDaylightThetaDeg = 370.0f;	// round-end "daylight" arc angle: ~5.7deg elevation = warm low golden sun (was 395 = ~19deg blue). Tunable lower (~365 = ~2.9deg) for a warmer/redder held dawn.
+
 inline float SunThetaDeg( float ph )
 {
 	ph = clampf01( ph );
-	if( ph < 0.5f ) return 174.0f + ( 270.0f - 174.0f ) * ( ph / 0.5f );		// sunset -> midnight
-	return 270.0f + ( 395.0f - 270.0f ) * ( ( ph - 0.5f ) / 0.5f );			// midnight -> daylight
+	if( ph < 0.5f )
+		return 174.0f + ( 270.0f - 174.0f ) * ( ph / 0.5f );						// sunset -> midnight
+	if( ph < kSunrisePhase )
+		return 270.0f + ( 360.0f - 270.0f ) * ( ( ph - 0.5f ) / ( kSunrisePhase - 0.5f ) );	// midnight -> sunrise (EAST horizon, elev 0)
+	return 360.0f + ( kDaylightThetaDeg - 360.0f ) * ( ( ph - kSunrisePhase ) / ( 1.0f - kSunrisePhase ) ); // sunrise -> held GOLDEN HOUR (low sun)
 }
 
 inline void SunDir( float ph, float out[3] )
@@ -120,26 +131,40 @@ inline void MoonDir( float ph, float out[3] ){ float sd[3]; SunDir( ph, sd ); ou
 // Sun elevation in degrees (PublishLighting's light gates still use this).
 inline float SunElevDeg( float ph ){ float sd[3]; SunDir( ph, sd ); return asinf( sd[2] ) / kDegToRad; }
 
-// --- Round-driven phase mapping on a CONTINUOUS easing curve (5-min round
-// target): the sky NEVER freezes -- the sun & moon ride the whole round, the
-// moon slowly arcing across the night. A single smooth curve makes the sunset
-// and dawn move fast while the dark NIGHT is the slowest, longest stretch.
-// Phase 0 = sunset at round start, phase 0.5 = midnight at mid-round, phase 1 =
-// full daylight at the round's end. Short rounds use the same curve (the sin
-// term still vanishes at both ends and the slope stays > 0). ---
+// --- Round-driven phase mapping on a CONTINUOUS monotone cubic-Hermite ease
+// (5-min round target): the sky NEVER freezes mid-round -- the sun & moon ride the
+// whole round. Three anchors (tau,phase) = (0,0) sunset, (0.5,0.5) midnight,
+// (1,1) round end, with INDEPENDENT knot slopes: dusk falls FAST, the dark NIGHT
+// is the slowest + longest stretch, and the round DECELERATES into a HELD warm
+// GOLDEN-HOUR dawn (USER DECISION 2026-06-18, Option A: the round freezes at a low
+// warm sun, so the dawn window must DWELL at the end -- the old single-sine curve
+// rushed dawn through in a handful of seconds). Short rounds use the same curve. ---
 inline float RoundPhase( float elapsed, float duration )
 {
 	if( duration <= 1.0f ) return 0.0f;
 	if( elapsed < 0.0f ) elapsed = 0.0f;
 	if( elapsed > duration ) elapsed = duration;
 	float tau = elapsed / duration;                 // 0..1 normalized round time
-	// Continuous ease: phase = tau + (A/2pi) sin(2pi tau).
-	// Slope = 1 + A*cos(2pi tau): HIGH at the ends (sunset/dawn move fast),
-	// LOW (=1-A) at tau=0.5 (the dark night moves slowest and lasts longest).
-	// A in (0,1) keeps slope > 0 everywhere => STRICTLY increasing, never frozen.
-	const float kNightDwell = 0.85f;                // A: night-dwell strength (higher = longer/slower night). tunable.
-	const float kTwoPi = 6.2831853071795864f;
-	float ph = tau + ( kNightDwell / kTwoPi ) * sinf( kTwoPi * tau );
+
+	// Per-anchor phase rate (slope dphase/dtau). All within the Fritsch-Carlson
+	// monotonicity bound (each in [0, 3*secant], secant = 1) => phase is STRICTLY
+	// increasing (never frozen) and stays in [0,1]; Hermite interpolates its knots
+	// exactly, so the (0,0.5,1) anchors land regardless of the slopes.
+	const float kDuskRate  = 1.85f;   // tau=0   : sunset drops fast (matches the old end slope; "dusk fast")
+	const float kNightRate = 0.12f;   // tau=0.5 : deep night, slowest + longest
+	const float kDawnRate  = 0.40f;   // tau=1   : golden-hour dawn DWELLS at round end (slow hold). tunable.
+
+	float p0, m0, m1, t;
+	if( tau < 0.5f ) { p0 = 0.0f; m0 = kDuskRate;  m1 = kNightRate; t = tau * 2.0f; }
+	else             { p0 = 0.5f; m0 = kNightRate; m1 = kDawnRate;  t = ( tau - 0.5f ) * 2.0f; }
+
+	float t2 = t * t, t3 = t2 * t;
+	float h00 = 2.0f * t3 - 3.0f * t2 + 1.0f;       // Hermite basis functions
+	float h10 = t3 - 2.0f * t2 + t;
+	float h01 = -2.0f * t3 + 3.0f * t2;
+	float h11 = t3 - t2;
+	// phase span per segment = 0.5; tangents scaled by the segment width (0.5).
+	float ph = h00 * p0 + h01 * ( p0 + 0.5f ) + ( h10 * m0 + h11 * m1 ) * 0.5f;
 	return clampf01( ph );
 }
 

@@ -1,0 +1,37 @@
+{
+  "real_count": 9096,
+  "total": 9096,
+  "skipped_lines": 14,
+  "floats_per_star": 5,
+  "layout": "dirX,dirY,dirZ,bv,vmag",
+  "vmag_min": -1.46,
+  "vmag_max": 7.96,
+  "vmag_p50": 5.91,
+  "vmag_p99": 6.82,
+  "bv_min": -0.28,
+  "bv_max": 5.74,
+  "bv_p50": 0.48,
+  "bv_p05": -0.14,
+  "bv_p95": 1.59,
+  "teff_min": 3169.3537274355795,
+  "teff_max": 15882.285961954509,
+  "live_twinkle_count_vmag_le_3p8": 409,
+  "live_twinkle_count_vmag_le_4p5": 904,
+  "gal_pole_world": [
+    0.40000240002160026,
+    -0.7080042480382325,
+    0.5820034920314283
+  ],
+  "gal_center_world": [
+    0.021976149567329403,
+    0.6422452281045322,
+    0.7661841265826067
+  ],
+  "gal_y_world": [
+    -0.9162505818973073,
+    -0.2936852937019056,
+    0.2724588398934258
+  ],
+  "out_inl": "D:\\csoz\\src\\cs16-client\\cl_dll\\cszrender\\geom\\csz_stars_catalog.inl",
+  "out_inl_bytes": 431623
+}

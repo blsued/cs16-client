@@ -35,6 +35,11 @@
 #include "csz_glstate.h"
 #include "csz_engine.h"		// gRenderAPI (GL_Bind / GL_CleanUpTextureUnits), ref_viewpass_t
 #include "csz_glfuncs.h"
+#include "csz_glcaps.h"		// Caps().profileMask (core-vs-compat GL_ALPHA_TEST guard)
+
+#ifndef GL_ALPHA_TEST
+#define GL_ALPHA_TEST 0x0BC0
+#endif
 
 namespace csz
 {
@@ -68,6 +73,7 @@ struct GlShadowState
 };
 
 GlShadowState s_state;
+int s_savedAlphaTest = -1;
 
 void InvalidateShadowState()
 {
@@ -93,6 +99,16 @@ void EnterTakeover()
 	// Raw GL on purpose: the engine may have left anything behind, so the
 	// cache must not short-circuit these.
 	glDisable( GL_SCISSOR_TEST );
+	// GL_ALPHA_TEST (0x0BC0) is a compatibility-profile-only enum. On this GL
+	// 3.3 *core* context the glIsEnabled/glDisable/glEnable calls raise
+	// GL_INVALID_ENUM (0x500) every frame and pollute the csz_sky_glcheck
+	// bisection. Alpha test is already off during CSZ passes, so on core this
+	// is a clean no-op; only touch it on a compat context.
+	if( !( Caps().profileMask & GL_CONTEXT_CORE_PROFILE_BIT ) )
+	{
+		s_savedAlphaTest = glIsEnabled( GL_ALPHA_TEST ) ? 1 : 0;
+		glDisable( GL_ALPHA_TEST );
+	}
 	glEnable( GL_DEPTH_TEST );
 	glDepthFunc( GL_LEQUAL );
 	glDepthMask( GL_TRUE );
@@ -150,6 +166,16 @@ void LeaveTakeover()
 	glDisable( GL_CULL_FACE );
 	glDisable( GL_POLYGON_OFFSET_FILL );
 	glDisable( GL_SCISSOR_TEST );
+	// Mirror the EnterTakeover guard: only restore GL_ALPHA_TEST on a compat
+	// context (on core it was never touched and the enum is invalid).
+	if( !( Caps().profileMask & GL_CONTEXT_CORE_PROFILE_BIT ) )
+	{
+		if( s_savedAlphaTest == 1 )
+			glEnable( GL_ALPHA_TEST );
+		else
+			glDisable( GL_ALPHA_TEST );
+	}
+	s_savedAlphaTest = -1;
 	// TMU hygiene STRICTLY via engine wrappers (calibration showed raw
 	// glActiveTexture desync against ref glState is unrecoverable).
 	// CRITICAL (T2 finding): the engine's CleanUpTextureUnits loop walks
@@ -183,6 +209,17 @@ void SetBlend( BlendMode mode )
 	case kBlendAdditive:
 		glEnable( GL_BLEND );
 		glBlendFunc( GL_SRC_ALPHA, GL_ONE );
+		break;
+	case kBlendAddPremul:
+		// Premultiplied additive. The source RGB is already premultiplied by its
+		// PSF coverage and the source ALPHA is 0, so glBlendFunc(GL_ONE,GL_ONE)
+		// deposits exactly srcRGB and leaves the target alpha untouched
+		// (dstA = 0*1 + dstA*1) -- identical to a separate (ONE,ONE,ZERO,ONE) here
+		// without needing glBlendFuncSeparate (not in the GL loader table). The
+		// blend equation stays at the GL default GL_FUNC_ADD (never changed
+		// elsewhere), so no glBlendEquation call is required.
+		glEnable( GL_BLEND );
+		glBlendFunc( GL_ONE, GL_ONE );
 		break;
 	}
 

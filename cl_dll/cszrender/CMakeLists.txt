@@ -14,9 +14,16 @@ set(CSZRENDER_SRC
 	core/csz_math.cpp
 	core/csz_view.cpp
 	fog/csz_fog.cpp
+	fog/csz_fog_volume.cpp
+	fog/csz_fog_godrays.cpp
 	geom/csz_world.cpp
 	geom/csz_lightmap.cpp
 	geom/csz_sky.cpp
+	geom/csz_sky_compose.cpp
+	geom/csz_atmos.cpp
+	geom/csz_sunmoon.cpp
+	geom/csz_stars.cpp
+	geom/csz_panorama.cpp
 	geom/csz_sprite.cpp
 	geom/csz_studio.cpp
 	geom/csz_studio_bones.cpp

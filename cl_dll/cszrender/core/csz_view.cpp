@@ -53,6 +53,31 @@ const int kFatPvsBufferSize = 16384;
 unsigned char s_fatPvs[kFatPvsBufferSize];
 bool s_fatPvsValid;
 
+// --- dev-only sky-aim camera override (csz_devcam) ----------------------------
+// Default OFF. When csz_devcam == 0 the override is a no-op and BuildViewFromPass
+// leaves out.angles exactly as the engine produced them (byte-identical to prior
+// behavior). When enabled it rewrites the sky-render PITCH/YAW *after* the engine
+// pitch clamp, so a headless screenshot can aim the sky passes at any angle (e.g.
+// zenith) to frame the Milky Way band. Lazy-registered once on first use, modeled
+// on EnsureCvars() in geom/csz_sunmoon.cpp. Adds ZERO GL calls (pure CPU angle
+// assignment before the existing matrix math).
+cvar_t *s_cvDevcam;       // csz_devcam        master enable gate (0 = inactive)
+cvar_t *s_cvDevcamPitch;  // csz_devcam_pitch  override pitch deg (Quake: negative = up)
+cvar_t *s_cvDevcamYaw;    // csz_devcam_yaw    override yaw deg
+bool    s_devcamCvarsReady;
+
+float ReadCvar( cvar_t *cv, float fallback ) { return ( cv != NULL ) ? cv->value : fallback; }
+
+void EnsureDevcamCvars()
+{
+	if( s_devcamCvarsReady )
+		return;
+	s_devcamCvarsReady = true;
+	s_cvDevcam      = gEngfuncs.pfnRegisterVariable( "csz_devcam", "0", FCVAR_CLIENTDLL );
+	s_cvDevcamPitch = gEngfuncs.pfnRegisterVariable( "csz_devcam_pitch", "0", FCVAR_CLIENTDLL );
+	s_cvDevcamYaw   = gEngfuncs.pfnRegisterVariable( "csz_devcam_yaw", "0", FCVAR_CLIENTDLL );
+}
+
 }
 
 void BuildViewFromPass( const struct ref_viewpass_s *rvp, ViewSetup &out )
@@ -72,6 +97,20 @@ void BuildViewFromPass( const struct ref_viewpass_s *rvp, ViewSetup &out )
 	out.fovY = rvp->fov_y;
 	out.zNear = 4.0f;
 	out.zFar = 16384.0f;
+
+	// Dev-only sky-aim override (default OFF). This ViewSetup is the SINGLE source
+	// all sky passes read (AtmosDrawSky, StarsContribute incl. Milky Way,
+	// SunMoonContribute, legacy g_sky.DrawSky); each calls AngleVectors(out.angles,..)
+	// independently, so rewriting the angles here -- AFTER the engine pitch clamp and
+	// BEFORE the matrices are built below -- aims every sky pass at the chosen angle.
+	// csz_devcam == 0 (default) leaves out.angles untouched: byte-identical behavior.
+	// Roll (out.angles[2]) is never touched. Null cvar pointer is treated as "off".
+	EnsureDevcamCvars();
+	if( ReadCvar( s_cvDevcam, 0.0f ) != 0.0f )
+	{
+		out.angles[0] = ReadCvar( s_cvDevcamPitch, 0.0f );	// PITCH (negative = look up)
+		out.angles[1] = ReadCvar( s_cvDevcamYaw, 0.0f );	// YAW
+	}
 
 	Mat4Perspective( out.fovX, out.fovY, out.zNear, out.zFar, out.matProj );
 	Mat4ViewQuake( out.origin, out.angles, out.matView );

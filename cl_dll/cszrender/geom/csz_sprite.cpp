@@ -41,6 +41,9 @@
 #include "../core/csz_shader.h"
 #include "../core/csz_view.h"
 
+#include "pm_defs.h"	// PM_WORLD_ONLY, pmtrace_t -- for kRenderGlow occlusion gate
+#include "event_api.h"	// gEngfuncs.pEventAPI->EV_SetTraceHull / EV_PlayerTrace
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -141,6 +144,7 @@ struct SpriteState
 	ShaderProgram program;
 	int uViewProj;
 	int uFog, uFogAdditive;		// M2a fog (no tint: sprites are emitters, plan 2.6)
+	int uFogParams, uCamPos;	// analytic base fog (fog M1 Step 2): height b/maxOpacity + ray origin
 	unsigned int vao, vbo, ibo;
 };
 
@@ -293,13 +297,19 @@ void EnsureGpuObjects()
 	s_sprite.uViewProj = UniformLoc( s_sprite.program, "u_viewProj" );
 	s_sprite.uFog = UniformLoc( s_sprite.program, "u_fog" );
 	s_sprite.uFogAdditive = UniformLoc( s_sprite.program, "u_fogAdditive" );
+	s_sprite.uFogParams = UniformLoc( s_sprite.program, "u_fogParams" );
+	s_sprite.uCamPos = UniformLoc( s_sprite.program, "u_camPos" );
 
 	UseProgram( s_sprite.program.program );
 	glUniform1i( UniformLoc( s_sprite.program, "u_texDiffuse" ), 0 );
 
 	const float kFogOff[4] = { 0.0f, 0.0f, 0.0f, 0.0f };	// fog off until fed (DrawSprites)
+	const float kFogParamsDefault[4] = { 0.0f, 0.0f, 1.0f, 0.0f };	// b=0, glow=0, maxOpacity=1 (no floor)
+	const float kCamPosZero[3] = { 0.0f, 0.0f, 0.0f };
 
 	glUniform4fv( s_sprite.uFog, 1, kFogOff );
+	glUniform4fv( s_sprite.uFogParams, 1, kFogParamsDefault );
+	glUniform3fv( s_sprite.uCamPos, 1, kCamPosZero );
 	glUniform1i( s_sprite.uFogAdditive, 0 );
 	UseProgram( 0 );
 
@@ -411,6 +421,53 @@ bool BuildItem( const ViewSetup &view, cl_entity_s *ent, SpriteItem &out )
 
 	if( view.frustum.CullBox( mins, maxs ))
 		return false;
+
+	// kRenderGlow world-visibility gate: depth test is off for glow (engine
+	// parity, const.h "No Z buffer checks"), so we compensate with a world-only
+	// CPU ray from the eye to the sprite.  Uses the event API + PM_WORLD_ONLY,
+	// matching every other world-only trace in the client (environment.cpp,
+	// entity.cpp); EV_PlayerTrace fills a caller-owned pmtrace_t (no NULL to
+	// guard, unlike the static-storage PM_TraceLine).
+	//
+	// Brush-entity policy (deliberate): PM_WORLD_ONLY traces ONLY the static
+	// worldspawn BSP, so func_wall / func_door / etc. do NOT occlude glows.
+	// This is intentional -- the reported bug is glow bleeding through STATIC
+	// walls, which PM_WORLD_ONLY fixes; brush-entity occlusion is an explicitly
+	// deferred edge case, not an oversight.
+	//
+	// Robustness caveat (MEDIUM-5): a pmove-based trace clips against the
+	// physent/world set built during client prediction.  With cl_predict 0, in
+	// some spectator/replay paths, or before the first prediction frame, that
+	// set can be stale/empty -> fraction == 1 -> no cull -> a glow may briefly
+	// show through a wall.  The visual TEST pass probes these states.
+	if( rendermode == kRenderGlow )
+	{
+		float start[3] = { view.origin[0], view.origin[1], view.origin[2] };
+		float end[3]   = { origin[0], origin[1], origin[2] };
+		pmtrace_t tr;
+
+		gEngfuncs.pEventAPI->EV_SetTraceHull( 2 );	// 2 = point hull
+		gEngfuncs.pEventAPI->EV_PlayerTrace( start, end, PM_WORLD_ONLY, -1, &tr );
+
+		// Distance-proportional tolerance instead of a fixed fraction (HIGH-3):
+		// fraction is normalized to ray length, so a constant 0.98 is a wide
+		// world-space band on far sprites and a near-zero one on close ones.
+		// Glow/halo sprites are routinely mounted flush on (or just inside)
+		// wall/ceiling light fixtures, so cull ONLY when the occluder sits more
+		// than kGlowOccludeSlop world units IN FRONT of the sprite -- this keeps
+		// flush-mounted lamp glows while still culling glows genuinely behind a
+		// wall.  The safe error direction is to keep a legitimate glow, never to
+		// drop one.  Compared in squared form to avoid a sqrt.
+		const float kGlowOccludeSlop = 16.0f;	// world units
+		float ex = end[0] - start[0];
+		float ey = end[1] - start[1];
+		float ez = end[2] - start[2];
+		float rayLenSq = ex * ex + ey * ey + ez * ez;
+		float behind   = 1.0f - tr.fraction;	// ray fraction between the hit and the sprite
+
+		if( behind > 0.0f && behind * behind * rayLenSq > kGlowOccludeSlop * kGlowOccludeSlop )
+			return false;
+	}
 
 	out.frame = frame;
 	out.origin[0] = origin[0];
@@ -584,9 +641,12 @@ void DrawSprites( const ViewSetup &view, cl_entity_s *const *ents, int count )
 	// Ambience feed (M2a A1): fog only -- sprites are emitters, so no night
 	// tint (plan 2.6). The additive/alpha fog form is selected per item below.
 	const AmbienceParams &amb = view.ambience;
-	const float fogVec[4] = { amb.fogColor[0], amb.fogColor[1], amb.fogColor[2], amb.fogDensity };
+	float fogVec[4], fogParams[4];
+	CszFogUniformVecs( amb, fogVec, fogParams );	// analytic base fog (fog M1 Step 2): same form as world/studio
 
 	glUniform4fv( s_sprite.uFog, 1, fogVec );
+	glUniform4fv( s_sprite.uFogParams, 1, fogParams );
+	glUniform3fv( s_sprite.uCamPos, 1, view.origin );	// ray origin for the height-fog integral
 
 	BindVao( s_sprite.vao );
 
@@ -614,7 +674,7 @@ void DrawSprites( const ViewSetup &view, cl_entity_s *const *ents, int count )
 		case kRenderGlow:
 			SetBlend( kBlendAdditive );
 			SetDepthWrite( false );
-			SetDepthTest( false );	// glow: no Z checks (engine parity)
+			SetDepthTest( false );	// glow: no Z checks (engine parity); world occlusion gate applied in BuildItem
 			fogAdditive = 1;
 			break;
 		case kRenderTransAdd:

@@ -67,6 +67,7 @@ struct PassLocs
 	int uViewProj, uBones, uAlphaTest, uChrome, uViewRight, uViewUp;
 	int uAmbient, uShadeColor;					// base program only
 	int uFog, uAmbTint;						// base program only (M2a fog/night; lit/depth fog-free, pitfall 23)
+	int uFogParams, uCamPos;					// analytic base fog (fog M1 Step 2): height b/sunGlow/maxOpacity + ray origin
 	int uSunDir, uSunColor;						// base program only (sky 档1 directional N.L; lit/depth exempt, pitfall 23)
 	int uLightOrigin, uLightDir, uLightColor;			// lit program only
 	int uLightRadius, uCosInner, uCosOuter, uMatShadow, uHasShadow;	// lit program only
@@ -105,6 +106,8 @@ void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 	out.uAmbient = UniformLoc( prog, "u_ambient" );
 	out.uShadeColor = UniformLoc( prog, "u_shadeColor" );
 	out.uFog = UniformLoc( prog, "u_fog" );
+	out.uFogParams = UniformLoc( prog, "u_fogParams" );
+	out.uCamPos = UniformLoc( prog, "u_camPos" );
 	out.uAmbTint = UniformLoc( prog, "u_ambTint" );
 	out.uSunDir = UniformLoc( prog, "u_sunDir" );
 	out.uSunColor = UniformLoc( prog, "u_sunColor" );
@@ -147,8 +150,12 @@ void EnsureShader()
 	// a zeroed u_ambTint would render everything black).
 	const float kFogOff[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	const float kTintNeutral[3] = { 1.0f, 1.0f, 1.0f };
+	const float kFogParamsDefault[4] = { 0.0f, 0.0f, 1.0f, 0.0f };	// b=0, glow=0, maxOpacity=1 (no floor)
+	const float kCamPosZero[3] = { 0.0f, 0.0f, 0.0f };
 
 	glUniform4fv( s_studio.baseLocs.uFog, 1, kFogOff );
+	glUniform4fv( s_studio.baseLocs.uFogParams, 1, kFogParamsDefault );
+	glUniform3fv( s_studio.baseLocs.uCamPos, 1, kCamPosZero );
 	glUniform3fv( s_studio.baseLocs.uAmbTint, 1, kTintNeutral );
 
 	BuildProgram( "csz_studio_lit", kStudioLitVs, kStudioLitFs, true, s_studio.litProgram );
@@ -472,9 +479,12 @@ void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, cons
 	// Only the base program has these uniforms; lit/depth locations are -1
 	// (glUniform* no-op), keeping those passes fog-free (pitfall 23).
 	const AmbienceParams &amb = view.ambience;
-	const float fogVec[4] = { amb.fogColor[0], amb.fogColor[1], amb.fogColor[2], amb.fogDensity };
+	float fogVec[4], fogParams[4];
+	CszFogUniformVecs( amb, fogVec, fogParams );	// analytic base fog (fog M1 Step 2): density->extinction + params
 
 	glUniform4fv( locs.uFog, 1, fogVec );
+	glUniform4fv( locs.uFogParams, 1, fogParams );
+	glUniform3fv( locs.uCamPos, 1, view.origin );	// ray origin for the height-fog integral
 	glUniform3fv( locs.uAmbTint, 1, amb.tint );
 	// Directional N.L (sky 档1): only the base program declares u_sunDir/u_sunColor;
 	// lit/depth locs are -1 (glUniform* no-op), so those passes stay exempt (pitfall 23).

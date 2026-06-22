@@ -36,7 +36,10 @@
 struct ref_viewpass_s;
 namespace csz
 {
-enum BlendMode { kBlendNone, kBlendAlpha, kBlendAdditive };
+// kBlendAddPremul: premultiplied additive (glBlendFuncSeparate(ONE,ONE,ZERO,ONE)).
+// Source RGB is already premultiplied (energy-conserving PSF), so it is added once
+// with no per-source-alpha scaling; dst alpha is preserved. Used by the star PSF.
+enum BlendMode { kBlendNone, kBlendAlpha, kBlendAdditive, kBlendAddPremul };
 void EnterTakeover();   // baseline for CSZ passes: depth test LEQUAL + write on, blend/scissor/cull off
 void ApplyMainViewport( const struct ref_viewpass_s *rvp, const float clearRgba[4] ); // bind FBO 0, glViewport(rvp->viewport), clear color+depth
 void LeaveTakeover();   // restore-for-engine whitelist (calibrated in T1); ALWAYS the last call of a taken-over frame

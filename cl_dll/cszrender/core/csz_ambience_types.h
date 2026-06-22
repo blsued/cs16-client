@@ -41,10 +41,20 @@ namespace csz
 // or geom (spec 4.6 one-way rule). All colors linear 0..1, premultiplied by
 // their intensity; directions are normalized world-space unit vectors
 // pointing FROM the scene TOWARD the sky object (see 2.6 angle convention).
+// Fog preset ids (server-downlinked, fog M1 spec 4.6'). 0 = cosmetic
+// environmental haze; >= kCszFogPresetBlackFirst = server-authoritative black
+// gameplay fog (silhouettes / blackout) that bypasses the sky phase-tint.
+enum
+{
+	kCszFogPresetEnvironmental = 0,
+	kCszFogPresetBlackFirst    = 1,   // first black-fog preset (silhouettes)
+};
 struct AmbienceParams
 {
 	float fogColor[3];
-	float fogDensity;       // exp2 fog, 1/units; <= 0 disables fog entirely
+	float fogDensity;       // legacy exp2 density, 1/units; <= 0 disables fog. The
+	                        // analytic base fog (fog M1 Step 2) converts this to a
+	                        // natural-exp extinction via FogExtinctionFromDensity().
 	float tint[3];          // night tint multiplier; (1,1,1) = neutral
 	bool  moonEnabled;
 	float moonDir[3];
@@ -54,6 +64,14 @@ struct AmbienceParams
 	bool  moonlightEnabled;
 	float moonlightDir[3];  // surface -> moon (shader L vector, constant)
 	float moonlightColor[3];
+	// --- Analytic base fog (fog M1 Step 2, spec 3.6/4.3). Extends the legacy
+	// exp2 fog with exponential height falloff, a directional sun/moon in-scatter
+	// glow, and the server-controlled black-fog reveal floor. ---
+	float heightFalloff;    // height falloff b (1/units, world Z-up); 0 = uniform density
+	float sunGlow;          // directional in-scatter glow strength; 0 = plain fog (no glow)
+	float maxOpacity;       // server reveal floor: shader clamps T to max(T, 1-maxOpacity); 1 = full fog
+	int   fogPreset;        // kCszFogPreset* (0 = environmental cosmetic; >=1 = black gameplay)
+	bool  fogBypassTint;    // black fog bypasses the sky phase-tint multiply (spec 3.6)
 };
 // (0,0,0,0)/(1,1,1)/disabled everything -- the vanilla daylight look.
 inline AmbienceParams AmbienceNeutral()
@@ -63,6 +81,32 @@ inline AmbienceParams AmbienceNeutral()
 	p.tint[0] = 1.0f;
 	p.tint[1] = 1.0f;
 	p.tint[2] = 1.0f;
+	p.maxOpacity = 1.0f;	// no reveal floor by default: fog may fully occlude (env look unchanged)
 	return p;
+}
+// Legacy exp2 fog rendered 2^(-density*d); the analytic base fog renders the
+// physically-cleaner e^(-a*d). To MATCH the legacy look at b=0 they must agree:
+// 2^(-D*d) = e^(-D*ln2*d), so the natural extinction a = D*ln2. The conversion
+// lives here (the one boundary between the legacy density wire field and the new
+// shader uniform); a future CszFog channel that downlinks a true extinction would
+// feed it directly. <=0 stays 0 (fog off).
+inline float FogExtinctionFromDensity( float density )
+{
+	return density > 0.0f ? density * 0.6931471805599453f : 0.0f;	// ln(2)
+}
+// Build the two fog uniform vectors the analytic base shaders consume from an
+// ambience snapshot (one chokepoint so every feed site -- world/studio/sprite/sky
+// -- stays consistent). fogVec = (color.rgb, extinction a); fogParams = (height
+// falloff b, sun glow, maxOpacity, reserved).
+inline void CszFogUniformVecs( const AmbienceParams &amb, float fogVec[4], float fogParams[4] )
+{
+	fogVec[0] = amb.fogColor[0];
+	fogVec[1] = amb.fogColor[1];
+	fogVec[2] = amb.fogColor[2];
+	fogVec[3] = FogExtinctionFromDensity( amb.fogDensity );
+	fogParams[0] = amb.heightFalloff;
+	fogParams[1] = amb.sunGlow;
+	fogParams[2] = amb.maxOpacity > 0.0f ? amb.maxOpacity : 1.0f;	// 0 -> 1 (never clamp fog to fully transparent)
+	fogParams[3] = 0.0f;
 }
 }

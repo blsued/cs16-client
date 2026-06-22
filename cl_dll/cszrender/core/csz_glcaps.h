@@ -51,6 +51,15 @@ struct GlCaps
 bool ProbeGlCaps();
 const GlCaps &Caps();
 
+// GL_TIME_ELAPSED timer-query capability latch (GL-ERR-2). ProbeGlCaps runs a
+// throwaway TIME_ELAPSED begin/end + glGetError once at init: a context that
+// lacks ARB_timer_query (the loader binds the entry points unconditionally, so a
+// raw glBeginQuery(GL_TIME_ELAPSED) would raise GL_INVALID_ENUM every frame)
+// latches this false. The atmos + compose GPU timers gate ALL of their query
+// code on this AND behind their *_timing cvars. Valid only after ProbeGlCaps()
+// (returns false before the probe has run).
+bool HaveTimerQuery();
+
 // GPU object generation, owned by core so geom/lighting caches can key their
 // GL objects without including the composition root (one-way include rule).
 // Bumped on HUD_VidInit (potential GL context loss). Owners stamp creations

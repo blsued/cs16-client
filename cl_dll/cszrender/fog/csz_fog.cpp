@@ -73,6 +73,14 @@ struct RawAmbience
 	float mlElevDeg, mlYawDeg;
 	int mlR, mlG, mlB;
 	float mlIntensity;
+	// Analytic base fog (fog M1 Step 2). No wire field yet (the versioned CszFog
+	// channel is Step 6); these are set only via csz_devfogx for now and default
+	// to the environmental look (b=0, glow=0, maxOpacity=1, no bypass).
+	float heightFalloff;	// height b (1/units); 0 = uniform density
+	float sunGlow;		// directional in-scatter glow strength; 0 = plain fog
+	float maxOpacity;	// reveal floor; 1 = full fog, <1 = silhouettes/blackout cap
+	int   fogPreset;	// kCszFogPreset* (0 = environmental)
+	bool  fogBypassTint;	// black fog bypasses the sky phase-tint multiply
 };
 
 RawAmbience NeutralRaw()
@@ -82,6 +90,7 @@ RawAmbience NeutralRaw()
 	r.tintR = 255;
 	r.tintG = 255;
 	r.tintB = 255;
+	r.maxOpacity = 1.0f;	// no reveal floor by default (env fog may fully occlude)
 	return r;
 }
 
@@ -126,6 +135,14 @@ void ApplyRaw( const RawAmbience &raw )
 	p.tint[0] = (float)raw.tintR * ( 1.0f / 255.0f );
 	p.tint[1] = (float)raw.tintG * ( 1.0f / 255.0f );
 	p.tint[2] = (float)raw.tintB * ( 1.0f / 255.0f );
+
+	// Analytic base fog params (fog M1 Step 2): carried through verbatim. maxOpacity
+	// guards against a 0 that would clamp fog fully transparent (AmbienceNeutral=1).
+	p.heightFalloff = raw.heightFalloff;
+	p.sunGlow = raw.sunGlow;
+	p.maxOpacity = raw.maxOpacity > 0.0f ? raw.maxOpacity : 1.0f;
+	p.fogPreset = raw.fogPreset;
+	p.fogBypassTint = raw.fogBypassTint;
 
 	if( raw.moonOn )
 	{
@@ -230,6 +247,27 @@ void DevFogCommand()
 	raw.fogG = ClampByte( atoi( gEngfuncs.Cmd_Argv( 2 )));
 	raw.fogB = ClampByte( atoi( gEngfuncs.Cmd_Argv( 3 )));
 	raw.fogDensity = (float)atof( gEngfuncs.Cmd_Argv( 4 ));
+	ApplyRaw( raw );
+}
+
+// Dev-only: set the analytic base-fog params (no wire field until Step 6's CszFog
+// channel). Lets the Step 2 A/B exercise height falloff, sun glow, and the black
+// reveal floor / phase-tint bypass without the network path.
+void DevFogXCommand()
+{
+	if( gEngfuncs.Cmd_Argc() < 5 )
+	{
+		CSZ_LogInfo( "fog", "usage: csz_devfogx <heightB> <sunGlow> <maxOpacity 0..1> <bypassTint 0|1>" );
+		return;
+	}
+
+	RawAmbience raw = s_raw;
+
+	raw.heightFalloff = (float)atof( gEngfuncs.Cmd_Argv( 1 ));
+	raw.sunGlow = (float)atof( gEngfuncs.Cmd_Argv( 2 ));
+	raw.maxOpacity = (float)atof( gEngfuncs.Cmd_Argv( 3 ));
+	raw.fogBypassTint = ( atoi( gEngfuncs.Cmd_Argv( 4 )) != 0 );
+	raw.fogPreset = raw.fogBypassTint ? kCszFogPresetBlackFirst : kCszFogPresetEnvironmental;
 	ApplyRaw( raw );
 }
 
@@ -352,6 +390,7 @@ void FogController::RegisterDevCommands()
 {
 #ifdef CSZ_DEV_TOOLS
 	gEngfuncs.pfnAddCommand( "csz_devfog", DevFogCommand );
+	gEngfuncs.pfnAddCommand( "csz_devfogx", DevFogXCommand );
 	gEngfuncs.pfnAddCommand( "csz_devtint", DevTintCommand );
 	gEngfuncs.pfnAddCommand( "csz_devmoon", DevMoonCommand );
 	CSZ_LogDev( "fog", "dev ambience commands registered (CSZ_DEV_TOOLS build)" );

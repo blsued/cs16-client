@@ -1,0 +1,51 @@
+{
+  "magic": "CSZP",
+  "width": 4096,
+  "height": 2048,
+  "channels": 3,
+  "nLevels": 13,
+  "bytes": 33554453,
+  "sha256": "b1003e31e8462733961926d9bf95ec7a4d0535747a2eb28e963c56d329e94545",
+  "encode_gamma": 2.2,
+  "regrade": "per-layer bake: band anti-fog+G3 palette; star full-density faint carpet (block-max downsample)",
+  "pole_pinch_fix": {
+    "phi0_deg": 5.0,
+    "rows_touched": 76,
+    "max_box_k": 114
+  },
+  "bright_stars_removed": 500,
+  "bright_peak_lum_threshold": 1.8344945907592773,
+  "band_anti_fog_black_point": 0.0014103759765624999,
+  "exposure": 7.661115772223672,
+  "base_level_mean_rgb8": [
+    30.147553324699402,
+    30.44575023651123,
+    31.613052248954773
+  ],
+  "density": {
+    "frac_pure_black_lt2": 0.23786461353302002,
+    "frac_faint_carpet_2to40": 0.47905445098876953,
+    "frac_lit_ge2": 0.76213538646698,
+    "note": "prior single-layer bake off-band frac<2/255 was ~0.580; lower frac_pure_black = denser carpet"
+  },
+  "grade": {
+    "N_REMOVE": 500,
+    "SAT_GLOBAL": 1.26,
+    "CORE_PINK": 0.4,
+    "CORE_SIGMA_DEG": 28.0,
+    "ARM_BLUE": 0.34,
+    "DUST_GAMMA": 1.3,
+    "BAND_WB": [
+      0.86,
+      0.97,
+      1.18
+    ],
+    "STAR_FAINT_GAMMA": 0.82,
+    "STAR_FAINT_CAP": 3.0,
+    "STAR_GAIN": 1.0,
+    "EXPOSURE_PCT": 99.5,
+    "EXPOSURE_TARGET": 0.85,
+    "REINHARD_WHITE": 3.0
+  },
+  "determinism": "no RNG/time; same input EXR bytes -> byte-identical CSZP"
+}

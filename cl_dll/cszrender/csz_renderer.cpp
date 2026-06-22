@@ -40,7 +40,10 @@
 #include "core/csz_fatal.h"
 #include "core/csz_view.h"
 #include "fog/csz_fog.h"
+#include "fog/csz_fog_volume.h"
+#include "fog/csz_fog_godrays.h"
 #include "geom/csz_sky.h"
+#include "geom/csz_sky_compose.h"
 #include "geom/csz_sprite.h"
 #include "geom/csz_studio.h"
 #include "geom/csz_studio_texture.h"
@@ -52,6 +55,26 @@
 
 namespace csz
 {
+
+// C3 entry points (defined in geom/csz_sunmoon.cpp; not in the frozen sky ABI):
+// SunMoonRegisterCvars registers csz_moon/sun/* at HUD init; SunMoonDrawDebugFullscreen
+// repaints the sun/moon over the finished frame when csz_sky_fullscreen != 0.
+void SunMoonRegisterCvars();
+void SunMoonDrawDebugFullscreen( const ViewSetup &view );
+
+// C4 entry points (defined in geom/csz_stars.cpp; not in the frozen sky ABI):
+// StarsRegisterCvars registers all csz_stars_* cvars at HUD init so they are
+// available before the first rendered frame (no "Unknown command" on console).
+// StarsShutdown deletes the star/Milky Way GL objects (generation-safe) at HUD
+// shutdown while the owning context is still current.
+void StarsRegisterCvars();
+void StarsShutdown();
+
+// MW-rework entry points (defined in geom/csz_panorama.cpp; PanoramaContribute is in
+// the sky ABI header). PanoramaRegisterCvars registers csz_pano* at HUD init;
+// PanoramaShutdown deletes the panorama GL objects (generation-safe) at HUD shutdown.
+void PanoramaRegisterCvars();
+void PanoramaShutdown();
 
 Renderer g_renderer;	// zero-initialized (static storage duration)
 
@@ -159,6 +182,40 @@ void SampleFps()
 
 }
 
+namespace
+{
+
+// A2 hardening: cvar-gated runtime glGetError bisection across the sky sub-passes.
+// Default OFF (csz_sky_glcheck 0); ships harmless like csz_sky_debug. When armed it
+// drains + reports glGetError after each sky stage, so a night/sunrise/day sweep
+// pinpoints WHICH pass (pre-sky/atmos-lut/sky-bg/stars/sunmoon/resolve) raised an
+// error -- a "pre-sky" hit proves the error predates our sky passes (engine-side).
+// Only armed in dev, so unthrottled logging is fine (a clean run prints nothing;
+// a dirty one we want to see in full). Off = one cheap cvar read per frame.
+bool SkyGlCheckArmed()
+{
+	static cvar_t *s_cv;
+	static bool s_looked;
+
+	if( !s_looked )
+	{
+		s_looked = true;
+		s_cv = gEngfuncs.pfnGetCvarPointer( "csz_sky_glcheck" );
+	}
+
+	return s_cv != NULL && s_cv->value != 0.0f;
+}
+
+void SkyGlCheck( const char *tag )
+{
+	GLenum e;
+
+	while( ( e = glGetError() ) != GL_NO_ERROR )
+		CSZ_LogError( "skyglcheck", "GL error 0x%x after %s", (unsigned int)e, tag );
+}
+
+}
+
 void FrameEntities::Clear()
 {
 	numStudio = 0;
@@ -194,6 +251,14 @@ void Renderer::OnHudInit()
 	RegisterViewmodelDevCvars();	// csz_dev_viewmodel (dev stand-in model)
 	g_fog.RegisterDevCommands();	// csz_devfog/csz_devtint/csz_devmoon (A1; CSZ_DEV_TOOLS only)
 	g_sky.RegisterDevCvars();	// csz_sky_phase (always) + csz_devsun (CSZ_DEV_TOOLS only)
+	SkyComposeRegisterCvars();	// csz_hdr/exposure/tonemap/encode/dither/hdr_timing (C1)
+	AtmosRegisterCvars();		// csz_atmos/atmos_exposure/atmos_ms/atmos_timing (C2)
+	SunMoonRegisterCvars();		// csz_moon/sun + gain/size/halo/aureole/debug (C3)
+	StarsRegisterCvars();		// csz_stars/intensity/size/color_sat/twinkle/pano_twinkle_maglimit/diag (C4)
+	PanoramaRegisterCvars();	// MW-rework: csz_pano/pano_intensity/pano_lon_offset (must follow StarsRegisterCvars: fetches the moon-wash cvar pointers it registers)
+	FogVolumeRegisterCvars();	// fog M1 Step 3: csz_fog_quality/steps/halfres/march_intensity/march_g
+	FogGodraysRegisterCvars();	// fog M1 Step 4: csz_fog_godrays/_intensity/_dev (sun/moon god rays)
+	gEngfuncs.pfnRegisterVariable( "csz_sky_glcheck", "0", FCVAR_CLIENTDLL );	// A2: per-sky-pass glGetError bisection (dev, default off)
 }
 
 void Renderer::OnVidInit()
@@ -216,6 +281,12 @@ void Renderer::Shutdown()
 		g_world.Destroy();
 		g_studio.DestroyAll();
 		g_spotShadow.Destroy();
+		FogVolumeShutdown();	// fog M1 Step 3: half-res FBO + march/upsample programs (generation-safe)
+		FogGodraysShutdown();	// fog M1 Step 4: half-res occl/scatter FBOs + 3 programs (generation-safe)
+		AtmosShutdown();	// atmosphere LUTs + programs + GPU timer (C2, generation-safe)
+		StarsShutdown();	// star field twinkle VAOs/VBO/programs (C4, generation-safe)
+		PanoramaShutdown();	// MW-rework panorama texture/VAO/program (generation-safe)
+		SkyComposeShutdown();	// HDR FBO + resolve program + GPU timer (C1, generation-safe)
 		m_glReady = false;
 	}
 
@@ -319,11 +390,72 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 		clearColor = fogClear;
 	}
 
-	ApplyMainViewport( rvp, clearColor );				// slot 10
+	// slot 10: HDR compositing foundation (C1). When csz_hdr 1 (default) this
+	// binds the RGBA16F HDR scene target + clears it with the same clearColor
+	// the engine would use, so the scene (sky 10.5 -> viewmodel 15) renders into
+	// the HDR FBO and the identity resolve (before slot 16) reproduces the C0
+	// baseline. When csz_hdr 0 it is a pure passthrough to ApplyMainViewport
+	// (straight-to-backbuffer baseline). The resolve below also takes ownership
+	// of clearing FBO 0 (the HDR path no longer clears it at slot 10).
+	// C2 atmosphere: build/refresh the precomputed LUTs (transmittance +
+	// multiple-scattering once per generation, sky-view when the sun moves)
+	// BEFORE the HDR FBO is bound -- AtmosBuildLuts does its own FBO/TMU juggling
+	// and leaves FBO 0 + TMUs resynced. No-op when csz_atmos 0.
+	bool atmos = AtmosActive();
+	bool glCheck = SkyGlCheckArmed();				// A2: per-sky-pass glGetError bisection (dev)
+	if( glCheck )
+		SkyGlCheck( "pre-sky (engine / prior passes)" );	// drain: a hit here predates our sky work
+	if( atmos )
+		AtmosBuildLuts();					// slot 10 (pre-BeginScene)
+	if( glCheck && atmos )
+		SkyGlCheck( "atmos LUT build" );
 
-	BeginPass( kTmSky );						// slot 10.5: procedural day/night sky (A3)
-	g_sky.EnsureBuilt();
-	g_sky.DrawSky( view );
+	SkyComposeBeginScene( rvp, clearColor );			// slot 10
+	if( glCheck )
+		SkyGlCheck( "compose begin-scene (HDR FBO bind/clear)" );
+
+	BeginPass( kTmSky );						// slot 10.5: sky background
+	// C2: physically-based atmosphere sky background (samples the sky-view LUT
+	// per view ray) into the HDR FBO. Falls back to the legacy csz_sky monolithic
+	// background (gradient + discs + stars) when csz_atmos 0 or the LUTs are not
+	// ready -- that legacy path is also the C1-identity baseline. NOTE: with
+	// csz_atmos 1 the legacy sun/moon discs + hash stars are not drawn (C3 owns
+	// the physically-based bodies, C4 the stars; both still no-op). Set
+	// csz_atmos 0 to restore the full legacy sky meanwhile.
+	bool skyDrawn = false;
+	if( atmos )
+		skyDrawn = AtmosDrawSky( view );
+	if( !skyDrawn )
+	{
+		g_sky.EnsureBuilt();
+		g_sky.DrawSky( view );
+	}
+	// FIX (no-stars structural, GPT-5.5 Pro §2a, 2026-06-19): draw C4 stars on the
+	// COMMON sky path -- whether or not the physically-based atmosphere dome drew --
+	// so the star field no longer silently depends on atmos LUT success (the old code
+	// only composited stars in the atmos-success branch). In the DEFAULT path
+	// (csz_atmos 1, dome OK) only these C4 stars draw. In the legacy fallback
+	// (csz_atmos 0 / LUTs not ready) g_sky.DrawSky also draws its own faint hash
+	// stars; those live in a frozen file outside C4's edit surface, so a minor
+	// double-up is accepted there (non-default path, both are night-gated).
+	// MW-rework: sampled all-sky panorama backdrop (static deep-space; replaces the
+	// deleted per-pixel procedural Milky Way). Drawn BEFORE the live twinkle stars so it
+	// sits behind them and the moon; additive into the same HDR FBO, night-gated on the
+	// same curve. Also emits the relocated moon outer sky-glow (MoonSkyGlow).
+	PanoramaContribute( view );
+	if( glCheck )
+		SkyGlCheck( "panorama backdrop (MW-rework)" );
+	StarsContribute( view );
+	if( glCheck )
+		SkyGlCheck( atmos ? "sky background (atmos dome + stars)" : "sky background (legacy fallback)" );
+	// C3 sun/moon bodies draw additively after EITHER sky background. The legacy
+	// fallback FS retired its own discs (C3 owns the physically-based bodies), so
+	// without this the sun/moon would VANISH whenever the atmosphere path is not
+	// taken: csz_atmos 0, the LUTs not ready, or AtmosDrawSky() failing. The bodies
+	// composite into whatever target the scene renders to (HDR FBO or backbuffer).
+	SunMoonContribute( view );
+	if( glCheck )
+		SkyGlCheck( "sunmoon bodies (C3)" );
 	EndPass( kTmSky );
 
 	BeginPass( kTmWorld );
@@ -342,6 +474,24 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	RunLightPasses( view, m_frame.studio, m_frame.numStudio );	// slot 13: additive light passes
 	EndPass( kTmLights );
 
+	// slot 13.5 (kTmVolume seam): fog M1 Step 3 half-res flashlight ray-march.
+	// After all opaque depth + additive flashlight lighting, before transparent/
+	// viewmodel, HDR FBO still bound. Reconstructs the view ray from the Step-1
+	// depth texture, accumulates single-scatter from the shadowed spot, and ADDS
+	// the in-scatter into the HDR buffer (never re-attenuates the scene -- the
+	// Step-2 analytic base fog owns scene transmittance + maxOpacity). Gated behind
+	// csz_fog_quality >= 1; a pure no-op without the HDR path / a shadowed spot.
+	BeginPass( kTmVolume );
+	FogVolumeRender( view );
+	// fog M1 Step 4: additive sun/moon god rays (screen-space radial scattering),
+	// AFTER the flashlight march, HDR FBO still bound. Three half-res stages add
+	// linear radiance into the HDR buffer (never re-attenuates -- the Step-2 base
+	// fog owns extinction). Gated behind csz_fog_godrays; a no-op without the HDR
+	// path / an on-screen above-horizon body. Restores HDR FBO + main viewport +
+	// blend + TMUs + depth before the transparent/viewmodel passes.
+	FogGodraysRender( view );
+	EndPass( kTmVolume );
+
 	BeginPass( kTmTrans );
 	DrawSprites( view, m_frame.sprites, m_frame.numSprites );	// slot 14: sprites (trans domain)
 	g_world.DrawBrushTransparent( view, m_frame.brush, m_frame.numBrush );	// slot 14: transparent brush (trans domain, E1)
@@ -351,7 +501,21 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	DrawViewModelPass( view );					// slot 15: viewmodel (last; own depth range)
 	EndPass( kTmViewmodel );
 
-	g_sky.DrawDebugFullscreen( view );				// dev: csz_sky_fullscreen overlay (proof/showcase)
+	if( atmos )
+		AtmosDrawDebugFullscreen( view );			// dev: csz_sky_fullscreen overlay -> physically-based atmosphere (C2)
+	else
+		g_sky.DrawDebugFullscreen( view );			// dev: csz_sky_fullscreen overlay (legacy sky proof/showcase)
+	SunMoonDrawDebugFullscreen( view );				// dev: csz_sky_fullscreen overlay -> C3 sun/moon over the frame, EITHER sky path (capture aid)
+
+	// HDR resolve (C1): when csz_hdr 1, bind backbuffer 0, clear it (the HDR
+	// path no longer cleared FBO 0 at slot 10), run the fullscreen resolve chain
+	// (exposure -> purkinje(id) -> tonemap(0=id) -> [OETF] -> [dither]) sampling
+	// the HDR color via the safe sky-unit bind + texelFetch, and resync TMUs
+	// before LeaveTakeover (which uses the engine GL_Bind wrappers). When
+	// csz_hdr 0 this is a no-op (scene already on FBO 0).
+	SkyComposeResolve( rvp, clearColor );
+	if( glCheck )
+		SkyGlCheck( "compose resolve (HDR -> backbuffer)" );
 
 	LeaveTakeover();						// slot 16
 

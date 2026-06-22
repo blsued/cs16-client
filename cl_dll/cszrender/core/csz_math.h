@@ -45,6 +45,10 @@ struct Frustum
 };
 void Mat4Identity( Mat4 &out );
 void Mat4Multiply( const Mat4 &a, const Mat4 &b, Mat4 &out );        // out = a * b
+// General 4x4 inverse (column-major). Returns false (leaves out untouched) if
+// the matrix is singular (|det| < 1e-12). Used to build invProj/invViewProj for
+// view/world-position reconstruction from the sampleable depth texture (fog).
+bool Mat4Inverse( const Mat4 &in, Mat4 &out );
 void Mat4Perspective( float fovXDeg, float fovYDeg, float zNear, float zFar, Mat4 &out );
 // Quake world -> GL eye: axis fix (rotate -90 deg about X, +90 deg about Z),
 // then rotate -roll(X), -pitch(Y), -yaw(Z), then translate by -origin.

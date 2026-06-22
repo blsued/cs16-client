@@ -45,6 +45,37 @@ namespace csz
 
 static GlCaps s_caps;
 static bool s_probed = false;
+static bool s_haveTimerQuery = false;
+
+// One-time probe: can this context actually run a GL_TIME_ELAPSED query? The GL
+// loader binds glBeginQuery/glEndQuery unconditionally, so on a context without
+// ARB_timer_query the entry points exist but raise GL_INVALID_ENUM. Run a real
+// throwaway begin/end and check glGetError; clean -> latch true. Must be called
+// with a drained error queue (ProbeGlCaps drains right before).
+static void ProbeTimerQuery()
+{
+	s_haveTimerQuery = false;
+
+	if( glGenQueries == NULL || glBeginQuery == NULL || glEndQuery == NULL || glDeleteQueries == NULL )
+		return;
+
+	GLuint q = 0;
+	glGenQueries( 1, &q );
+
+	if( q == 0 )
+		return;
+
+	glBeginQuery( GL_TIME_ELAPSED, q );
+	glEndQuery( GL_TIME_ELAPSED );
+
+	GLenum err = glGetError();
+	glDeleteQueries( 1, &q );
+
+	// Drain any residue the throwaway query left so later users start clean.
+	while( glGetError() != GL_NO_ERROR ) { }
+
+	s_haveTimerQuery = ( err == GL_NO_ERROR );
+}
 
 static void CopyGlString( char *dst, size_t dstSize, GLenum name )
 {
@@ -105,6 +136,10 @@ bool ProbeGlCaps()
 	// Drain any leftover probe errors so later glGetError users start clean.
 	while( glGetError() != GL_NO_ERROR ) { }
 
+	// GL-ERR-2: latch whether GL_TIME_ELAPSED queries are usable (drained queue
+	// required; this leaves it drained again).
+	ProbeTimerQuery();
+
 	if( s_caps.maxTextureSize < 1024 )
 	{
 		snprintf( reason, sizeof( reason ), "GL_MAX_TEXTURE_SIZE too small: %d (need >= 1024)", s_caps.maxTextureSize );
@@ -117,9 +152,9 @@ bool ProbeGlCaps()
 		CSZ_FatalInit( "glcaps", reason );
 	}
 
-	CSZ_LogInfo( "glcaps", "GL %s | %s | profile=0x%x | maxtex=%d | maxvtxuniform=%d",
+	CSZ_LogInfo( "glcaps", "GL %s | %s | profile=0x%x | maxtex=%d | maxvtxuniform=%d | timerquery=%d",
 		s_caps.versionString, s_caps.rendererString, s_caps.profileMask,
-		s_caps.maxTextureSize, s_caps.maxVertexUniformComponents );
+		s_caps.maxTextureSize, s_caps.maxVertexUniformComponents, s_haveTimerQuery ? 1 : 0 );
 
 	s_probed = true;
 	return true;
@@ -128,6 +163,11 @@ bool ProbeGlCaps()
 const GlCaps &Caps()
 {
 	return s_caps;
+}
+
+bool HaveTimerQuery()
+{
+	return s_haveTimerQuery;
 }
 
 static int s_gpuGeneration = 0;

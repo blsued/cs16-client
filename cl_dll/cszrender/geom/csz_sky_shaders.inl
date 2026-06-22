@@ -71,17 +71,18 @@ void main()
 // on the CPU from phase (so PublishLighting and the disc agree) and uploaded.
 static const char kSkyFs[] = R"GLSL(#version 330 core
 in vec3 v_dir;
-uniform vec3 u_sunDir;      // world dir toward the sun (normalized)
-uniform vec3 u_moonDir;     // world dir toward the moon (normalized)
-uniform vec3 u_sunColor;    // disc/halo tint for the sun
-uniform vec3 u_moonColor;   // disc/halo tint for the moon
+uniform vec3 u_sunDir;      // world dir toward the sun (normalized): warm horizon glow
+uniform vec3 u_moonDir;     // world dir toward the moon (normalized): moonlit-cloud lighting
+uniform vec3 u_moonColor;   // moonlit-cloud tint
 uniform float u_phase;      // 0=nightfall .. 0.5=midnight .. 1=daylight
 uniform float u_starAmount; // 0..1 star field brightness gate (1 at midnight)
-uniform float u_bloodMoon;  // 0..1 blood-moon push (1 at midnight when armed)
-uniform float u_sunCosR;    // cos(sun angular radius)
-uniform float u_moonCosR;   // cos(moon angular radius)
-uniform float u_moonHalo;   // moon halo intensity 0..1
-uniform vec4 u_fog;         // rgb = fog color (linear), w = density; w<=0 -> off
+uniform vec4 u_fog;         // rgb = fog color (linear), w = extinction a (1/units); w<=0 -> off
+uniform vec4 u_fogParams;   // x = height falloff b (unused for the sky band), y = sun glow, z = maxOpacity
+// Legacy disc uniforms (u_sunColor / u_bloodMoon / u_sunCosR / u_moonCosR /
+// u_moonHalo) were RETIRED with the legacy moon/sun disc (DEAD-1, infra pass 2
+// 2026-06-18): the physically-based bodies are C3's, so this fallback FS draws
+// no disc and never referenced them. Removed from the shader AND their CPU
+// plumbing (csz_sky.cpp). KEPT u_sunDir/u_moonDir/u_moonColor (still used above).
 out vec4 fragColor;
 
 // Hash a direction-on-the-sphere into a pseudo-random scalar (public-domain
@@ -145,7 +146,16 @@ void skyColors( float ph, out vec3 zenith, out vec3 horizon )
 	// Midnight (darkest): deep cold-blue zenith, thin cool horizon haze glow. The
 	// horizon band is kept >= 0.05 luma brighter than the zenith (gradient depth),
 	// both bands cool (B >= R).
-	vec3 mnZen = vec3( 0.004, 0.007, 0.020 );
+	// RECAL 2026-06-21 (MATCH-REFERENCE): the reference sky is deep NAVY, not black; the
+	// shipped zenith (0.004,0.007,0.020) measured near-black (darkest-decile B-R ~ +1.8,
+	// FAILS the navy test B>R+3). Lift the ZENITH toward navy: B 0.020->0.055 (B clearly
+	// dominant) with a touch of R/G so it reads deep-blue, NOT grey. Still dark enough that
+	// the dense star field + Milky Way pop above it. This is the legitimate navy mechanism
+	// (the uniform DOME base color); it is NOT the band's smooth underglow, so it does not
+	// violate the anti-fog red line. mnHor is LEFT UNCHANGED (already bright enough per the
+	// red-team caveat). Only the deep-night path (phase~0.5) sees mnZen; day/dusk/dawn/gold
+	// use ssZen/ntZen/dwZen and are untouched.
+	vec3 mnZen = vec3( 0.006, 0.012, 0.055 );
 	vec3 mnHor = vec3( 0.100, 0.124, 0.200 );
 	// Dawn / daylight: COOL brightening blue base. The warm sunrise is the same
 	// directional sun-side glow in main(), NOT a 360-degree gold ring.
@@ -250,45 +260,30 @@ void main()
 		col = mix( col, cloudCol, clamp( cloud, 0.0, 1.0 ) * moonVis * 0.9 );
 	}
 
-	// --- Moon disc + smooth graded halo (visible through the night arc). ---
-	float aaM = fwidth( cm ) + 1e-5;
-	float moonDisc = smoothstep( u_moonCosR - aaM, u_moonCosR + aaM, cm );
-	// Soft radial glow: monotonically decreasing from the disc edge out to ~3x the
-	// disc radius (no hard step between disc and sky). Worked in angular distance
-	// so the falloff is uniform regardless of the disc size.
-	float moonAng = acos( clamp( cm, -1.0, 1.0 ) );                    // angular dist from moon center
-	float discR   = acos( clamp( u_moonCosR, -1.0, 1.0 ) );            // disc angular radius
-	float moonHalo = ( 1.0 - smoothstep( discR, discR * 3.0, moonAng ) ) * u_moonHalo;
-	// Blood-moon: shift the moon body + its halo toward red, keep it legible
-	// (mix, never flat-replace), and warm the surrounding sky a touch.
-	vec3 moonBody = mix( u_moonColor, vec3( 0.75, 0.06, 0.04 ), u_bloodMoon );
-	vec3 moonGlow = mix( u_moonColor, vec3( 0.55, 0.05, 0.03 ), u_bloodMoon );
-	col = mix( col, moonBody, clamp( moonDisc, 0.0, 1.0 ) * moonVis );
-	col += moonGlow * moonHalo * moonVis;
-	if( u_bloodMoon > 0.0 )
-		col += vec3( 0.05, 0.0, 0.0 ) * u_bloodMoon * pow( max( cm, 0.0 ), 8.0 ) * moonVis;
+	// --- Legacy moon/sun disc + halo RETIRED (Chunk A, FIX-PLAN 2026-06-18). ---
+	// The physically-based bodies are now owned by C3 (geom/csz_sunmoon.cpp, real
+	// phases + NASA surface + atmospheric extinction + soft-knee) and the stars by
+	// C4. This legacy fallback FS keeps only the gradient dome + warm horizon glow +
+	// hash stars + moonlit clouds + fog as the C1-identity baseline; drawing a SECOND
+	// disc/halo set here (different radii) risked compositing a real annulus and a
+	// double-body when the dev fullscreen overlay was armed. The moon-direction
+	// fields (cm / moonVis above) are kept because the moonlit-cloud lighting uses
+	// them. The legacy disc uniforms (u_sunColor / u_bloodMoon / u_sunCosR /
+	// u_moonCosR / u_moonHalo) and their CPU plumbing were fully removed (DEAD-1).
 
-	// --- Sun disc + halo (rises near dawn; only contributes above the horizon). ---
-	float cs = dot( dir, u_sunDir );
-	float sunVis = clamp( ( u_sunDir.z + 0.10 ) * 4.0, 0.0, 1.0 );  // fade in as it clears the horizon
-	if( sunVis > 0.0 )
-	{
-		float aaS = fwidth( cs ) + 1e-5;
-		float sunDisc = smoothstep( u_sunCosR - aaS, u_sunCosR + aaS, cs );
-		float sunHalo = pow( max( cs, 0.0 ), 256.0 );
-		col = mix( col, u_sunColor, clamp( sunDisc, 0.0, 1.0 ) * sunVis );
-		col += u_sunColor * sunHalo * 0.6 * sunVis;
-	}
-
-	// --- 1/4 fog fusion: sky depth -> exp2(-density * 0.25 * dist). Underwater
-	// passes density 0 (no fog). Mix toward fog color at the horizon, where the
-	// view distance is largest. Use a fixed sky reference distance so the blend
-	// reads as a horizon band, not a per-pixel depth (sky has no real depth). ---
+	// --- 1/4 fog fusion (analytic base fog, fog M1 Step 2): the horizon band now
+	// uses the SAME natural-exp extinction as world/studio (e^(-a*0.25*dist)), so
+	// it owns the horizon with no double/seam against the depth-driven world fog.
+	// u_fog.w is the converted extinction a, so e^(-a*0.25*dist) == the old
+	// exp2(-density*0.25*dist) -- look preserved. Underwater passes a=0 (no fog).
+	// Mix toward fog color at the horizon, where the view distance is largest. The
+	// server maxOpacity floor clamps the band so a blackout reaches the sky too. ---
 	if( u_fog.w > 0.0 )
 	{
 		// Distance grows toward the horizon (up -> 0) and stays small at zenith.
 		float dist = 1.0 / max( up * up + 0.02, 0.02 );
-		float fogF = clamp( exp2( -u_fog.w * 0.25 * dist ), 0.0, 1.0 );
+		float fogF = clamp( exp( -u_fog.w * 0.25 * dist ), 0.0, 1.0 );
+		fogF = max( fogF, 1.0 - u_fogParams.z );           // server reveal floor (maxOpacity)
 		col = mix( u_fog.rgb, col, fogF );
 	}
 
