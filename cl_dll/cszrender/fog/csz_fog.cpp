@@ -54,6 +54,20 @@ namespace
 // AMBIENCE payload length (plan 2.3: cmd 1 body, cmd/version already stripped).
 const int kAmbiencePayloadBytes = 45;
 
+// L0 black-fog decouple seam (CONVENTIONS.md). serverFogMask is a [0,1] scalar the
+// renderer multiplies into the client fog density once per frame at the single
+// view.ambience snapshot. Default source = the csz_fog_server_mask cvar ("1" =
+// 1.0 = IEEE-exact identity => pixel-for-pixel the pre-L0 fog). A future
+// server-authoritative black-fog drive overrides it via CszFogSetServerMask();
+// s_serverMaskOverride < 0 means "no override, use the cvar".
+cvar_t *s_cvarServerMask;            // csz_fog_server_mask, default "1"
+float   s_serverMaskOverride = -1.0f;
+
+float ClampUnit( float v )
+{
+	return v < 0.0f ? 0.0f : ( v > 1.0f ? 1.0f : v );
+}
+
 const float kDegToRad = 3.14159265358979323846f / 180.0f;
 
 // Byte-domain mirror of the protocol/config values (plan 2.4 semantics). Kept
@@ -395,6 +409,34 @@ void FogController::RegisterDevCommands()
 	gEngfuncs.pfnAddCommand( "csz_devmoon", DevMoonCommand );
 	CSZ_LogDev( "fog", "dev ambience commands registered (CSZ_DEV_TOOLS build)" );
 #endif
+}
+
+// --- L0 black-fog decouple seam (always registered, Release-safe) -------------
+void CszFogRegisterCvars()
+{
+	if( s_cvarServerMask == NULL )
+		s_cvarServerMask = gEngfuncs.pfnRegisterVariable( "csz_fog_server_mask", "1", FCVAR_CLIENTDLL );
+
+	CSZ_LogDev( "fog", "L0 decouple cvar registered (csz_fog_server_mask, default 1.0 = identity)" );
+}
+
+// Reserved hook for a future server-authoritative black-fog drive (e.g. mapped
+// from gmsgFog in hud_msg.cpp MsgFunc_Fog). m < 0 clears the override and falls
+// back to the cvar; m in [0,1] forces serverFogMask. Not wired this period.
+void CszFogSetServerMask( float m )
+{
+	s_serverMaskOverride = m < 0.0f ? -1.0f : ClampUnit( m );
+}
+
+// Live serverFogMask in [0,1]: the server override if armed, else the
+// csz_fog_server_mask cvar (default 1.0). Fails safe to 1.0 (identity) if the
+// cvar was never registered.
+float CszFogServerMask()
+{
+	if( s_serverMaskOverride >= 0.0f )
+		return s_serverMaskOverride;
+
+	return s_cvarServerMask != NULL ? ClampUnit( s_cvarServerMask->value ) : 1.0f;
 }
 
 }

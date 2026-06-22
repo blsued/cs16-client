@@ -313,4 +313,12 @@ void SkyComposeShutdown();
 // whole-frame delta csz_hdr 1 vs 0 (measured by the orchestrator).
 double SkyComposeLastGpuMs();
 
+// L0 observability (csz_perf_dump, default 0). When armed, the orchestrator emits
+// one parseable [csz_perf] line per sample window: the whole-frame in-scene GPU ms
+// (SkyComposeLastGpuMs above) + per-pass CPU ms. Reading it also forces the single
+// in-scene GL_TIME_ELAPSED query on (ComposeTimingActive) -- a passive scope that
+// changes no draw, so the frame stays pixel-identical. NEVER nest another GPU timer
+// inside the compose span (GL_TIME_ELAPSED cannot nest).
+bool SkyComposePerfDumpEnabled();
+
 }  // namespace csz

@@ -169,6 +169,28 @@ void SampleFps()
 				s_passAccumMs[kTmLights] * inv, s_passAccumMs[kTmVolume] * inv,
 				s_passAccumMs[kTmTrans] * inv, s_passAccumMs[kTmDelegate] * inv,
 				s_passAccumMs[kTmTriapi] * inv, s_passAccumMs[kTmViewmodel] * inv );
+
+			// L0 observability (csz_perf_dump, default 0; registered in
+			// csz_sky_compose.cpp). When armed, emit ONE parseable line per sample
+			// window through the always-visible CSZ_LogInfo facade (the same console
+			// path the csz_sky_debug hook uses, so the test harness captures it
+			// regardless of the `developer` level). Values: gpu_frame_ms = the
+			// whole-frame in-scene GL_TIME_ELAPSED span (SkyComposeLastGpuMs; -1.0
+			// until the first ring result resolves); the per-pass numbers are the
+			// SAME per-frame-averaged CPU ms the Dev "fps" line above prints (the
+			// accumulators are reset together just below). Pure logging -> zero
+			// render change. Reuses the single non-nestable compose GPU timer
+			// (forced on via ComposeTimingActive when csz_perf_dump != 0).
+			if( SkyComposePerfDumpEnabled())
+				CSZ_LogInfo( "perf", "[csz_perf] gpu_frame_ms=%.3f shadow=%.3f sky=%.3f world=%.3f brush=%.3f decal=%.3f "
+					"studio=%.3f lights=%.3f volume=%.3f trans=%.3f delegate=%.3f triapi=%.3f viewmodel=%.3f",
+					SkyComposeLastGpuMs(),
+					s_passAccumMs[kTmShadow] * inv, s_passAccumMs[kTmSky] * inv,
+					s_passAccumMs[kTmWorld] * inv, s_passAccumMs[kTmBrush] * inv,
+					s_passAccumMs[kTmDecal] * inv, s_passAccumMs[kTmStudio] * inv,
+					s_passAccumMs[kTmLights] * inv, s_passAccumMs[kTmVolume] * inv,
+					s_passAccumMs[kTmTrans] * inv, s_passAccumMs[kTmDelegate] * inv,
+					s_passAccumMs[kTmTriapi] * inv, s_passAccumMs[kTmViewmodel] * inv );
 		}
 
 		for( int i = 0; i < kTmCount; i++ )
@@ -250,6 +272,7 @@ void Renderer::OnHudInit()
 	RegisterStudioTextureCvars();	// csz_dev_armskin (spec 4.3.1 layer 1 dev probe)
 	RegisterViewmodelDevCvars();	// csz_dev_viewmodel (dev stand-in model)
 	g_fog.RegisterDevCommands();	// csz_devfog/csz_devtint/csz_devmoon (A1; CSZ_DEV_TOOLS only)
+	CszFogRegisterCvars();		// L0: csz_fog_server_mask (black-fog decouple seam; always, Release-safe)
 	g_sky.RegisterDevCvars();	// csz_sky_phase (always) + csz_devsun (CSZ_DEV_TOOLS only)
 	SkyComposeRegisterCvars();	// csz_hdr/exposure/tonemap/encode/dither/hdr_timing (C1)
 	AtmosRegisterCvars();		// csz_atmos/atmos_exposure/atmos_ms/atmos_timing (C2)
@@ -335,6 +358,16 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	// studio base passes consume amb.tint + amb.moonlightDir/Color.
 	float ph = g_sky.ComputePhase();
 	g_sky.PublishLighting( view.ambience, ph );
+
+	// L0 black-fog decouple seam (CONVENTIONS.md). SINGLE chokepoint: every fog
+	// consumer -- world/studio/sprite analytic-fog uniforms (CszFogUniformVecs),
+	// the sky fog band (csz_sky.cpp), the volumetric flashlight march
+	// (csz_fog_volume.cpp) -- reads view.ambience.fogDensity, so one multiply here
+	// scales them all, consistently, live each frame. serverFogMask defaults to 1.0
+	// (csz_fog_server_mask "1", no server override) => density*1.0 is IEEE-exact
+	// identity => the frame is pixel-for-pixel the pre-L0 output. Reserved hook for
+	// a future server-authoritative blackout (CszFogSetServerMask, MsgFunc_Fog).
+	view.ambience.fogDensity *= CszFogServerMask();
 
 	// Disposable observability hook (csz_sky_debug, default 0; registered in
 	// csz_sky.cpp RegisterDevCvars). When armed, dump the PUBLISHED per-phase

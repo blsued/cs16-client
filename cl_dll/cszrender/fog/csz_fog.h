@@ -51,4 +51,17 @@ public:
 	void RegisterDevCommands();            // no-op unless CSZ_DEV_TOOLS
 };
 extern FogController g_fog;
+
+// L0 black-fog decouple seam (CONVENTIONS.md). The fog the scene consumes is the
+// client fog density scaled by serverFogMask:
+//   fogDensityConsumed = clientDensity(= clientVisibilityFactor) * serverFogMask
+// serverFogMask defaults to 1.0 (csz_fog_server_mask "1", no server override) so
+// density*1.0 is an IEEE-exact identity => pixel-for-pixel the pre-L0 fog. The
+// renderer applies this once at the view.ambience snapshot (the single chokepoint
+// every fog consumer reads). RESERVED: a future server-authoritative blackout
+// calls CszFogSetServerMask() (e.g. from MsgFunc_Fog); until then the cvar is the
+// sole source.
+void  CszFogRegisterCvars();            // registers csz_fog_server_mask (always; Release-safe)
+void  CszFogSetServerMask( float m );   // future server drive; clamps to [0,1]; m<0 clears override
+float CszFogServerMask();               // live [0,1]: override if armed, else the cvar (default 1.0)
 }

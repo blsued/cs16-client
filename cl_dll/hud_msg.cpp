@@ -178,6 +178,12 @@ int CHud::MsgFunc_Fog( const char *pszName, int iSize, void *pbuf )
 {
 	//int flags;
 
+	// L0 RESERVED HOOK (black-fog decouple seam, CONVENTIONS.md): this gmsgFog
+	// path is where a future server-authoritative black-fog blackout would drive
+	// the cszrender fog visibility, by mapping its intent to
+	// csz::CszFogSetServerMask( mask ). NOT wired this period -- serverFogMask
+	// stays 1.0 (identity) and the cszrender ambience fog is unaffected here.
+
 	memset( &g_FogParameters, 0, sizeof(FogParameters));
 
 	BufferReader reader( pszName, pbuf, iSize );

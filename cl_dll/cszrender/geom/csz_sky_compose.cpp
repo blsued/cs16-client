@@ -58,6 +58,7 @@ cvar_t *s_cvarTonemap;    // csz_tonemap    default "0" (identity); 1 = ACES fil
 cvar_t *s_cvarEncode;     // csz_encode     default "0" (no OETF / display passthrough); 1 = sRGB OETF
 cvar_t *s_cvarDither;     // csz_dither     default "0" (byte-clean A/B); 1 = TPDF dither
 cvar_t *s_cvarTiming;     // csz_hdr_timing default "0"; 1 = log the GPU timer ms (Dev level)
+cvar_t *s_cvarPerfDump;   // csz_perf_dump  default "0" (L0 observability); 1 = orchestrator emits the [csz_perf] line AND forces the in-scene GPU timer query (passive: no draw change)
 
 // --- HDR scene target (red-team fix #9: real color draw buffer; fix #10: depth
 //     renderbuffer, no stencil in the CSZ takeover scene target) ---------------
@@ -358,7 +359,12 @@ bool EnsureHdrTarget( int w, int h )
 // latch AND the csz_hdr_timing cvar. When false, NO query code executes.
 bool ComposeTimingActive()
 {
-	return HaveTimerQuery() && ReadCvar( s_cvarTiming, 0.0f ) != 0.0f;
+	// Issue the (single, non-nestable) in-scene GPU timer when EITHER the HDR
+	// timing log OR the L0 perf dump asks for it. Both only READ the query result;
+	// neither alters any draw, so the rendered frame is byte-identical whether or
+	// not the query runs.
+	return HaveTimerQuery()
+		&& ( ReadCvar( s_cvarTiming, 0.0f ) != 0.0f || ReadCvar( s_cvarPerfDump, 0.0f ) != 0.0f );
 }
 
 void EnsureTimer()
@@ -512,8 +518,10 @@ void SkyComposeRegisterCvars()
 		s_cvarDither = gEngfuncs.pfnRegisterVariable( "csz_dither", "0", FCVAR_CLIENTDLL );
 	if( s_cvarTiming == NULL )
 		s_cvarTiming = gEngfuncs.pfnRegisterVariable( "csz_hdr_timing", "0", FCVAR_CLIENTDLL );
+	if( s_cvarPerfDump == NULL )
+		s_cvarPerfDump = gEngfuncs.pfnRegisterVariable( "csz_perf_dump", "0", FCVAR_CLIENTDLL );
 
-	CSZ_LogDev( "compose", "HDR cvars registered (csz_hdr/exposure/tonemap/encode/dither/hdr_timing)" );
+	CSZ_LogDev( "compose", "HDR cvars registered (csz_hdr/exposure/tonemap/encode/dither/hdr_timing/perf_dump)" );
 }
 
 bool SkyComposeActive()
@@ -727,6 +735,13 @@ void SkyComposeResolve( const struct ref_viewpass_s *rvp, const float clearRgba[
 double SkyComposeLastGpuMs()
 {
 	return s_timer.lastMs;
+}
+
+// L0 observability: is csz_perf_dump armed this frame? Read live so an in-session
+// toggle takes effect next frame, matching the rest of the cvar reads here.
+bool SkyComposePerfDumpEnabled()
+{
+	return ReadCvar( s_cvarPerfDump, 0.0f ) != 0.0f;
 }
 
 // =============================================================================
