@@ -64,16 +64,20 @@ void main()
 )GLSL";
 
 // -----------------------------------------------------------------------------
-// FS -- soft additive mote. Round radial falloff for the sprite; camera-side
+// FS -- soft, fine, OCCLUSIVE mote. Round radial falloff for the sprite; camera-side
 // occlusion + soft intersection via the SAMPLED scene depth (never tested/written
 // -- same safe contract as the L6a cone, avoids a depth read/test feedback loop on
-// the shared depth attachment). Output is linear-HDR radiance ADDED (kBlendAddPremul)
-// into the scene before tonemap; additive can only brighten.
+// the shared depth attachment). rgb = linear-HDR radiance the mote ADDS (catches the
+// light); alpha = an occlusion coverage = u_occlusion * fall * soft that, under
+// kBlendPremulOver (ONE, ONE_MINUS_SRC_ALPHA), ATTENUATES the beam behind the mote --
+// so fine airborne dust both glints AND eats the flashlight light a touch (the USER
+// ask: 明显看出遮挡了一点点点的手电筒光). u_occlusion 0 -> byte-for-byte the old pure-additive mote.
 // -----------------------------------------------------------------------------
 static const char kDustFsBody[] = R"GLSL(
 uniform sampler2D u_depthTex;   // scene depth (raw, compare-mode NONE); sky unit
 uniform vec2  u_viewSize;       // full-res scene size in pixels (gl_FragCoord basis)
 uniform float u_fade;           // soft depth-fade band (world units)
+uniform float u_occlusion;      // per-mote occlusion coverage scale (csz_dust_occlusion)
 in vec2  vUv;
 in vec3  vColor;
 in float vViewZ;
@@ -93,6 +97,8 @@ void main()
 		discard;                                  // wholly behind geometry
 	float soft = clamp( ( sceneZ - vViewZ ) / max( u_fade, 1.0 ), 0.0, 1.0 );
 
-	fragColor = vec4( vColor * ( fall * soft ), 1.0 );
+	float cover = fall * soft;
+	float occ   = clamp( u_occlusion * cover, 0.0, 1.0 );  // extinction coverage of THIS mote
+	fragColor = vec4( vColor * cover, occ );
 }
 )GLSL";

@@ -86,6 +86,8 @@ bool s_haveView;
 cvar_t *s_cvarTestLight;	// csz_testlight (default 0: opt-in M1/M2 test fixture, off by default)
 cvar_t *s_cvarShadow;		// csz_light_shadow (B-class quality seam, default 1)
 cvar_t *s_cvarFlashlightReal;	// csz_flashlight_real (default 1: feed the table from live player flashlights)
+cvar_t *s_cvarV3;		// csz_flashlight_v3 (owned by RegisterLightingCommands); the local/non-local
+bool   s_lookedV3;		// split master. Fetched lazily (mirrors the cone + fog-volume v3 latch).
 
 // L6c dev-override latch. The csz_flashlight_test fixture and the real per-player
 // feed both write the SAME state table with owner keys that overlap (test uses
@@ -652,6 +654,21 @@ void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, 
 
 	SyncDemoLight();
 
+	// Local/non-local split (csz_flashlight_v3, default 1, fetched lazily). The crisp
+	// DIRECT lit pool (the 圈) is the local first-person flashlight illuminating where the
+	// viewer aims; OTHER players' beams must read as a clean volumetric beam (光柱, the
+	// L6a world cone) ONLY -- their projected direct pool floats as a weird circle in
+	// third person (the USER ask: 只看光柱、不要圈). So when v3 is on, the direct pass below
+	// runs for isLocal beams only; non-local beams get their air volume from the world
+	// cone (csz_light_cone, which conversely skips the local beam). v3 0 -> legacy: every
+	// non-culled spot draws its direct pool (byte-for-byte pre-split A/B).
+	if( !s_lookedV3 )
+	{
+		s_lookedV3 = true;
+		s_cvarV3 = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_v3" );
+	}
+	bool v3 = ( s_cvarV3 == NULL ) ? true : ( s_cvarV3->value >= 0.5f );
+
 	float now = ClientTime();
 	int active = 0;
 	int drawn = 0;
@@ -679,6 +696,12 @@ void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, 
 		// cheap is shadowless automatically (the shadow pass skipped it, so
 		// shadowTexSlot stays 0 and BuildSpotParams yields a shadowless light).
 		if( light->budgetTier == kBudgetCull )
+			continue;
+
+		// Local/non-local split: under v3, only the local first-person beam paints a
+		// direct lit pool (圈). Non-local beams are beam-only (光柱 via the world cone),
+		// so skip their direct surface pool here -- it is the stray third-person circle.
+		if( v3 && !light->desc.isLocal )
 			continue;
 
 		SpotLightParams params;

@@ -221,6 +221,17 @@ void SetBlend( BlendMode mode )
 		glEnable( GL_BLEND );
 		glBlendFunc( GL_ONE, GL_ONE );
 		break;
+	case kBlendPremulOver:
+		// Premultiplied "over". Source RGB is premultiplied radiance (added as-is),
+		// source ALPHA is an occlusion coverage that attenuates the destination:
+		// dstRGB = srcRGB + dstRGB*(1-srcA). Same factors apply to alpha, but the HDR
+		// resolve samples only .rgb (csz_sky_compose_shaders.inl texelFetch(...).rgb),
+		// so the modified dst alpha is don't-care downstream. The blend equation stays
+		// at GL_FUNC_ADD (the GL default, never changed elsewhere). Used by L7 dust so
+		// fine motes both catch the light AND slightly occlude the beam behind them.
+		glEnable( GL_BLEND );
+		glBlendFunc( GL_ONE, GL_ONE_MINUS_SRC_ALPHA );
+		break;
 	}
 
 	s_state.blend = (int)mode;

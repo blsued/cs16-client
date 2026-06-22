@@ -91,7 +91,10 @@ const float kScatterHg   = 0.60f;
 const float kHgG         = 0.60f;
 
 const float kNearSkip    = 8.0f;   // ignore motes basically at the muzzle (axial < this)
-const float kCullEps     = 0.0008f;// luminance below this = unlit -> not simmed/drawn
+const float kCullEps     = 0.0004f;// luminance below this = unlit -> not simmed/drawn. Lower
+                                   // than the pre-refinement 0.0008 so the now-finer/dimmer
+                                   // motes still populate a believable haze instead of thinning
+                                   // out to sparse dots at the cone edges.
 const float kConeGain    = 3.0f;   // cone radiance scale (folded with csz_dust_intensity)
 const float kMoonGain    = 3.0f;   // moon-shaft radiance scale
 const float kMoonFrac    = 0.06f;  // moon-shaft: stable-ID stochastic density (no moon shadow map ->
@@ -104,9 +107,10 @@ const float kFadeBand    = 16.0f;  // soft-particle depth-fade band (world units
 
 // --- cvars (read live each frame) --------------------------------------------
 cvar_t *s_cvarDust;        // csz_dust            default "1": master (0 = no dust, clean A/B)
-cvar_t *s_cvarCount;       // csz_dust_count      default "3000": active pool size
+cvar_t *s_cvarCount;       // csz_dust_count      default "4096": active pool size (fine dense haze)
 cvar_t *s_cvarIntensity;   // csz_dust_intensity  default "1.0": radiance scale (dev tuning)
-cvar_t *s_cvarSize;        // csz_dust_size       default "3.0": mote world half-size
+cvar_t *s_cvarSize;        // csz_dust_size       default "1.0": mote world half-size (fine specks)
+cvar_t *s_cvarOcclusion;   // csz_dust_occlusion  default "0.20": per-mote extinction coverage (0 = pure additive)
 cvar_t *s_cvarRange;       // csz_flashlight_range (FogVolume-owned): cone length cap + pool box. Lazy.
 bool    s_lookedRange;
 
@@ -130,7 +134,7 @@ struct DustGpu
 	bool   built;
 	bool   failedThisGen;
 
-	int uMatViewProj, uMatView, uDepthTex, uViewSize, uFade, uZNear, uZFar;
+	int uMatViewProj, uMatView, uDepthTex, uViewSize, uFade, uZNear, uZFar, uOcclusion;
 };
 DustGpu s_gpu;
 
@@ -228,6 +232,7 @@ bool EnsureBuilt()
 	s_gpu.uFade        = UniformLoc( s_gpu.prog, "u_fade" );
 	s_gpu.uZNear       = UniformLoc( s_gpu.prog, "u_zNear" );
 	s_gpu.uZFar        = UniformLoc( s_gpu.prog, "u_zFar" );
+	s_gpu.uOcclusion   = UniformLoc( s_gpu.prog, "u_occlusion" );
 
 	glGenVertexArrays( 1, &s_gpu.vao );
 	BindVao( s_gpu.vao );
@@ -272,13 +277,24 @@ void DustRegisterCvars()
 	if( s_cvarDust == NULL )
 		s_cvarDust = gEngfuncs.pfnRegisterVariable( "csz_dust", "1", FCVAR_CLIENTDLL );
 	if( s_cvarCount == NULL )
-		s_cvarCount = gEngfuncs.pfnRegisterVariable( "csz_dust_count", "3000", FCVAR_CLIENTDLL );
+		// Fine dust reads as a dense haze, not sparse dots: fill the whole pool. The CPU
+		// pool walk is cheap scalar work and the GPU only ever draws the lit prefix, so
+		// 4096 fine motes stay far inside the L7 perf contract (smaller motes = fewer frags).
+		s_cvarCount = gEngfuncs.pfnRegisterVariable( "csz_dust_count", "4096", FCVAR_CLIENTDLL );
 	if( s_cvarIntensity == NULL )
 		s_cvarIntensity = gEngfuncs.pfnRegisterVariable( "csz_dust_intensity", "1.0", FCVAR_CLIENTDLL );
 	if( s_cvarSize == NULL )
-		s_cvarSize = gEngfuncs.pfnRegisterVariable( "csz_dust_size", "3.0", FCVAR_CLIENTDLL );
+		// Fine specks (was 3.0 = glowing balls/bokeh -> "不像灰尘"). 1.0 half-size reads as
+		// airborne motes; per-mote jitter (0.6..1.4x) keeps them varied. Live-tunable 0.6..1.2.
+		s_cvarSize = gEngfuncs.pfnRegisterVariable( "csz_dust_size", "1.0", FCVAR_CLIENTDLL );
+	if( s_cvarOcclusion == NULL )
+		// Per-mote extinction coverage. Under kBlendPremulOver each lit mote dims the beam
+		// behind it by occlusion*coverage while still adding its own glint, so the flashlight
+		// light reads as a touch eaten/scattered by the dust (the USER ask). 0.20 = subtle but
+		// perceptible; 0 = byte-for-byte the old pure-additive mote (clean A/B). Live-tunable.
+		s_cvarOcclusion = gEngfuncs.pfnRegisterVariable( "csz_dust_occlusion", "0.20", FCVAR_CLIENTDLL );
 
-	CSZ_LogDev( "dust", "cvars registered (csz_dust/_count/_intensity/_size)" );
+	CSZ_LogDev( "dust", "cvars registered (csz_dust/_count/_intensity/_size/_occlusion)" );
 }
 
 void DustRender( const ViewSetup &view )
@@ -299,14 +315,17 @@ void DustRender( const ViewSetup &view )
 	if( !EnsureBuilt() )
 		return;
 
-	int count = (int)( ReadCvar( s_cvarCount, 3000.0f ) + 0.5f );
+	int count = (int)( ReadCvar( s_cvarCount, 4096.0f ) + 0.5f );
 	if( count < 0 )        count = 0;
 	if( count > kMaxDust ) count = kMaxDust;
 	if( count == 0 )
 		return;
 
 	const float intensity = ReadCvar( s_cvarIntensity, 1.0f );
-	const float moteSize  = ReadCvar( s_cvarSize, 3.0f );
+	const float moteSize  = ReadCvar( s_cvarSize, 1.0f );
+	float occlusion = ReadCvar( s_cvarOcclusion, 0.20f );
+	if( occlusion < 0.0f ) occlusion = 0.0f;
+	if( occlusion > 1.0f ) occlusion = 1.0f;
 
 	if( !s_lookedRange )
 	{
@@ -513,7 +532,11 @@ void DustRender( const ViewSetup &view )
 		glViewport( view.viewport[0], view.viewport[1], view.viewport[2], view.viewport[3] );
 		SetDepthTest( false );
 		SetDepthWrite( false );
-		SetBlend( kBlendAddPremul );
+		// Premultiplied "over": rgb adds the mote's glint, alpha (=occlusion coverage)
+		// attenuates the beam behind it. With csz_dust_occlusion 0 the FS emits alpha 0,
+		// so ONE_MINUS_SRC_ALPHA == 1 and this reduces EXACTLY to the old ONE,ONE additive
+		// (byte-for-byte A/B against the pre-refinement pure-additive dust).
+		SetBlend( kBlendPremulOver );
 		SetCull( false );
 
 		UseProgram( s_gpu.prog.program );
@@ -538,6 +561,7 @@ void DustRender( const ViewSetup &view )
 		if( s_gpu.uFade >= 0 )        glUniform1f( s_gpu.uFade, kFadeBand );
 		if( s_gpu.uZNear >= 0 )       glUniform1f( s_gpu.uZNear, view.zNear );
 		if( s_gpu.uZFar >= 0 )        glUniform1f( s_gpu.uZFar, view.zFar );
+		if( s_gpu.uOcclusion >= 0 )   glUniform1f( s_gpu.uOcclusion, occlusion );
 
 		glDrawArrays( GL_TRIANGLES, 0, litCount * kVertsPerQuad );
 
