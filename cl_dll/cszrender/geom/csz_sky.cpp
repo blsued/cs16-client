@@ -89,6 +89,7 @@ cvar_t *s_bloodMoonCvar;	// csz_bloodmoon: 0 = OFF (default), != 0 = enable the 
 cvar_t *s_skyDebugCvar;	// csz_sky_debug: 0 = OFF (default); != 0 = csz_renderer dumps per-phase ambience once/sec (disposable observability hook)
 cvar_t *s_moonPhaseCvar;	// csz_moon_phase (registered by C3 csz_sunmoon.cpp): looked up here for Option II phase-scaled moonlight; single source of truth shared with the disc shader
 cvar_t *s_moonlightCvar;	// csz_moonlight: USER-tunable multiplier on the NIGHT moonlight intensity ONLY (default 1.3 = "one notch" stronger per 2026-06-19 real-machine feedback). Scales moonLit, which is already 0 except mid-night, so day/dusk/round-start identity is preserved.
+cvar_t *s_moonlightV2Cvar;	// csz_moonlight_v2 (L2): OPT-IN photometric phase response for the surface moonlight. 0 (default) = legacy LINEAR illuminated fraction (approved look, partial phases unchanged); >0 = exponent on the lit fraction so partial phases dim photometrically (e.g. 3.0 -> half-moon ~0.125 instead of 0.5). Full moon (frac==1) and legacy csz_moon_phase=-1 stay 1.0 at any exponent, so the APPROVED full-moon look is byte-identical regardless of this cvar.
 
 #if defined( CSZ_DEV_TOOLS )
 cvar_t *s_fullscreenCvar;	// csz_sky_fullscreen: dev overlay, draw the sky over the whole frame
@@ -186,6 +187,13 @@ void SkyRenderer::RegisterDevCvars()
 	// Always registered (not dev-only), same pattern as csz_sky_phase above.
 	if( s_moonlightCvar == NULL )
 		s_moonlightCvar = gEngfuncs.pfnRegisterVariable( "csz_moonlight", "1.3", FCVAR_CLIENTDLL );
+
+	// L2 OPT-IN photometric phase response (csz_moonlight_v2). Default "0" = OFF =
+	// legacy linear illuminated fraction, so the approved look (full moon AND current
+	// partial phases) is unchanged. Set >0 to make partial moons dim photometrically
+	// (~lit^value). Registered like csz_moonlight; A/B with "1" vs "0".
+	if( s_moonlightV2Cvar == NULL )
+		s_moonlightV2Cvar = gEngfuncs.pfnRegisterVariable( "csz_moonlight_v2", "0", FCVAR_CLIENTDLL );
 
 #if defined( CSZ_DEV_TOOLS )
 	gEngfuncs.pfnAddCommand( "csz_devsun", DevSunCommand );	// mirror csz_devmoon (csz_fog.cpp)
@@ -436,6 +444,22 @@ void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 	// disc shows the matching phase from the same cvar; Chunk C layers indoor
 	// occlusion on top of this published moonlight.
 	float moonLitFrac = MoonLitFraction();
+	// L2 OPT-IN photometric phase response: by default (csz_moonlight_v2 0) the
+	// surface moonlight uses the LINEAR illuminated fraction above (half-moon -> 0.5),
+	// which is geometrically correct but photometrically too bright for partial phases
+	// (a real half-moon delivers ~0.1 of full-moon ground illuminance). When the cvar
+	// is >0 the fraction is raised to that exponent (~lit^p), so partial moons dim
+	// realistically. Full moon (frac==1) and the legacy always-full moon (frac==1)
+	// map to 1.0 for ANY exponent, so the APPROVED full-moon look is byte-identical;
+	// only NON-default partial phases change, and only when the user opts in.
+	{
+		float v2 = ( s_moonlightV2Cvar != NULL ) ? s_moonlightV2Cvar->value : 0.0f;
+		if( v2 > 0.0f )
+		{
+			if( v2 > 8.0f )  v2 = 8.0f;	// clamp to a sane band CPU-side
+			moonLitFrac = powf( moonLitFrac, v2 );
+		}
+	}
 	if( moonLitFrac < 0.25f )
 		moonLitFrac = 0.25f;
 	moonLit *= moonLitFrac;
@@ -451,6 +475,17 @@ void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 	if( moonlightMul < 0.0f )  moonlightMul = 0.0f;
 	if( moonlightMul > 4.0f )  moonlightMul = 4.0f;
 	moonLit *= moonlightMul;
+
+	// L2 cloud-cover dimmer hook (for L3). amb.cloudDim is 1.0 on every L2 path
+	// (AmbienceNeutral default, no driver yet) -> *1.0 is IEEE-exact identity, so the
+	// approved look is byte-for-byte unchanged. L3 sets it <1.0 to attenuate moonlight
+	// under cloud. Applied to moonLit ONLY (the moon directional + the L2 channels
+	// derived from it below): the warm sun term, day-for-night tint, golden round-end
+	// keyframe and indoor occlusion are all downstream/separate and untouched.
+	float cloudDim = amb.cloudDim;
+	if( cloudDim < 0.0f )  cloudDim = 0.0f;
+	if( cloudDim > 1.0f )  cloudDim = 1.0f;
+	moonLit *= cloudDim;
 
 	const float moonRGB[3] = { 0.54f, 0.64f, 0.95f };	// cool (slightly brightened; blue also lives in the tint)
 	const float sunRGB[3] = { 1.00f, 0.78f, 0.50f };	// warm
@@ -483,6 +518,21 @@ void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 	amb.moonlightColor[0] = lmColor[0];
 	amb.moonlightColor[1] = lmColor[1];
 	amb.moonlightColor[2] = lmColor[2];
+
+	// --- L2 exposed moon channels (sky-base D L2). The surface pass keeps consuming
+	// the BLENDED moonlightColor above (no surface render change); these isolate the
+	// distinct moon channels so L3 (cloud-dim) / L4 (light-shafts) drive each without
+	// the "one scalar -> ground black, air bright" coupling. moonLit here already
+	// carries the phase response (csz_moonlight_v2), csz_moonlight gain and cloudDim,
+	// so a single knob upstream propagates coherently. NOT read by any current shader
+	// -> pure exposure -> the approved look is byte-identical. ---
+	amb.moonSurfaceDirect[0] = moonRGB[0] * moonLit;   // moon-only premul surface directional
+	amb.moonSurfaceDirect[1] = moonRGB[1] * moonLit;
+	amb.moonSurfaceDirect[2] = moonRGB[2] * moonLit;
+	amb.moonFogInScatter[0] = moonRGB[0];              // dedicated in-scatter color (unit-ish, NOT premul) for L4
+	amb.moonFogInScatter[1] = moonRGB[1];
+	amb.moonFogInScatter[2] = moonRGB[2];
+	amb.moonFogInScatterIntensity = moonLit;           // strength; 0 unless the moon is meaningfully up
 
 	// --- Informational moon-object fields (the sky FS computes its own body
 	// positions from phase, so these are parity only). Moon up = above horizon. ---

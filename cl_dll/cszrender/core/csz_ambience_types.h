@@ -64,6 +64,28 @@ struct AmbienceParams
 	bool  moonlightEnabled;
 	float moonlightDir[3];  // surface -> moon (shader L vector, constant)
 	float moonlightColor[3];
+	// --- L2 moonlight light-model channels (sky-base D layer L2). PublishLighting
+	// SEPARATES the single blended moonlightColor into the three physically distinct
+	// channels a moonlit night actually has, so the downstream layers can drive each
+	// independently WITHOUT the "one scalar dims everything -> ground black / air
+	// bright" coupling. These are PURE EXPOSURE: no existing shader reads them, so at
+	// every default they are computed-but-unconsumed and the approved full-moon look
+	// is byte-identical. Premultiplied/linear, same convention as moonlightColor.
+	//   * moonSurfaceDirect  = the MOON-ONLY component of the surface N.L directional
+	//     (moonRGB * moonLit, after cloudDim). The surface pass still feeds off the
+	//     blended moonlightColor above; this isolates the moon term for L3/L4 reasoning.
+	//   * moonFogInScatter / *Intensity = a DEDICATED in-scatter channel for L4
+	//     (moonlight Tyndall light-shafts / fog in-scatter), decoupled from the
+	//     surface-coupled u_sunColor so L4 can brighten the air without touching ground.
+	float moonSurfaceDirect[3];     // moon-only premultiplied surface directional (exposure)
+	float moonFogInScatter[3];      // moon in-scatter color for L4 fog/light-shafts (unit-ish, NOT premul)
+	float moonFogInScatterIntensity;// scalar strength for moonFogInScatter (0 = no moon in-scatter)
+	// L3 cloud-cover dimmer on the MOON light (directional + exposed channels). 1.0 =
+	// clear sky = IEEE-exact identity (the only value L2 ever produces, since no L3
+	// driver exists yet). L3 sets <1.0 to attenuate moonlight under cloud cover; the
+	// publisher applies it to moonLit so surface-direct, the blended directional, and
+	// the exposed channels all dim coherently from one knob. Sun term is untouched.
+	float cloudDim;
 	// --- Analytic base fog (fog M1 Step 2, spec 3.6/4.3). Extends the legacy
 	// exp2 fog with exponential height falloff, a directional sun/moon in-scatter
 	// glow, and the server-controlled black-fog reveal floor. ---
@@ -82,6 +104,7 @@ inline AmbienceParams AmbienceNeutral()
 	p.tint[1] = 1.0f;
 	p.tint[2] = 1.0f;
 	p.maxOpacity = 1.0f;	// no reveal floor by default: fog may fully occlude (env look unchanged)
+	p.cloudDim = 1.0f;	// L2: clear sky = no moonlight dimming (IEEE-exact identity until L3 drives it)
 	return p;
 }
 // Legacy exp2 fog rendered 2^(-density*d); the analytic base fog renders the
@@ -108,5 +131,18 @@ inline void CszFogUniformVecs( const AmbienceParams &amb, float fogVec[4], float
 	fogParams[1] = amb.sunGlow;
 	fogParams[2] = amb.maxOpacity > 0.0f ? amb.maxOpacity : 1.0f;	// 0 -> 1 (never clamp fog to fully transparent)
 	fogParams[3] = 0.0f;
+}
+// L2 downstream accessor: the dedicated moon in-scatter feed for L4 (light-shafts /
+// fog in-scatter). One chokepoint so every future consumer reads the SAME channel
+// instead of re-deriving from the surface-coupled moonlightColor. outColor = the
+// moon in-scatter tint (linear, NOT premultiplied); returns the scalar intensity
+// (0 when the moon is not contributing). Multiply outColor by the return value for
+// a premultiplied feed matching the moonlightColor convention.
+inline float CszMoonInScatter( const AmbienceParams &amb, float outColor[3] )
+{
+	outColor[0] = amb.moonFogInScatter[0];
+	outColor[1] = amb.moonFogInScatter[1];
+	outColor[2] = amb.moonFogInScatter[2];
+	return amb.moonFogInScatterIntensity;
 }
 }
