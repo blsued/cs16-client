@@ -73,6 +73,7 @@ struct PassLocs
 	int uMoonInScatter, uShaftMask, uMoonShaft;			// fog M1 L4 moon Tyndall air-glow (base program only; identity until fed)
 	int uLightOrigin, uLightDir, uLightColor;			// lit program only
 	int uLightRadius, uCosInner, uCosOuter, uMatShadow, uHasShadow;	// lit program only
+	int uV3, uEdgeExp, uHotspotGain, uHotspotSharp, uDirectGain;	// L5R crisp profile (lit program only)
 };
 
 struct StudioState
@@ -125,6 +126,11 @@ void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 	out.uCosOuter = UniformLoc( prog, "u_cosOuter" );
 	out.uMatShadow = UniformLoc( prog, "u_matShadow" );
 	out.uHasShadow = UniformLoc( prog, "u_hasShadow" );
+	out.uV3 = UniformLoc( prog, "u_v3" );				// L5R crisp profile (lit only; -1 on base)
+	out.uEdgeExp = UniformLoc( prog, "u_edgeExp" );
+	out.uHotspotGain = UniformLoc( prog, "u_hotspotGain" );
+	out.uHotspotSharp = UniformLoc( prog, "u_hotspotSharp" );
+	out.uDirectGain = UniformLoc( prog, "u_directGain" );
 }
 
 void EnsureShader()
@@ -555,6 +561,12 @@ void BeginStudioLitPass( const ViewSetup &view, const SpotLightParams &light )
 	glUniform1f( locs.uCosOuter, light.cosOuter );
 	glUniformMatrix4fv( locs.uMatShadow, 1, GL_FALSE, light.matShadow.m );
 	glUniform1i( locs.uHasShadow, ( light.shadowTexSlot != 0 ) ? 1 : 0 );
+	// L5R crisp direct profile (matches the world lit pass).
+	glUniform1f( locs.uV3, light.v3 );
+	glUniform1f( locs.uEdgeExp, light.edgeExp );
+	glUniform1f( locs.uHotspotGain, light.hotspotGain );
+	glUniform1f( locs.uHotspotSharp, light.hotspotSharp );
+	glUniform1f( locs.uDirectGain, light.directGain );
 
 	if( light.shadowTexSlot != 0 )
 		BindTextureSlot( 2, light.shadowTexSlot );	// T7 depth map (T6: never taken)

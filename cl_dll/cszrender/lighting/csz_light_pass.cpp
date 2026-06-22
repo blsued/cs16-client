@@ -604,6 +604,17 @@ void RegisterLightingCommands()
 
 	LightBudgetRegisterCvars();	// L6b: csz_flashlight_max_full / _max_cheap
 
+	// L5R first-person "crisp redo" tunables. csz_flashlight_v3 is the master A/B switch
+	// (1 = new crisp analytic direct profile + compressed volume + dome fix; 0 = pre-L5R).
+	// Registered here (the direct lit-pass owner) so it exists at init before any frame;
+	// the registry (BuildSpotParams) + the volume modules read it by name. The direct
+	// profile knobs feed kWorldLitFs/kStudioLitFs via SpotLightParams.
+	gEngfuncs.pfnRegisterVariable( "csz_flashlight_v3", "1", FCVAR_CLIENTDLL );
+	gEngfuncs.pfnRegisterVariable( "csz_flashlight_edge", "2.5", FCVAR_CLIENTDLL );           // cone-edge exponent
+	gEngfuncs.pfnRegisterVariable( "csz_flashlight_hotspot", "1.4", FCVAR_CLIENTDLL );        // central hotspot gain
+	gEngfuncs.pfnRegisterVariable( "csz_flashlight_hotspot_sharp", "8.0", FCVAR_CLIENTDLL );  // hotspot tightness
+	gEngfuncs.pfnRegisterVariable( "csz_flashlight_direct_gain", "1.8", FCVAR_CLIENTDLL );    // direct-pool brightness
+
 	if( s_cvarTestLight == NULL )
 		s_cvarTestLight = gEngfuncs.pfnRegisterVariable( "csz_testlight", "0", FCVAR_CLIENTDLL );
 

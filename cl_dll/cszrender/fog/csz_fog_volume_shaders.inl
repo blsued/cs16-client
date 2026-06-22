@@ -80,6 +80,7 @@ uniform float u_intensity;             // shaft brightness scale
 uniform int   u_steps;                 // march sample count (legacy 4..32; v2 range-derived 6..16)
 uniform float u_marchFar;              // hard distance cap (world units); v2 = csz_flashlight_range
 uniform int   u_econserve;             // 1 = energy-conserving slice (v2); 0 = pre-L5 linear sum
+uniform float u_surfFade;              // L5R: surface-proximity fade band (world units); <=0 disables (legacy)
 out vec4 fragColor;
 
 // Interleaved-gradient-noise dither (no blue-noise texture asset for M1): breaks
@@ -175,7 +176,11 @@ void main()
 
 		float cosTheta = dot( rd, -L );           // forward-scatter angle
 		float phase = hgPhase( cosTheta, u_hgG );
-		float vis = atten * cone * shadow;
+		// L5R surface-proximity fade: the last samples before the marched surface (t -> tSurf)
+		// otherwise pile in-scatter into a bright shell exactly where the beam meets the floor
+		// (the "floor dome"). Fade them out over u_surfFade world units. <=0 disables (legacy).
+		float sFade = ( u_surfFade > 0.0 ) ? clamp( ( tSurf - t ) / u_surfFade, 0.0, 1.0 ) : 1.0;
+		float vis = atten * cone * shadow * sFade;
 
 		if( u_econserve != 0 )
 		{

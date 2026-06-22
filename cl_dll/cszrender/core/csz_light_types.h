@@ -48,5 +48,12 @@ struct SpotLightParams
 	float cosOuter;         // cone cutoff (cos of half angle)
 	Mat4 matShadow;         // bias*proj*view; valid only when shadowTexSlot != 0
 	int shadowTexSlot;      // engine texture slot for GL_Bind; 0 = shadowless
+	// L5R crisp first-person direct profile (csz_flashlight_v3). Filled by
+	// BuildSpotParams from the flashlight cvars; v3<0.5 -> legacy linear cone (A/B).
+	float v3;               // 1 = analytic crisp profile, 0 = legacy linear cone
+	float edgeExp;          // cone-edge sharpening exponent (crisper pool boundary)
+	float hotspotGain;      // central hotspot peak gain (axis brightness boost)
+	float hotspotSharp;     // hotspot tightness (higher = smaller bright core)
+	float directGain;       // direct light-pool brightness multiplier
 };
 }

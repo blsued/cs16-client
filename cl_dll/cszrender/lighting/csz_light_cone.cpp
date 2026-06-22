@@ -81,6 +81,8 @@ cvar_t *s_cvarTp;          // csz_flashlight_tp           default "1": world bea
 cvar_t *s_cvarTpIntensity; // csz_flashlight_tp_intensity default "1.5": beam brightness (dev tuning)
 cvar_t *s_cvarRange;       // csz_flashlight_range (owned by FogVolume); caps beam length. Fetched lazily.
 bool    s_lookedRange;
+cvar_t *s_cvarV3;          // csz_flashlight_v3 (owned by light_pass); L5R master A/B. Fetched lazily.
+bool    s_lookedV3;
 
 // --- GPU resources (generation-keyed; forget on a foreign context) -----------
 struct ConeGpu
@@ -286,7 +288,18 @@ void LightConeRender( const ViewSetup &view )
 		s_cvarRange = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_range" );
 	}
 	float range = ReadCvar( s_cvarRange, 800.0f );
-	float intensity = ReadCvar( s_cvarTpIntensity, 1.5f );
+	float intensity = ReadCvar( s_cvarTpIntensity, 3.0f );
+
+	// L5R master switch: when on, the local first-person beam's air volume is rendered by the
+	// L5 fog march (shadowed, view-aligned), so its redundant + dome-prone world cone is
+	// skipped below. Non-local (3rd-person) world beams are UNCHANGED (kept at full intensity
+	// + legacy profile) -- the L6/L6a/L6b third-person cone is preserved exactly.
+	if( !s_lookedV3 )
+	{
+		s_lookedV3 = true;
+		s_cvarV3 = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_v3" );
+	}
+	bool v3 = ( ReadCvar( s_cvarV3, 1.0f ) >= 0.5f );
 
 	float fViewSize[2] = { (float)( view.viewport[0] + view.viewport[2] ),
 	                       (float)( view.viewport[1] + view.viewport[3] ) };
@@ -335,6 +348,12 @@ void LightConeRender( const ViewSetup &view )
 			continue;
 		if( light->budgetTier == kBudgetCull )
 			continue;	// over budget or off-screen: no air volume
+
+		// L5R: the local first-person beam's air volume is rendered by the L5 fog march
+		// (shadowed, view-aligned), so skip its redundant + dome-prone world cone here.
+		// Non-local (3rd-person) cones still draw -- L6 third-person world beams are kept.
+		if( v3 && light->desc.isLocal )
+			continue;
 
 		int steps = ( light->budgetTier == kBudgetCheap ) ? cheapSteps : kConeSteps;
 

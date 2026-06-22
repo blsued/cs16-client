@@ -106,6 +106,7 @@ struct WorldState
 	int litULightOrigin, litULightDir, litULightColor;
 	int litULightRadius, litUCosInner, litUCosOuter;
 	int litUMatShadow, litUHasShadow;
+	int litUV3, litUEdgeExp, litUHotspotGain, litUHotspotSharp, litUDirectGain;	// L5R crisp profile
 	ShaderProgram depthProgram;	// shadow map depth pass (T7)
 	int depthUViewProj;
 
@@ -839,6 +840,11 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.litUCosOuter = UniformLoc( s_world.litProgram, "u_cosOuter" );
 	s_world.litUMatShadow = UniformLoc( s_world.litProgram, "u_matShadow" );
 	s_world.litUHasShadow = UniformLoc( s_world.litProgram, "u_hasShadow" );
+	s_world.litUV3 = UniformLoc( s_world.litProgram, "u_v3" );			// L5R crisp profile
+	s_world.litUEdgeExp = UniformLoc( s_world.litProgram, "u_edgeExp" );
+	s_world.litUHotspotGain = UniformLoc( s_world.litProgram, "u_hotspotGain" );
+	s_world.litUHotspotSharp = UniformLoc( s_world.litProgram, "u_hotspotSharp" );
+	s_world.litUDirectGain = UniformLoc( s_world.litProgram, "u_directGain" );
 
 	UseProgram( s_world.litProgram.program );
 	glUniform1i( UniformLoc( s_world.litProgram, "u_texDiffuse" ), 0 );
@@ -1439,6 +1445,12 @@ void WorldRenderer::DrawLitAdditive( const ViewSetup &view, const SpotLightParam
 	glUniform1f( s_world.litUCosOuter, light.cosOuter );
 	glUniformMatrix4fv( s_world.litUMatShadow, 1, GL_FALSE, light.matShadow.m );
 	glUniform1i( s_world.litUHasShadow, ( light.shadowTexSlot != 0 ) ? 1 : 0 );
+	// L5R crisp direct profile (locs are -1 when absent -> glUniform on -1 is a safe no-op).
+	glUniform1f( s_world.litUV3, light.v3 );
+	glUniform1f( s_world.litUEdgeExp, light.edgeExp );
+	glUniform1f( s_world.litUHotspotGain, light.hotspotGain );
+	glUniform1f( s_world.litUHotspotSharp, light.hotspotSharp );
+	glUniform1f( s_world.litUDirectGain, light.directGain );
 
 	if( light.shadowTexSlot != 0 )
 		BindTextureSlot( 2, light.shadowTexSlot );	// T7 depth map (T6: never taken)

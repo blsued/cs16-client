@@ -240,6 +240,13 @@ uniform float u_cosOuter;
 uniform mat4 u_matShadow;
 uniform sampler2DShadow u_shadowMap;  // unit 2 (bound only when u_hasShadow != 0)
 uniform int u_hasShadow;
+// L5R crisp direct profile (csz_flashlight_v3) -- mirrors the world lit FS so studio
+// meshes (players, viewmodel-adjacent props) catch the same pool + hotspot. v3=0 -> legacy.
+uniform float u_v3;
+uniform float u_edgeExp;
+uniform float u_hotspotGain;
+uniform float u_hotspotSharp;
+uniform float u_directGain;
 out vec4 fragColor;
 void main()
 {
@@ -251,12 +258,19 @@ void main()
 	L /= max( d, 1e-4 );
 	float atten = clamp( 1.0 - d / u_lightRadius, 0.0, 1.0 );
 	atten *= atten;
-	float cone = clamp(( dot( -L, u_lightDir ) - u_cosOuter ) / max( u_cosInner - u_cosOuter, 1e-4 ), 0.0, 1.0 );
+	float cosAx = dot( -L, u_lightDir );                 // 1 on the spot axis, falling outward
+	float coneLegacy = clamp(( cosAx - u_cosOuter ) / max( u_cosInner - u_cosOuter, 1e-4 ), 0.0, 1.0 );
+	// Crisp pool (sharpened cone band) + central hotspot measured from the axis (see world FS note).
+	float edge   = pow( smoothstep( u_cosOuter, u_cosInner, cosAx ), u_edgeExp );
+	float axial  = smoothstep( u_cosOuter, 1.0, cosAx );
+	float hotspot = 1.0 + u_hotspotGain * pow( axial, u_hotspotSharp );
+	float shaped = mix( coneLegacy, edge * hotspot, u_v3 );
+	float gain   = mix( 1.0, u_directGain, u_v3 );
 	float ndotl = max( dot( normalize( v_worldNormal ), L ), 0.0 );
 	float shadow = 1.0;
 	if( u_hasShadow != 0 )
 		shadow = textureProj( u_shadowMap, u_matShadow * vec4( v_worldPos, 1.0 ));
-	fragColor = vec4( base.rgb * u_lightColor * ( atten * cone * ndotl * shadow ), 1.0 );
+	fragColor = vec4( base.rgb * u_lightColor * ( atten * shaped * ndotl * shadow * gain ), 1.0 );
 }
 )GLSL";
 

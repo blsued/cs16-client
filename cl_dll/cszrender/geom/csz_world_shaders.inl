@@ -241,6 +241,12 @@ uniform float u_cosOuter;
 uniform mat4 u_matShadow;
 uniform sampler2DShadow u_shadowMap;  // unit 2 (bound only when u_hasShadow != 0)
 uniform int u_hasShadow;
+// L5R crisp direct profile (csz_flashlight_v3). v3=0 -> legacy linear cone (A/B).
+uniform float u_v3;              // 1 = analytic crisp profile, 0 = legacy linear cone
+uniform float u_edgeExp;         // cone-edge sharpening exponent
+uniform float u_hotspotGain;     // central hotspot peak gain
+uniform float u_hotspotSharp;    // hotspot tightness (higher = smaller bright core)
+uniform float u_directGain;      // direct light-pool brightness multiplier
 out vec4 fragColor;
 void main()
 {
@@ -252,12 +258,23 @@ void main()
 	L /= max( d, 1e-4 );
 	float atten = clamp( 1.0 - d / u_lightRadius, 0.0, 1.0 );
 	atten *= atten;
-	float cone = clamp(( dot( -L, u_lightDir ) - u_cosOuter ) / max( u_cosInner - u_cosOuter, 1e-4 ), 0.0, 1.0 );
+	float cosAx = dot( -L, u_lightDir );                 // 1 on the spot axis, falling outward
+	// Legacy linear cone (csz_flashlight_v3 0): the pre-L5R uniform-disc falloff, kept for A/B.
+	float coneLegacy = clamp(( cosAx - u_cosOuter ) / max( u_cosInner - u_cosOuter, 1e-4 ), 0.0, 1.0 );
+	// L5R analytic profile: a crisp pool (smoothstep cone band raised to edgeExp -> sharper
+	// boundary) PLUS a genuine central hotspot. The hotspot is measured from the AXIS over the
+	// whole cone (smoothstep cosOuter..1) -- NOT the cone band, which saturates to 1 across the
+	// inner cone and would make the "hotspot" cover the whole pool instead of peaking at center.
+	float edge   = pow( smoothstep( u_cosOuter, u_cosInner, cosAx ), u_edgeExp );
+	float axial  = smoothstep( u_cosOuter, 1.0, cosAx );                 // 1 at axis -> 0 at outer rim
+	float hotspot = 1.0 + u_hotspotGain * pow( axial, u_hotspotSharp );
+	float shaped = mix( coneLegacy, edge * hotspot, u_v3 );
+	float gain   = mix( 1.0, u_directGain, u_v3 );
 	float ndotl = max( dot( normalize( v_worldNormal ), L ), 0.0 );
 	float shadow = 1.0;
 	if( u_hasShadow != 0 )
 		shadow = textureProj( u_shadowMap, u_matShadow * vec4( v_worldPos, 1.0 ));
-	fragColor = vec4( base.rgb * u_lightColor * ( atten * cone * ndotl * shadow ), 1.0 );
+	fragColor = vec4( base.rgb * u_lightColor * ( atten * shaped * ndotl * shadow * gain ), 1.0 );
 }
 )GLSL";
 

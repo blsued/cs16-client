@@ -50,6 +50,22 @@ namespace
 
 const float kDegToRadHalf = 3.14159265358979323846f / 360.0f;	// degrees -> radians, halved
 
+// L5R direct-profile cvars (registered at init by RegisterLightingCommands). Looked up
+// lazily by name and re-fetched until non-NULL so registration order never latches a miss.
+cvar_t *s_v3, *s_edge, *s_hot, *s_hotSharp, *s_dgain;
+
+float ReadCvar( cvar_t *cv, float fallback )
+{
+	return ( cv != NULL ) ? cv->value : fallback;
+}
+
+cvar_t *GetCvarCached( cvar_t **slot, const char *name )
+{
+	if( *slot == NULL )
+		*slot = gEngfuncs.pfnGetCvarPointer( name );
+	return *slot;
+}
+
 // Slot storage lives here so the contract header stays member-free
 // (same pattern as WorldRenderer / LightmapAtlas).
 ActiveLight s_slots[LightRegistry::kMaxLights];
@@ -187,6 +203,15 @@ void LightRegistry::BuildSpotParams( const ActiveLight &light, SpotLightParams &
 
 	out.matShadow = light.matShadow;
 	out.shadowTexSlot = light.shadowTexSlot;	// T6: always 0 (shadowless)
+
+	// L5R direct profile (csz_flashlight_v3). Read from cvars so the world+studio lit
+	// shaders get the crisp analytic pool + central hotspot + direct gain; v3 0 -> the
+	// shaders fall back to the legacy linear cone for A/B (defaults match the cvar reg).
+	out.v3           = ( ReadCvar( GetCvarCached( &s_v3, "csz_flashlight_v3" ), 1.0f ) >= 0.5f ) ? 1.0f : 0.0f;
+	out.edgeExp      = ReadCvar( GetCvarCached( &s_edge,     "csz_flashlight_edge" ),          2.5f );
+	out.hotspotGain  = ReadCvar( GetCvarCached( &s_hot,      "csz_flashlight_hotspot" ),       1.4f );
+	out.hotspotSharp = ReadCvar( GetCvarCached( &s_hotSharp, "csz_flashlight_hotspot_sharp" ), 8.0f );
+	out.directGain   = ReadCvar( GetCvarCached( &s_dgain,    "csz_flashlight_direct_gain" ),   1.8f );
 }
 
 }
