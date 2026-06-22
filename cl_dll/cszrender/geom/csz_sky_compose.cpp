@@ -57,6 +57,8 @@ cvar_t *s_cvarExposure;   // csz_exposure   default "1.0"
 cvar_t *s_cvarTonemap;    // csz_tonemap    default "0" (identity); 1 = ACES filmic
 cvar_t *s_cvarEncode;     // csz_encode     default "0" (no OETF / display passthrough); 1 = sRGB OETF
 cvar_t *s_cvarDither;     // csz_dither     default "0" (byte-clean A/B); 1 = TPDF dither
+cvar_t *s_cvarHlRolloff;  // csz_highlight_rolloff default "1": identity-path overbright shoulder strength (0 = legacy/off A/B)
+cvar_t *s_cvarHlKnee;     // csz_highlight_knee   default "0.95": shoulder onset (maxRGB <= knee unchanged per-pixel)
 cvar_t *s_cvarTiming;     // csz_hdr_timing default "0"; 1 = log the GPU timer ms (Dev level)
 cvar_t *s_cvarPerfDump;   // csz_perf_dump  default "0" (L0 observability); 1 = orchestrator emits the [csz_perf] line AND forces the in-scene GPU timer query (passive: no draw change)
 
@@ -84,6 +86,7 @@ struct ResolveGpu
 	bool   built;
 
 	int uHdr, uViewOrigin, uExposure, uTonemap, uEncode, uDither;
+	int uHlRolloff, uHlKnee;
 };
 
 ResolveGpu s_resolve;
@@ -265,6 +268,8 @@ void BuildResolveProgram()
 	s_resolve.uTonemap    = UniformLoc( s_resolve.program, "u_tonemap" );
 	s_resolve.uEncode     = UniformLoc( s_resolve.program, "u_encode" );
 	s_resolve.uDither     = UniformLoc( s_resolve.program, "u_dither" );
+	s_resolve.uHlRolloff  = UniformLoc( s_resolve.program, "u_hlRolloff" );
+	s_resolve.uHlKnee     = UniformLoc( s_resolve.program, "u_hlKnee" );
 
 	s_resolve.built = true;
 	CSZ_LogDev( "compose", "HDR resolve program built (gpu gen %d)", s_resolve.gpuGeneration );
@@ -516,6 +521,12 @@ void SkyComposeRegisterCvars()
 		s_cvarEncode = gEngfuncs.pfnRegisterVariable( "csz_encode", "0", FCVAR_CLIENTDLL );
 	if( s_cvarDither == NULL )
 		s_cvarDither = gEngfuncs.pfnRegisterVariable( "csz_dither", "0", FCVAR_CLIENTDLL );
+	if( s_cvarHlRolloff == NULL )
+		// L-polish A: identity-path overbright shoulder. Default 1 (fix ON); set 0 for
+		// the legacy hard-clip A/B (every pixel returned exactly as pre-L-polish).
+		s_cvarHlRolloff = gEngfuncs.pfnRegisterVariable( "csz_highlight_rolloff", "1", FCVAR_CLIENTDLL );
+	if( s_cvarHlKnee == NULL )
+		s_cvarHlKnee = gEngfuncs.pfnRegisterVariable( "csz_highlight_knee", "0.95", FCVAR_CLIENTDLL );
 	if( s_cvarTiming == NULL )
 		s_cvarTiming = gEngfuncs.pfnRegisterVariable( "csz_hdr_timing", "0", FCVAR_CLIENTDLL );
 	if( s_cvarPerfDump == NULL )
@@ -687,6 +698,22 @@ void SkyComposeResolve( const struct ref_viewpass_s *rvp, const float clearRgba[
 		glUniform1i( s_resolve.uEncode, ( ReadCvar( s_cvarEncode, 0.0f ) != 0.0f ) ? 1 : 0 );
 	if( s_resolve.uDither >= 0 )
 		glUniform1i( s_resolve.uDither, ( ReadCvar( s_cvarDither, 0.0f ) != 0.0f ) ? 1 : 0 );
+	// L-polish A: identity-path overbright shoulder. Clamp rolloff to [0,1] (blend
+	// factor) and knee to (0,1) so a stray cvar value cannot break the shoulder math.
+	if( s_resolve.uHlRolloff >= 0 )
+	{
+		float roll = ReadCvar( s_cvarHlRolloff, 1.0f );
+		if( roll < 0.0f ) roll = 0.0f;
+		if( roll > 1.0f ) roll = 1.0f;
+		glUniform1f( s_resolve.uHlRolloff, roll );
+	}
+	if( s_resolve.uHlKnee >= 0 )
+	{
+		float knee = ReadCvar( s_cvarHlKnee, 0.95f );
+		if( knee < 0.0f ) knee = 0.0f;
+		if( knee > 0.999f ) knee = 0.999f;
+		glUniform1f( s_resolve.uHlKnee, knee );
+	}
 
 	glDrawArrays( GL_TRIANGLES, 0, 3 );
 

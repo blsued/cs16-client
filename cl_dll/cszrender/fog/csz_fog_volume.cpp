@@ -67,6 +67,8 @@ cvar_t *s_cvarV2;          // csz_flashlight_v2     default "1": L5 enhanced mar
 cvar_t *s_cvarRange;       // csz_flashlight_range  default "800": hard range cap (world units) bounding
 cvar_t *s_cvarV3;          // csz_flashlight_v3 (owned by light_pass); L5R master A/B. Fetched lazily.
 bool    s_lookedV3;
+cvar_t *s_cvarUpSmooth;    // csz_fog_upsample_smooth default "1": 1 = 5x5 gaussian spatial avg (smooth shaft), 0 = legacy 2x2 bilinear
+cvar_t *s_cvarUpSigma;     // csz_fog_upsample_sigma  default "1.5": gaussian spatial sigma (half-res texels) for the 5x5 path
 
 // L5R: the first-person march is the air-glow main act once the local world cone is dropped,
 // but it must NOT wash the surface direct pool. Default march_intensity 1.5 * 0.18 -> ~0.27,
@@ -106,6 +108,7 @@ struct VolGpu
 
 	// upsample uniforms
 	int uInscatter, uDepthTex, uFullSize, uHalfSize, uZNear, uZFar;
+	int uSmooth, uSmoothSigma;   // L-polish B: 5x5 gaussian spatial smoothing of the shaft
 };
 
 VolGpu s_gpu;
@@ -241,6 +244,8 @@ void BuildVolPrograms()
 	s_gpu.uHalfSize    = UniformLoc( s_gpu.upsample, "u_halfSize" );
 	s_gpu.uZNear       = UniformLoc( s_gpu.upsample, "u_zNear" );
 	s_gpu.uZFar        = UniformLoc( s_gpu.upsample, "u_zFar" );
+	s_gpu.uSmooth      = UniformLoc( s_gpu.upsample, "u_smooth" );
+	s_gpu.uSmoothSigma = UniformLoc( s_gpu.upsample, "u_smoothSigma" );
 
 	s_gpu.built = true;
 	CSZ_LogDev( "fogvol", "march + upsample programs built (gpu gen %d)", s_gpu.gpuGeneration );
@@ -294,8 +299,14 @@ void FogVolumeRegisterCvars()
 		// reserved as the L7 dust spawn-volume ceiling. Near-field default (the
 		// perf lever: an unlit far field costs nothing). Clamped to the light radius.
 		s_cvarRange = gEngfuncs.pfnRegisterVariable( "csz_flashlight_range", "800", FCVAR_CLIENTDLL );
+	if( s_cvarUpSmooth == NULL )
+		// L-polish B: smooth the half-res shaft. Default 1 (fix ON, 3x3 gaussian spatial
+		// average); 0 reproduces the legacy 2x2 bilinear upsample byte-for-byte for A/B.
+		s_cvarUpSmooth = gEngfuncs.pfnRegisterVariable( "csz_fog_upsample_smooth", "1", FCVAR_CLIENTDLL );
+	if( s_cvarUpSigma == NULL )
+		s_cvarUpSigma = gEngfuncs.pfnRegisterVariable( "csz_fog_upsample_sigma", "1.5", FCVAR_CLIENTDLL );
 
-	CSZ_LogDev( "fogvol", "cvars registered (csz_fog_quality/steps/halfres/march_intensity/march_g, csz_flashlight_v2/range)" );
+	CSZ_LogDev( "fogvol", "cvars registered (csz_fog_quality/steps/halfres/march_intensity/march_g, csz_flashlight_v2/range, csz_fog_upsample_smooth/sigma)" );
 }
 
 void FogVolumeRender( const ViewSetup &view )
@@ -479,6 +490,16 @@ void FogVolumeRender( const ViewSetup &view )
 	if( s_gpu.uHalfSize >= 0 )  glUniform2fv( s_gpu.uHalfSize, 1, fHalfSize );
 	if( s_gpu.uZNear >= 0 )      glUniform1f( s_gpu.uZNear, view.zNear );
 	if( s_gpu.uZFar >= 0 )       glUniform1f( s_gpu.uZFar, view.zFar );
+	// L-polish B: 5x5 gaussian spatial smoothing of the half-res shaft (default on).
+	if( s_gpu.uSmooth >= 0 )
+		glUniform1i( s_gpu.uSmooth, ( ReadCvar( s_cvarUpSmooth, 1.0f ) != 0.0f ) ? 1 : 0 );
+	if( s_gpu.uSmoothSigma >= 0 )
+	{
+		float sig = ReadCvar( s_cvarUpSigma, 1.5f );
+		if( sig < 0.25f ) sig = 0.25f;   // keep the gaussian non-degenerate
+		if( sig > 3.0f )  sig = 3.0f;    // beyond the 5x5 footprint adds no taps, only over-flattens
+		glUniform1f( s_gpu.uSmoothSigma, sig );
+	}
 
 	glDrawArrays( GL_TRIANGLES, 0, 3 );
 

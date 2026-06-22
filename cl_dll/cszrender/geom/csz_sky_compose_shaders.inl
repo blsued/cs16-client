@@ -74,6 +74,8 @@ uniform float u_exposure;       // csz_exposure (default 1.0)
 uniform int u_tonemap;          // csz_tonemap: 0 = identity, 1 = ACES filmic
 uniform int u_encode;           // csz_encode: 0 = no OETF (display passthrough), 1 = sRGB OETF
 uniform int u_dither;           // csz_dither: 0 = off (byte-clean), 1 = TPDF dither
+uniform float u_hlRolloff;      // csz_highlight_rolloff: identity-path overbright shoulder strength (0 = off/legacy, 1 = full)
+uniform float u_hlKnee;         // csz_highlight_knee: shoulder onset; maxRGB <= knee returned bit-identical
 out vec4 fragColor;
 
 // Purkinje shift hook -- RESERVED SEAM (kept by decision, DEAD-4 infra pass 2
@@ -114,6 +116,24 @@ vec3 srgbOetf( vec3 c )
 	return mix( lo, hi, step( vec3( 0.0031308 ), c ) );
 }
 
+// L-polish A: identity-path highlight shoulder. Multiple additive flashlight beams
+// overlapping one surface push the display-space color well past 1.0 and clip to flat
+// RGB=255 ("dead white"). Under the identity tonemap (csz_tonemap 0) there is no rolloff
+// to absorb that. This soft knee compresses ONLY the channel max above `knee`: any pixel
+// whose maxRGB <= knee is returned BIT-IDENTICAL (the approved <0.95 look is preserved
+// per-pixel), while >knee highlights roll smoothly toward 1.0 instead of clipping. The
+// hue is preserved -- all channels scale by the same factor (rolled/m). ACES (tonemap 1)
+// already rolls off, so this is never applied on that path.
+vec3 highlightShoulder( vec3 c, float knee )
+{
+	float m = max( max( c.r, c.g ), c.b );
+	if( m <= knee )
+		return c;
+	float x = m - knee;
+	float rolled = knee + ( 1.0 - knee ) * x / ( x + ( 1.0 - knee ) );
+	return c * ( rolled / max( m, 1e-4 ) );
+}
+
 void main()
 {
 	// 1. Exact 1:1 texel copy (texelFetch; account for the viewport origin).
@@ -129,6 +149,10 @@ void main()
 	// 4. Tonemap.
 	if( u_tonemap == 1 )
 		c = acesFilmic( c );   // ACES mode expects LINEAR radiance (C2+)
+	else if( u_hlRolloff > 0.0 )
+		// Identity path (display-space): soft-knee the overbright multi-beam highlights
+		// only; rolloff scales between legacy (0) and full shoulder (1). (L-polish A)
+		c = mix( c, highlightShoulder( c, u_hlKnee ), u_hlRolloff );
 
 	// 5. sRGB OETF (off by default so we never double-encode the display-space
 	//    scene; on for the linear pipeline future, paired with tonemap=1).

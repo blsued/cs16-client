@@ -217,6 +217,8 @@ uniform sampler2D u_inscatter;   // half-res march output (rgb = in-scatter, a =
 uniform sampler2D u_depthTex;    // full-res scene depth (raw); sky unit
 uniform vec2 u_fullSize;         // full-res target size in pixels
 uniform vec2 u_halfSize;         // half-res source size in pixels
+uniform int u_smooth;            // csz_fog_upsample_smooth: 0 = legacy 2x2 bilinear, !=0 = 3x3 gaussian spatial avg (L-polish B)
+uniform float u_smoothSigma;     // csz_fog_upsample_sigma: gaussian spatial sigma in half-res texels (3x3 path)
 out vec4 fragColor;
 
 void main()
@@ -224,27 +226,66 @@ void main()
 	vec2 uv = gl_FragCoord.xy / u_fullSize;
 	float dC = linViewZ( texture( u_depthTex, uv ).r );
 
-	// 2x2 bilinear footprint in half-res texel space.
+	// Continuous sample position in half-res texel space (texel centers at integers).
 	vec2 t = uv * u_halfSize - 0.5;
-	vec2 fl = floor( t );
-	vec2 fr = t - fl;
 
 	vec3 sum = vec3( 0.0 );
 	float wsum = 0.0;
-	for( int j = 0; j < 2; j++ )
+
+	if( u_smooth != 0 )
 	{
-		for( int i = 0; i < 2; i++ )
+		// L-polish B: 5x5 half-res neighborhood with GAUSSIAN spatial weights x the
+		// existing depth-agreement weight. The half-res march jitters every texel with
+		// interleaved-gradient noise (kVolMarchFsBody jitter), so plain 2x2 bilinear
+		// (which averages only ~4 texels, heavily weighting the nearest) upsamples the
+		// dither GRID straight to full-res -> the "rough / cross-hatch" shaft the user
+		// reported. Averaging up to 25 jittered texels collapses that grid into a smooth
+		// gradient (noise std cut several-fold) while the depth weight still rejects taps
+		// across geometry silhouettes (shadow cuts / cone-wall edges stay sharp). This
+		// pass composites ONLY the volumetric in-scatter; the crisp surface hotspot/pool
+		// is drawn separately into the HDR buffer by the light pass and is untouched, so
+		// a wide blur here softens the airborne shaft WITHOUT dulling the hotspot.
+		// Normalization by wsum preserves radiance (energy-conserving, like the 2x2).
+		vec2 ctr = floor( t + 0.5 );                       // nearest half-res texel center index
+		float inv2s2 = 1.0 / ( 2.0 * u_smoothSigma * u_smoothSigma );
+		for( int j = -2; j <= 2; j++ )
 		{
-			vec2 tap = ( fl + vec2( float( i ), float( j ) ) + 0.5 ) / u_halfSize;
-			vec4 s = texture( u_inscatter, tap );
-			float bw = ( ( i == 0 ) ? ( 1.0 - fr.x ) : fr.x ) *
-			           ( ( j == 0 ) ? ( 1.0 - fr.y ) : fr.y );
-			// Depth-agreement weight, RELATIVE to distance (constant world-unit
-			// sigma would over-blur near and over-sharpen far). 5% + 1 unit.
-			float dw = exp( -abs( dC - s.a ) / ( 0.05 * dC + 1.0 ) );
-			float w = bw * dw + 1e-5;
-			sum += s.rgb * w;
-			wsum += w;
+			for( int i = -2; i <= 2; i++ )
+			{
+				vec2 idx = ctr + vec2( float( i ), float( j ) );
+				vec2 tap = ( idx + 0.5 ) / u_halfSize;
+				vec4 s = texture( u_inscatter, tap );
+				vec2 off = idx - t;                        // offset from the continuous sample pos
+				float sw = exp( -dot( off, off ) * inv2s2 );   // gaussian spatial weight
+				// Depth-agreement weight, RELATIVE to distance (constant world-unit
+				// sigma would over-blur near and over-sharpen far). 5% + 1 unit.
+				float dw = exp( -abs( dC - s.a ) / ( 0.05 * dC + 1.0 ) );
+				float w = sw * dw + 1e-5;
+				sum += s.rgb * w;
+				wsum += w;
+			}
+		}
+	}
+	else
+	{
+		// Legacy 2x2 depth-aware bilinear (pre-L-polish; A/B via csz_fog_upsample_smooth 0).
+		vec2 fl = floor( t );
+		vec2 fr = t - fl;
+		for( int j = 0; j < 2; j++ )
+		{
+			for( int i = 0; i < 2; i++ )
+			{
+				vec2 tap = ( fl + vec2( float( i ), float( j ) ) + 0.5 ) / u_halfSize;
+				vec4 s = texture( u_inscatter, tap );
+				float bw = ( ( i == 0 ) ? ( 1.0 - fr.x ) : fr.x ) *
+				           ( ( j == 0 ) ? ( 1.0 - fr.y ) : fr.y );
+				// Depth-agreement weight, RELATIVE to distance (constant world-unit
+				// sigma would over-blur near and over-sharpen far). 5% + 1 unit.
+				float dw = exp( -abs( dC - s.a ) / ( 0.05 * dC + 1.0 ) );
+				float w = bw * dw + 1e-5;
+				sum += s.rgb * w;
+				wsum += w;
+			}
 		}
 	}
 
