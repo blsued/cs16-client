@@ -61,7 +61,21 @@ extern FogController g_fog;
 // every fog consumer reads). RESERVED: a future server-authoritative blackout
 // calls CszFogSetServerMask() (e.g. from MsgFunc_Fog); until then the cvar is the
 // sole source.
-void  CszFogRegisterCvars();            // registers csz_fog_server_mask (always; Release-safe)
+void  CszFogRegisterCvars();            // registers csz_fog_server_mask + csz_fog_base (always; Release-safe)
 void  CszFogSetServerMask( float m );   // future server drive; clamps to [0,1]; m<0 clears override
 float CszFogServerMask();               // live [0,1]: override if armed, else the cvar (default 1.0)
+
+// L1 fog-base correctness A/B switch (csz_fog_base, default "1"). The Step 2
+// analytic base fog audited correct on all five optical points (radial 3D
+// distance, the closed-form exponential-height integral with extinction in the
+// numerator and b*dz in the denominator, the dz->0 near-horizontal limit, the
+// linear-HDR pre-tonemap mix, and unit consistency) -- so there is no defect to
+// gate. The switch instead exposes a clean A/B for the downstream visual gate:
+//   1 (default) = the corrected analytic fog VERBATIM (IEEE-exact identity).
+//   0           = legacy fallback: heightFalloff is forced to 0 at the single
+//                 view.ambience chokepoint, so the shader takes its uniform-
+//                 density branch (F = a*t) = the pre-analytic look. This isolates
+//                 EXACTLY what the exponential-height integral buys (visible only
+//                 when a map/csz_devfogx sets b>0); it manufactures no wrong path.
+bool  CszFogBaseCorrected();            // true unless csz_fog_base == 0 (fails safe to corrected)
 }

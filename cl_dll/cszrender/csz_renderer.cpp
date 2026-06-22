@@ -369,6 +369,17 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	// a future server-authoritative blackout (CszFogSetServerMask, MsgFunc_Fog).
 	view.ambience.fogDensity *= CszFogServerMask();
 
+	// L1 fog-base correctness A/B switch (csz_fog_base, default 1 = corrected).
+	// Same single chokepoint as serverFogMask. The Step 2 analytic base fog audited
+	// correct on all five optical points, so 1 is the verbatim corrected path (no
+	// change to the snapshot => IEEE-exact identity). 0 forces heightFalloff to 0 so
+	// every consumer's shader takes the uniform-density branch (F = a*t) = the
+	// pre-analytic look, isolating exactly what the exponential-height integral buys
+	// (visible only when b>0). No wrong path is manufactured; radial distance and the
+	// closed-form integral stay structurally correct in both states.
+	if( !CszFogBaseCorrected() )
+		view.ambience.heightFalloff = 0.0f;
+
 	// Disposable observability hook (csz_sky_debug, default 0; registered in
 	// csz_sky.cpp RegisterDevCvars). When armed, dump the PUBLISHED per-phase
 	// ambience -- the runtime ground truth the test agent reads -- once per

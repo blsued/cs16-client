@@ -63,6 +63,11 @@ const int kAmbiencePayloadBytes = 45;
 cvar_t *s_cvarServerMask;            // csz_fog_server_mask, default "1"
 float   s_serverMaskOverride = -1.0f;
 
+// L1 fog-base correctness A/B switch (csz_fog_base, default "1"). 1 = corrected
+// analytic base fog (verbatim); 0 = legacy uniform-density fallback (heightFalloff
+// forced 0 at the renderer chokepoint). See CszFogBaseCorrected() / csz_fog.h.
+cvar_t *s_cvarFogBase;               // csz_fog_base, default "1"
+
 float ClampUnit( float v )
 {
 	return v < 0.0f ? 0.0f : ( v > 1.0f ? 1.0f : v );
@@ -417,7 +422,18 @@ void CszFogRegisterCvars()
 	if( s_cvarServerMask == NULL )
 		s_cvarServerMask = gEngfuncs.pfnRegisterVariable( "csz_fog_server_mask", "1", FCVAR_CLIENTDLL );
 
-	CSZ_LogDev( "fog", "L0 decouple cvar registered (csz_fog_server_mask, default 1.0 = identity)" );
+	if( s_cvarFogBase == NULL )
+		s_cvarFogBase = gEngfuncs.pfnRegisterVariable( "csz_fog_base", "1", FCVAR_CLIENTDLL );
+
+	CSZ_LogDev( "fog", "L0/L1 fog cvars registered (csz_fog_server_mask=1 identity; csz_fog_base=1 corrected)" );
+}
+
+// L1 fog-base correctness A/B switch. true = corrected analytic fog (verbatim,
+// the default); false ONLY when csz_fog_base is explicitly 0 (legacy uniform-
+// density fallback). Fails safe to corrected if the cvar was never registered.
+bool CszFogBaseCorrected()
+{
+	return s_cvarFogBase != NULL ? ( s_cvarFogBase->value != 0.0f ) : true;
 }
 
 // Reserved hook for a future server-authoritative black-fog drive (e.g. mapped
