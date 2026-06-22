@@ -63,6 +63,9 @@ cvar_t *s_cvarSteps;       // csz_fog_steps         default "14" (clamped 4..32)
 cvar_t *s_cvarHalfres;     // csz_fog_halfres       default "1": 1 half-res, 2 quarter-res, 0 full (debug)
 cvar_t *s_cvarIntensity;   // csz_fog_march_intensity default "8.0": shaft brightness scale (dev tuning)
 cvar_t *s_cvarG;           // csz_fog_march_g       default "0.55": HG forward anisotropy
+cvar_t *s_cvarV2;          // csz_flashlight_v2     default "1": L5 enhanced march (0 = byte-for-byte pre-L5)
+cvar_t *s_cvarRange;       // csz_flashlight_range  default "800": hard range cap (world units) bounding
+                           //   spot attenuation / cone length / march steps (+L7 dust spawn volume)
 
 // --- half-res in-scatter target (RGBA16F, no depth) ---------------------------
 struct VolTarget
@@ -88,7 +91,7 @@ struct VolGpu
 
 	// march uniforms
 	int mTargetSize, mCamPos, mSpotOrigin, mSpotDir, mSpotColor, mSpotRadius;
-	int mCosInner, mCosOuter, mMatShadow, mSigmaE, mSigmaS, mHgG, mIntensity, mSteps, mMarchFar;
+	int mCosInner, mCosOuter, mMatShadow, mSigmaE, mSigmaS, mHgG, mIntensity, mSteps, mMarchFar, mEconserve;
 	int mDepthTex, mShadowMap, mZNear, mZFar, mInvProj, mInvViewProj;
 
 	// upsample uniforms
@@ -213,6 +216,7 @@ void BuildVolPrograms()
 	s_gpu.mIntensity   = UniformLoc( s_gpu.march, "u_intensity" );
 	s_gpu.mSteps       = UniformLoc( s_gpu.march, "u_steps" );
 	s_gpu.mMarchFar    = UniformLoc( s_gpu.march, "u_marchFar" );
+	s_gpu.mEconserve   = UniformLoc( s_gpu.march, "u_econserve" );
 	s_gpu.mDepthTex    = UniformLoc( s_gpu.march, "u_depthTex" );
 	s_gpu.mShadowMap   = UniformLoc( s_gpu.march, "u_shadowMap" );
 	s_gpu.mZNear       = UniformLoc( s_gpu.march, "u_zNear" );
@@ -269,8 +273,18 @@ void FogVolumeRegisterCvars()
 		s_cvarIntensity = gEngfuncs.pfnRegisterVariable( "csz_fog_march_intensity", "1.5", FCVAR_CLIENTDLL );
 	if( s_cvarG == NULL )
 		s_cvarG = gEngfuncs.pfnRegisterVariable( "csz_fog_march_g", "0.55", FCVAR_CLIENTDLL );
+	if( s_cvarV2 == NULL )
+		// L5: enhanced first-person beam (energy-conserving slice + range-bounded
+		// steps). 0 reproduces the pre-L5 march byte-for-byte for A/B.
+		s_cvarV2 = gEngfuncs.pfnRegisterVariable( "csz_flashlight_v2", "1", FCVAR_CLIENTDLL );
+	if( s_cvarRange == NULL )
+		// L5: a single hard range cap (world units). Bounds the spot attenuation
+		// falloff, the cone length (influence sphere), and the march step count;
+		// reserved as the L7 dust spawn-volume ceiling. Near-field default (the
+		// perf lever: an unlit far field costs nothing). Clamped to the light radius.
+		s_cvarRange = gEngfuncs.pfnRegisterVariable( "csz_flashlight_range", "800", FCVAR_CLIENTDLL );
 
-	CSZ_LogDev( "fogvol", "cvars registered (csz_fog_quality/steps/halfres/march_intensity/march_g)" );
+	CSZ_LogDev( "fogvol", "cvars registered (csz_fog_quality/steps/halfres/march_intensity/march_g, csz_flashlight_v2/range)" );
 }
 
 void FogVolumeRender( const ViewSetup &view )
@@ -325,9 +339,40 @@ void FogVolumeRender( const ViewSetup &view )
 
 	BuildVolPrograms();
 
-	int steps = (int)( ReadCvar( s_cvarSteps, 14.0f ) + 0.5f );
-	if( steps < 4 ) steps = 4;
-	if( steps > 32 ) steps = 32;
+	// L5 enhanced first-person beam (csz_flashlight_v2 1, default). A single
+	// csz_flashlight_range scalar caps the spot attenuation falloff, the cone length
+	// (the ray-sphere influence radius fed as u_spotRadius), the hard march far, and
+	// the step count -- nothing past range is marched (the perf lever). v2 0 feeds
+	// exactly the pre-L5 uniforms (spot.radius / view.zFar / csz_fog_steps / linear
+	// accumulation) so the output is byte-for-byte identical for A/B.
+	bool v2 = ( ReadCvar( s_cvarV2, 1.0f ) >= 0.5f );
+
+	float effRadius  = spot.radius;
+	float effMarchFar = view.zFar;
+	int   steps;
+	int   econserve;
+
+	if( v2 )
+	{
+		float range = ReadCvar( s_cvarRange, 800.0f );
+		if( range < 1.0f ) range = 1.0f;
+		// range is a CAP, never an extension beyond the light's own radius.
+		effRadius   = ( range < spot.radius ) ? range : spot.radius;
+		effMarchFar = effRadius;
+		// Steps scale with range (~1 step / 110u): 600..900u -> 6..8 steps. Clamped
+		// 6..16 so a tiny range still anti-bands and a long one stays bounded.
+		steps = (int)( effRadius / 110.0f + 0.5f );
+		if( steps < 6 )  steps = 6;
+		if( steps > 16 ) steps = 16;
+		econserve = 1;
+	}
+	else
+	{
+		steps = (int)( ReadCvar( s_cvarSteps, 14.0f ) + 0.5f );
+		if( steps < 4 ) steps = 4;
+		if( steps > 32 ) steps = 32;
+		econserve = 0;
+	}
 
 	float intensity = ReadCvar( s_cvarIntensity, 1.5f );
 	float hgG = ReadCvar( s_cvarG, 0.55f );
@@ -369,7 +414,7 @@ void FogVolumeRender( const ViewSetup &view )
 	if( s_gpu.mSpotOrigin >= 0 ) glUniform3fv( s_gpu.mSpotOrigin, 1, spot.origin );
 	if( s_gpu.mSpotDir >= 0 )    glUniform3fv( s_gpu.mSpotDir, 1, spot.dir );
 	if( s_gpu.mSpotColor >= 0 )  glUniform3fv( s_gpu.mSpotColor, 1, spot.color );
-	if( s_gpu.mSpotRadius >= 0 ) glUniform1f( s_gpu.mSpotRadius, spot.radius );
+	if( s_gpu.mSpotRadius >= 0 ) glUniform1f( s_gpu.mSpotRadius, effRadius );
 	if( s_gpu.mCosInner >= 0 )   glUniform1f( s_gpu.mCosInner, spot.cosInner );
 	if( s_gpu.mCosOuter >= 0 )   glUniform1f( s_gpu.mCosOuter, spot.cosOuter );
 	if( s_gpu.mMatShadow >= 0 )  glUniformMatrix4fv( s_gpu.mMatShadow, 1, GL_FALSE, spot.matShadow.m );
@@ -378,7 +423,8 @@ void FogVolumeRender( const ViewSetup &view )
 	if( s_gpu.mHgG >= 0 )        glUniform1f( s_gpu.mHgG, hgG );
 	if( s_gpu.mIntensity >= 0 )  glUniform1f( s_gpu.mIntensity, intensity );
 	if( s_gpu.mSteps >= 0 )      glUniform1i( s_gpu.mSteps, steps );
-	if( s_gpu.mMarchFar >= 0 )   glUniform1f( s_gpu.mMarchFar, view.zFar );
+	if( s_gpu.mMarchFar >= 0 )   glUniform1f( s_gpu.mMarchFar, effMarchFar );
+	if( s_gpu.mEconserve >= 0 )  glUniform1i( s_gpu.mEconserve, econserve );
 
 	glDrawArrays( GL_TRIANGLES, 0, 3 );
 

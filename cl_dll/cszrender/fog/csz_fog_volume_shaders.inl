@@ -77,8 +77,9 @@ uniform float u_sigmaE;                // extinction (active fog density a); sha
 uniform float u_sigmaS;               // scattering coefficient
 uniform float u_hgG;                   // Henyey-Greenstein anisotropy
 uniform float u_intensity;             // shaft brightness scale
-uniform int   u_steps;                 // march sample count (CPU-clamped 4..32)
-uniform float u_marchFar;              // hard distance cap (world units)
+uniform int   u_steps;                 // march sample count (legacy 4..32; v2 range-derived 6..16)
+uniform float u_marchFar;              // hard distance cap (world units); v2 = csz_flashlight_range
+uniform int   u_econserve;             // 1 = energy-conserving slice (v2); 0 = pre-L5 linear sum
 out vec4 fragColor;
 
 // Interleaved-gradient-noise dither (no blue-noise texture asset for M1): breaks
@@ -137,8 +138,13 @@ void main()
 
 	// March-local transmittance: Beer-Lambert from the camera to the first
 	// sample so far shaft segments self-dim under thick fog. NEVER applied to the
-	// scene color (single-extinction rule).
+	// scene color (single-extinction rule). u_econserve picks the integration form:
+	//   v2  -> Tlocal is the transmittance to the START of each step (Tstart) and
+	//          the in-scatter uses the analytic slice (sigmaS/sigmaE)(1-exp(-sigmaE*dt));
+	//   v2 0 -> Tlocal decays to the step END before accumulating sigmaS*dt -- the
+	//          pre-L5 ordering, reproduced byte-for-byte.
 	float Tlocal = exp( -u_sigmaE * t0 );
+	float stepTrans = exp( -u_sigmaE * dt );
 
 	vec3 inscatter = vec3( 0.0 );
 
@@ -147,7 +153,8 @@ void main()
 		float t = t0 + ( float( i ) + jitter ) * dt;
 		vec3 P = u_camPos + rd * t;
 
-		Tlocal *= exp( -u_sigmaE * dt );
+		float Tstart = Tlocal;        // transmittance to the start of this step
+		Tlocal *= stepTrans;          // ...to the end (legacy accumulation point)
 
 		vec3 L = u_spotOrigin - P;
 		float dist = length( L );
@@ -168,9 +175,22 @@ void main()
 
 		float cosTheta = dot( rd, -L );           // forward-scatter angle
 		float phase = hgPhase( cosTheta, u_hgG );
+		float vis = atten * cone * shadow;
 
-		inscatter += Tlocal * u_sigmaS * phase * u_spotColor *
-			( atten * cone * shadow ) * dt;
+		if( u_econserve != 0 )
+		{
+			// Energy-conserving slice: the radiance scattered into the eye across
+			// this step = (sigmaS/sigmaE)(1 - exp(-sigmaE*dt)), weighted by the
+			// transmittance to the step start. Bounded by construction, so thick
+			// fog / few steps no longer over-brighten the way the linear sum does.
+			float slice = ( u_sigmaS / max( u_sigmaE, 1e-6 ) ) * ( 1.0 - stepTrans );
+			inscatter += Tstart * phase * u_spotColor * vis * slice;
+		}
+		else
+		{
+			// Legacy linear accumulation (pre-L5; csz_flashlight_v2 0 path).
+			inscatter += Tlocal * u_sigmaS * phase * u_spotColor * vis * dt;
+		}
 	}
 
 	inscatter *= u_intensity;
