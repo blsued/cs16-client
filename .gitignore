@@ -70,3 +70,5 @@ cl_dll/cszrender/geom/bake/panorama_src/*.exr
 cl_dll/cszrender/geom/bake/panorama_src/*.tif
 cl_dll/cszrender/geom/bake/__pycache__/
 *.bak-pretune
+reviews/
+build-review/
