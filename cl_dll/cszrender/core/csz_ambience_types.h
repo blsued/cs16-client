@@ -48,6 +48,7 @@ enum
 {
 	kCszFogPresetEnvironmental = 0,
 	kCszFogPresetBlackFirst    = 1,   // first black-fog preset (silhouettes)
+	kCszFogPresetBlackout      = 2,   // full blackout (geometry fully occluded beyond range)
 };
 struct AmbienceParams
 {

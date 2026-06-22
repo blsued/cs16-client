@@ -85,6 +85,20 @@ bool s_haveView;
 
 cvar_t *s_cvarTestLight;	// csz_testlight (default 0: opt-in M1/M2 test fixture, off by default)
 cvar_t *s_cvarShadow;		// csz_light_shadow (B-class quality seam, default 1)
+cvar_t *s_cvarFlashlightReal;	// csz_flashlight_real (default 1: feed the table from live player flashlights)
+
+// L6c dev-override latch. The csz_flashlight_test fixture and the real per-player
+// feed both write the SAME state table with owner keys that overlap (test uses
+// owners 1..N, real uses player entity indices 1..maxclients), so they must be
+// mutually exclusive. While a test fixture is placed, CollectRealFlashlights is a
+// no-op (test overrides); "csz_flashlight_test off" clears the table and the latch,
+// and the real feed resumes the next frame.
+bool s_flashlightTestActive;
+
+// Eye-height offset for OTHER players' beams: their entity origin is at the feet,
+// the muzzle/flashlight rides at roughly standing eye height. Approximate (M1):
+// the local player uses the exact view eye instead.
+const float kOtherPlayerEyeHeight = 24.0f;
 
 // T-spawn parse cache, keyed by map name (re-parsed on map change).
 char s_spawnMapName[64];
@@ -407,6 +421,7 @@ void FlashlightTestCommand()
 	if( gEngfuncs.Cmd_Argc() >= 2 && strcmp( gEngfuncs.Cmd_Argv( 1 ), "off" ) == 0 )
 	{
 		FlashlightClearAll();
+		s_flashlightTestActive = false;	// release the dev override -> real feed resumes
 		CSZ_LogInfo( "flashlight", "test flashlights cleared" );
 		return;
 	}
@@ -472,10 +487,98 @@ void FlashlightTestCommand()
 		FlashlightSet( st );
 	}
 
+	s_flashlightTestActive = true;	// dev override engaged: CollectRealFlashlights no-ops until "off"
+
 	CSZ_LogInfo( "flashlight", "placed %d test flashlights (owner #1 = local, isLocal); state table count=%d",
 		count, FlashlightCount() );
 }
 
+}  // anonymous namespace
+
+// L6c: feed the decoupled per-flashlight state table (csz_flashlight_state.h) from
+// LIVE player state each frame, so the real F-key flashlight drives the same crisp
+// cone the csz_flashlight_test fixture exercises -- without any dev command.
+//   - local player: the viewer's own beam at the EXACT view eye, aimed along the
+//     view (isLocal -> budget top priority), gated on the local entity's EF_DIMLIGHT.
+//   - other players: one beam per player whose curstate.effects has EF_DIMLIGHT,
+//     at the entity origin + eye height, aimed along its angles (owner = entity index).
+//   - players who turned the flashlight off / left are FlashlightClear'd.
+// EF_DIMLIGHT is the same server-set effect (CBasePlayer::FlashlightTurnOn sets
+// pev->effects |= EF_DIMLIGHT) the engine reads to draw the legacy flashlight dlight,
+// so it is present in curstate for every player including the local one. The L6b
+// budgeter (4 full + 8 cheap) tiers the result; no renderer change needed.
+void CollectRealFlashlights( const ViewSetup &mainView )
+{
+	// Default ON (csz_flashlight_real 1). 0 disables the real feed entirely (e.g. to
+	// isolate the dev fixture or A/B the legacy path).
+	if( s_cvarFlashlightReal != NULL && s_cvarFlashlightReal->value == 0.0f )
+		return;
+
+	// Dev override: while a csz_flashlight_test fixture is placed, leave the table to
+	// it (its owner keys overlap real player indices, so the two cannot coexist).
+	if( s_flashlightTestActive )
+		return;
+
+	cl_entity_t *local = gEngfuncs.GetLocalPlayer();
+	int localIdx = ( local != NULL ) ? local->index : -1;
+	int maxClients = gEngfuncs.GetMaxClients();
+
+	if( maxClients < 1 )
+		maxClients = 1;
+	if( maxClients > 32 )
+		maxClients = 32;	// state table cap; never overflow the per-owner table
+
+	float fwd[3], right[3], up[3];
+
+	AngleVectors( mainView.angles, fwd, right, up );
+
+	for( int i = 1; i <= maxClients; i++ )
+	{
+		cl_entity_t *ent = gEngfuncs.GetEntityByIndex( i );
+		bool lit = ( ent != NULL && ( ent->curstate.effects & EF_DIMLIGHT ) != 0 );
+
+		if( !lit )
+		{
+			FlashlightClear( i );	// off this frame / disconnected -> drop the beam
+			continue;
+		}
+
+		FlashlightState st;
+
+		memset( &st, 0, sizeof( st ));
+		st.enabled = true;
+		st.owner = i;
+
+		if( i == localIdx )
+		{
+			// The viewer's own beam: exact view eye, aimed along the view. isLocal
+			// pins it to the full tier no matter how crowded the scene gets. A small
+			// forward nudge keeps the cone apex just ahead of the camera (mirrors the
+			// csz_flashlight_test owner #1 placement intent: camera outside the cone).
+			st.isLocal = true;
+			for( int j = 0; j < 3; j++ )
+				st.origin[j] = mainView.origin[j] + fwd[j] * 8.0f;
+			st.angles[0] = mainView.angles[0];
+			st.angles[1] = mainView.angles[1];
+			st.angles[2] = 0.0f;
+		}
+		else
+		{
+			// Other players: feet origin + eye height, aimed along the transmitted
+			// player angles. Pitch fidelity for remote players is approximate (M1).
+			st.origin[0] = ent->curstate.origin[0];
+			st.origin[1] = ent->curstate.origin[1];
+			st.origin[2] = ent->curstate.origin[2] + kOtherPlayerEyeHeight;
+			st.angles[0] = ent->curstate.angles[0];
+			st.angles[1] = ent->curstate.angles[1];
+			st.angles[2] = 0.0f;
+		}
+
+		st.range = 0.0f;	// module defaults (warm-white, 700u, 50deg)
+		st.fov = 0.0f;
+
+		FlashlightSet( st );
+	}
 }
 
 void RenderShadowMaps( const ViewSetup &mainView, cl_entity_s *const *studioEnts, int studioCount )
@@ -620,6 +723,12 @@ void RegisterLightingCommands()
 
 	if( s_cvarShadow == NULL )
 		s_cvarShadow = gEngfuncs.pfnRegisterVariable( "csz_light_shadow", "1", FCVAR_CLIENTDLL );
+
+	// L6c real per-player flashlight feed (default 1). When 1, CollectRealFlashlights
+	// drives the state table from live player EF_DIMLIGHT each frame; 0 disables it
+	// (dev: isolate the csz_flashlight_test fixture or the legacy engine flashlight).
+	if( s_cvarFlashlightReal == NULL )
+		s_cvarFlashlightReal = gEngfuncs.pfnRegisterVariable( "csz_flashlight_real", "1", FCVAR_CLIENTDLL );
 }
 
 }

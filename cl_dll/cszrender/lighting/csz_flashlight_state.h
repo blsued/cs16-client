@@ -41,11 +41,12 @@ namespace csz
 //   producer  -> FlashlightSet()/FlashlightClear()  (one writer per frame)
 //   consumer  -> FlashlightPublishToRegistry()       (renderer mirrors into g_lights)
 //
-// THIS PERIOD the table is fed ONLY by the csz_flashlight_test dev command
-// (csz_light_pass.cpp). The real producer -- per-player gameplay + a
-// server-authoritative snapshot (e.g. a gmsgFlashlight parse in hud_msg.cpp, or
-// the studio entity walk that already knows each player's muzzle basis) -- is
-// OWED and wires into the SAME FlashlightSet() seam; no renderer change needed.
+// The table is fed each frame by the REAL per-player flashlight producer
+// (CollectRealFlashlights in csz_light_pass.cpp): the local player's own beam at
+// the view eye when its EF_DIMLIGHT is lit, plus one beam per other player whose
+// curstate carries EF_DIMLIGHT. The csz_flashlight_test dev command writes the SAME
+// FlashlightSet() seam and OVERRIDES the real feed while a fixture is placed
+// (csz_flashlight_real 0 disables the real feed entirely). No renderer change needed.
 struct FlashlightState
 {
 	bool  enabled;     // false clears the owner's beam (same as FlashlightClear)

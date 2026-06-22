@@ -434,9 +434,12 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 		}
 	}
 
+	CollectRealFlashlights( view );					// slot 7.5: L6c -- feed the per-flashlight state
+									// table from live player flashlights (local eye +
+									// other players' EF_DIMLIGHT); dev csz_flashlight_test overrides
 	FlashlightPublishToRegistry();					// slot 7.55: L6b -- mirror the decoupled
 									// per-flashlight state table into g_lights
-									// (server-authoritative seam; fed by csz_flashlight_test now)
+									// (real per-player flashlight feed wired at slot 7.5)
 	g_lights.UpdateMatrices();					// slot 7.6: light matrix update
 	LightBudgetCompute( view );					// slot 7.65: L6b -- rank visible beams,
 									// assign budgetTier (full/cheap/cull) before any pass reads it

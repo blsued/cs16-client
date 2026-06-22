@@ -86,7 +86,7 @@ void CszFogOnMessage( const unsigned char *payload, int size )
 
 	// Unknown preset -> environmental (fail-safe: never an accidental blackout).
 	int preset = presetRaw;
-	if( preset != kCszFogPresetEnvironmental && preset != kCszFogPresetBlackFirst && preset != 2 )
+	if( preset != kCszFogPresetEnvironmental && preset != kCszFogPresetBlackFirst && preset != kCszFogPresetBlackout )
 		preset = kCszFogPresetEnvironmental;
 	st.preset = preset;
 
@@ -153,7 +153,7 @@ void DevFogNetTestCommand()
 		unsigned char buf[12] = {
 			1,        // version
 			0x03,     // flags: active | blackFog
-			2,        // preset = black-blackout
+			kCszFogPresetBlackout, // preset = black-blackout
 			255,      // maxOpacity -> 1.0
 			0, 0, 0,  // fog RGB
 			(unsigned char)( 1638 & 0xFF ), (unsigned char)( ( 1638 >> 8 ) & 0xFF ), // densityA u16 LE
@@ -164,7 +164,7 @@ void DevFogNetTestCommand()
 		const AmbienceParams &a = g_fog.Current();
 		Check( g_fog.HasCszState(),                      "case1 latch set after active CszFog" );
 		Check( a.fogBypassTint,                          "case1 bypassTint true (black preset)" );
-		Check( a.fogPreset == 2,                         "case1 preset = blackout" );
+		Check( a.fogPreset == kCszFogPresetBlackout,     "case1 preset = blackout" );
 		Check( ApproxEq( a.maxOpacity, 1.0f, 1e-4f ),    "case1 maxOpacity = 1.0" );
 		Check( ApproxEq( a.fogColor[0], 0.0f, 1e-4f ),   "case1 fogColor black" );
 		// extinction reproduced via the chokepoint: density*ln2 ~= a (0.0999...).
