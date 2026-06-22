@@ -51,6 +51,7 @@
 #include "geom/csz_viewmodel.h"
 #include "geom/csz_world.h"
 #include "lighting/csz_light_pass.h"
+#include "lighting/csz_light_cone.h"
 #include "lighting/csz_light_registry.h"
 #include "lighting/csz_shadowmap.h"
 
@@ -270,6 +271,7 @@ void Renderer::OnHudInit()
 
 	RegisterSpriteCommands();	// csz_testsprite (T5)
 	RegisterLightingCommands();	// csz_testspot + csz_testlight (T6)
+	LightConeRegisterCvars();	// L6a: csz_flashlight_tp (default 1 = world-space visible beam) + _intensity
 	RegisterStudioTextureCvars();	// csz_dev_armskin (spec 4.3.1 layer 1 dev probe)
 	RegisterViewmodelDevCvars();	// csz_dev_viewmodel (dev stand-in model)
 	g_fog.RegisterDevCommands();	// csz_devfog/csz_devtint/csz_devmoon (A1; CSZ_DEV_TOOLS only)
@@ -307,6 +309,7 @@ void Renderer::Shutdown()
 		g_world.Destroy();
 		g_studio.DestroyAll();
 		g_spotShadow.Destroy();
+		LightConeShutdown();	// L6a: world beam program + VAO (generation-safe)
 		FogVolumeShutdown();	// fog M1 Step 3: half-res FBO + march/upsample programs (generation-safe)
 		FogGodraysShutdown();	// fog M1 Step 4: half-res occl/scatter FBOs + 3 programs (generation-safe)
 		AtmosShutdown();	// atmosphere LUTs + programs + GPU timer (C2, generation-safe)
@@ -543,7 +546,12 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	EndPass( kTmStudio );
 
 	BeginPass( kTmLights );
-	RunLightPasses( view, m_frame.studio, m_frame.numStudio );	// slot 13: additive light passes
+	RunLightPasses( view, m_frame.studio, m_frame.numStudio );	// slot 13: additive light passes (spot DIRECT: world+studio lit, world-space)
+	// slot 13.4 (L6a): world-space visible flashlight beam VOLUME. After the spot
+	// direct add (the lit pool + holder body), before the Step-3 first-person march.
+	// Additive air in-scatter cone-mesh, visible from ANY camera angle, occluded
+	// camera-side by the scene depth (soft fade). Gated by csz_flashlight_tp.
+	LightConeRender( view );
 	EndPass( kTmLights );
 
 	// slot 13.5 (kTmVolume seam): fog M1 Step 3 half-res flashlight ray-march.

@@ -1,0 +1,362 @@
+/*
+ * csz_light_cone.cpp -- CSOZ renderer: world-space visible flashlight beam volume (L6a)
+ *
+ * Copyright (c) 2026 CSOZ project contributors
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This file is part of CSOZ (cs16-client fork). Original work written for
+ * CSOZ; no code in this file is copied or translated from PrimeXT, Paranoia,
+ * Trinity, retail/leaked sources, or any other license-tainted source
+ * (see csoz docs/provenance.md, section 6).
+ * Clean-room implementation. Mechanism studied from PrimeXT (see
+ * csoz docs/notes/primext-render-mechanisms.md); implemented by an agent
+ * that has not read that source.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the
+ * Free Software Foundation; either version 2 of the License, or (at your
+ * option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+ * Public License for more details.
+ *
+ * In addition, as a special exception, the author gives permission to link
+ * the code of this program with the Half-Life Game Engine ("HL Engine") and
+ * Modified Game Libraries ("MODs") developed by Valve, L.L.C ("Valve").
+ * You must obey the GNU General Public License in all respects for all of
+ * the code used other than the HL Engine and MODs from Valve. If you modify
+ * this file, you may extend this exception to your version of the file, but
+ * you are not obligated to do so. If you do not wish to do so, delete this
+ * exception statement from your version.
+ */
+// L6a render order (csz_renderer.cpp): AFTER RunLightPasses (spot DIRECT additive
+// world+studio lighting, slot 13) and BEFORE the Step-3 first-person fog march
+// (slot 13.5). Both add linear HDR radiance into the SAME bound HDR FBO, so the
+// order among the additive passes is commutative; placing it right after the spot
+// direct add matches the plan ordering (opaque -> spot direct -> cone additive ->
+// dust L7). Reuses g_lights (the spot registry) + the fog Step-1 depth helpers.
+#include "csz_light_cone.h"
+#include "csz_light_registry.h"
+#include "../core/csz_engine.h"
+#include "../core/csz_glcaps.h"
+#include "../core/csz_glfuncs.h"
+#include "../core/csz_glstate.h"
+#include "../core/csz_log.h"
+#include "../core/csz_math.h"
+#include "../core/csz_shader.h"
+#include "../core/csz_view.h"
+#include "../core/csz_light_types.h"
+#include "../geom/csz_sky_compose.h"
+
+#include <math.h>
+#include <string>
+
+namespace csz
+{
+
+#include "../fog/csz_fog_shaders.inl"   // kFogDepthReconstructGlsl (Step 1 helpers: linViewZ/worldPosFromDepth)
+#include "csz_light_cone_shaders.inl"   // kConeVs / kConeFsBody
+
+namespace
+{
+
+const float kDegToRad = 3.14159265358979323846f / 180.0f;
+
+// Radial wedge count of the procedural cone (smooth rim at any near distance; a
+// flashlight cone is small on screen so 64 is plenty). MUST match the draw count.
+const int kConeSegments = 64;
+
+// Bounded march samples through the cone volume. Only cone-silhouette pixels run
+// this, so the cost is local; 16 anti-bands the gradient without temporal noise.
+const int kConeSteps = 16;
+
+const float kConeHgG = 0.35f;   // gentle forward anisotropy (side view stays lit)
+
+// --- cvars (read live each frame) --------------------------------------------
+cvar_t *s_cvarTp;          // csz_flashlight_tp           default "1": world beam visible (0 = off, A/B)
+cvar_t *s_cvarTpIntensity; // csz_flashlight_tp_intensity default "1.5": beam brightness (dev tuning)
+cvar_t *s_cvarRange;       // csz_flashlight_range (owned by FogVolume); caps beam length. Fetched lazily.
+bool    s_lookedRange;
+
+// --- GPU resources (generation-keyed; forget on a foreign context) -----------
+struct ConeGpu
+{
+	ShaderProgram prog;
+	GLuint vao;
+	int    gpuGeneration;
+	bool   built;
+	bool   failedThisGen;
+
+	int uMatViewProj, uApex, uAxis, uRight, uUp, uSegments;
+	int uDepthTex, uViewSize, uCamPos, uAxisDir, uLen;
+	int uCosInner, uCosOuter, uColor, uIntensity, uHgG, uSteps;
+	int uInvViewProj, uZNear, uZFar;
+};
+ConeGpu s_gpu;
+
+float ReadCvar( cvar_t *cv, float fallback )
+{
+	return ( cv != NULL ) ? cv->value : fallback;
+}
+
+void ForgetGpu()
+{
+	s_gpu.vao = 0;
+	s_gpu.prog.program = 0;
+	s_gpu.built = false;
+	s_gpu.failedThisGen = false;
+}
+
+void DestroyGpuSameContext()
+{
+	if( s_gpu.vao != 0 )
+		glDeleteVertexArrays( 1, &s_gpu.vao );
+	if( s_gpu.prog.program != 0 )
+		DestroyProgram( s_gpu.prog );
+	ForgetGpu();
+}
+
+bool EnsureBuilt()
+{
+	if( s_gpu.gpuGeneration != GpuGeneration() )
+	{
+		ForgetGpu();                       // foreign generation: forget, never glDelete
+		s_gpu.gpuGeneration = GpuGeneration();
+	}
+	if( s_gpu.built )
+		return true;
+	if( s_gpu.failedThisGen )
+		return false;
+
+	glGenVertexArrays( 1, &s_gpu.vao );
+
+	// Final FS = "#version 330 core" + shared Step-1 reconstruct helpers + body.
+	std::string fs = std::string( "#version 330 core\n" ) + kFogDepthReconstructGlsl + kConeFsBody;
+	if( !BuildProgram( "csz_light_cone", kConeVs, fs.c_str(), false, s_gpu.prog ) )
+	{
+		s_gpu.failedThisGen = true;
+		CSZ_LogError( "lightcone", "shader build failed; world beam disabled this generation" );
+		return false;
+	}
+
+	s_gpu.uMatViewProj = UniformLoc( s_gpu.prog, "u_matViewProj" );
+	s_gpu.uApex        = UniformLoc( s_gpu.prog, "u_apex" );
+	s_gpu.uAxis        = UniformLoc( s_gpu.prog, "u_axis" );
+	s_gpu.uRight       = UniformLoc( s_gpu.prog, "u_right" );
+	s_gpu.uUp          = UniformLoc( s_gpu.prog, "u_up" );
+	s_gpu.uSegments    = UniformLoc( s_gpu.prog, "u_segments" );
+	s_gpu.uDepthTex    = UniformLoc( s_gpu.prog, "u_depthTex" );
+	s_gpu.uViewSize    = UniformLoc( s_gpu.prog, "u_viewSize" );
+	s_gpu.uCamPos      = UniformLoc( s_gpu.prog, "u_camPos" );
+	s_gpu.uAxisDir     = UniformLoc( s_gpu.prog, "u_axisDir" );
+	s_gpu.uLen         = UniformLoc( s_gpu.prog, "u_len" );
+	s_gpu.uCosInner    = UniformLoc( s_gpu.prog, "u_cosInner" );
+	s_gpu.uCosOuter    = UniformLoc( s_gpu.prog, "u_cosOuter" );
+	s_gpu.uColor       = UniformLoc( s_gpu.prog, "u_color" );
+	s_gpu.uIntensity   = UniformLoc( s_gpu.prog, "u_intensity" );
+	s_gpu.uHgG         = UniformLoc( s_gpu.prog, "u_hgG" );
+	s_gpu.uSteps       = UniformLoc( s_gpu.prog, "u_steps" );
+	s_gpu.uInvViewProj = UniformLoc( s_gpu.prog, "u_invViewProj" );
+	s_gpu.uZNear       = UniformLoc( s_gpu.prog, "u_zNear" );
+	s_gpu.uZFar        = UniformLoc( s_gpu.prog, "u_zFar" );
+
+	s_gpu.built = true;
+	CSZ_LogDev( "lightcone", "world beam program built (gpu gen %d)", s_gpu.gpuGeneration );
+	return true;
+}
+
+// Orthonormal basis perpendicular to the cone axis (any consistent choice; the
+// beam is rotationally symmetric so the seam location is irrelevant).
+void BasisFromAxis( const float d[3], float right[3], float up[3] )
+{
+	float ref[3] = { 0.0f, 0.0f, 1.0f };
+	if( fabsf( d[2] ) > 0.99f )            // axis near-vertical: pick a different ref
+	{
+		ref[0] = 1.0f; ref[1] = 0.0f; ref[2] = 0.0f;
+	}
+	// right = normalize( cross( ref, d ) )
+	right[0] = ref[1] * d[2] - ref[2] * d[1];
+	right[1] = ref[2] * d[0] - ref[0] * d[2];
+	right[2] = ref[0] * d[1] - ref[1] * d[0];
+	float rl = sqrtf( right[0] * right[0] + right[1] * right[1] + right[2] * right[2] );
+	if( rl < 1e-6f ) rl = 1e-6f;
+	right[0] /= rl; right[1] /= rl; right[2] /= rl;
+	// up = cross( d, right )
+	up[0] = d[1] * right[2] - d[2] * right[1];
+	up[1] = d[2] * right[0] - d[0] * right[2];
+	up[2] = d[0] * right[1] - d[1] * right[0];
+}
+
+// Draw ONE spot's beam volume. State (FBO/viewport/blend/depth/program/VAO/depth
+// tex) is set up once by the caller; this only pushes per-spot uniforms + draws.
+void DrawConeForSpot( const ViewSetup &view, const SpotLightParams &spot,
+                      float range, float intensity )
+{
+	float len = spot.radius;
+	if( range > 0.0f && range < len )
+		len = range;                       // csz_flashlight_range caps the beam length
+	if( len < 1.0f )
+		return;
+
+	// Outer half-angle from cosOuter -> tan for the rim radius at the base plane.
+	float cosOuter = spot.cosOuter;
+	if( cosOuter > 0.9999f ) cosOuter = 0.9999f;
+	if( cosOuter < 0.02f )   cosOuter = 0.02f;
+	float halfOuter = acosf( cosOuter );
+	float tanHalf = tanf( halfOuter );
+	if( tanHalf < 1e-3f ) tanHalf = 1e-3f;
+
+	float right[3], up[3];
+	BasisFromAxis( spot.dir, right, up );
+
+	float rimR = tanHalf * len;
+	float axis[3]  = { spot.dir[0] * len, spot.dir[1] * len, spot.dir[2] * len };
+	float rightS[3] = { right[0] * rimR, right[1] * rimR, right[2] * rimR };
+	float upS[3]    = { up[0] * rimR,    up[1] * rimR,    up[2] * rimR };
+
+	if( s_gpu.uMatViewProj >= 0 ) glUniformMatrix4fv( s_gpu.uMatViewProj, 1, GL_FALSE, view.matViewProj.m );
+	if( s_gpu.uApex >= 0 )        glUniform3fv( s_gpu.uApex, 1, spot.origin );
+	if( s_gpu.uAxis >= 0 )        glUniform3fv( s_gpu.uAxis, 1, axis );
+	if( s_gpu.uRight >= 0 )       glUniform3fv( s_gpu.uRight, 1, rightS );
+	if( s_gpu.uUp >= 0 )          glUniform3fv( s_gpu.uUp, 1, upS );
+	if( s_gpu.uSegments >= 0 )    glUniform1f( s_gpu.uSegments, (float)kConeSegments );
+
+	if( s_gpu.uAxisDir >= 0 )     glUniform3fv( s_gpu.uAxisDir, 1, spot.dir );
+	if( s_gpu.uLen >= 0 )         glUniform1f( s_gpu.uLen, len );
+	if( s_gpu.uCosInner >= 0 )    glUniform1f( s_gpu.uCosInner, spot.cosInner );
+	if( s_gpu.uCosOuter >= 0 )    glUniform1f( s_gpu.uCosOuter, spot.cosOuter );
+	if( s_gpu.uColor >= 0 )       glUniform3fv( s_gpu.uColor, 1, spot.color );
+	if( s_gpu.uIntensity >= 0 )   glUniform1f( s_gpu.uIntensity, intensity );
+
+	glDrawArrays( GL_TRIANGLES, 0, 3 * kConeSegments );
+}
+
+}  // anonymous namespace
+
+void LightConeRegisterCvars()
+{
+	if( s_cvarTp == NULL )
+		// Default 1 = the USER-desired third-person visible beam. 0 = off (A/B; the
+		// spot DIRECT lit pool stays, only the air volume goes away).
+		s_cvarTp = gEngfuncs.pfnRegisterVariable( "csz_flashlight_tp", "1", FCVAR_CLIENTDLL );
+	if( s_cvarTpIntensity == NULL )
+		// Linear-HDR additive radiance scale. 3.0 makes the air shaft PROMINENTLY
+		// visible from the side (the user ask: 明显看见光体积) without blowing out --
+		// AGENT_OBSERVED in the L6a visual gate (1.5 read faint, 3.0 unmistakable;
+		// additive delta scales exactly 2x). Dev-tunable down for a subtler beam.
+		s_cvarTpIntensity = gEngfuncs.pfnRegisterVariable( "csz_flashlight_tp_intensity", "3.0", FCVAR_CLIENTDLL );
+
+	CSZ_LogDev( "lightcone", "cvars registered (csz_flashlight_tp/csz_flashlight_tp_intensity)" );
+}
+
+void LightConeRender( const ViewSetup &view )
+{
+	// Gate 1: master switch (A/B-off contract: the world keeps the spot direct lit
+	// pool, only the air volume disappears -> IEEE-exact when off, this pass no-ops).
+	if( ReadCvar( s_cvarTp, 1.0f ) < 0.5f )
+		return;
+
+	// Gate 2: needs the HDR path (a linear RGBA16F target to add into) + the
+	// sampleable scene depth texture for camera-side occlusion.
+	if( !SkyComposeActive() )
+		return;
+	GLuint depthTex = SkyComposeDepthTex();
+	GLuint hdrFbo   = SkyComposeHdrFbo();
+	if( depthTex == 0 || hdrFbo == 0 )
+		return;
+
+	if( !EnsureBuilt() )
+		return;
+
+	// World-space reconstruction matrix for the per-fragment depth->world fade.
+	Mat4 invViewProj;
+	if( !Mat4Inverse( view.matViewProj, invViewProj ) )
+		return;
+
+	// csz_flashlight_range (FogVolume-owned) caps the beam length; lazily fetched.
+	if( !s_lookedRange )
+	{
+		s_lookedRange = true;
+		s_cvarRange = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_range" );
+	}
+	float range = ReadCvar( s_cvarRange, 800.0f );
+	float intensity = ReadCvar( s_cvarTpIntensity, 1.5f );
+
+	float fViewSize[2] = { (float)( view.viewport[0] + view.viewport[2] ),
+	                       (float)( view.viewport[1] + view.viewport[3] ) };
+	if( fViewSize[0] < 1.0f ) fViewSize[0] = 1.0f;
+	if( fViewSize[1] < 1.0f ) fViewSize[1] = 1.0f;
+
+	// --- shared state: add into the HDR FBO, depth test/write OFF (the beam is a
+	// volume sampled via a mesh proxy; HW depth-test on a single proxy face would
+	// over-occlude -> occlusion is done in-shader by clamping to the scene depth,
+	// which also gives the SOFT fade). Sampling the depth attachment is safe: we
+	// never write it (same contract as the fog Step-3 upsample). ---
+	BindFbo( hdrFbo );
+	glViewport( view.viewport[0], view.viewport[1], view.viewport[2], view.viewport[3] );
+	SetDepthTest( false );
+	SetDepthWrite( false );
+	SetBlend( kBlendAddPremul );
+	SetCull( false );
+
+	UseProgram( s_gpu.prog.program );
+	BindVao( s_gpu.vao );
+
+	SkyComposeBindTex( 0, GL_TEXTURE_2D, depthTex );
+	if( s_gpu.uDepthTex >= 0 )    glUniform1i( s_gpu.uDepthTex, kSkyTmuBase + 0 );
+	if( s_gpu.uViewSize >= 0 )    glUniform2fv( s_gpu.uViewSize, 1, fViewSize );
+	if( s_gpu.uCamPos >= 0 )      glUniform3fv( s_gpu.uCamPos, 1, view.origin );
+	if( s_gpu.uHgG >= 0 )         glUniform1f( s_gpu.uHgG, kConeHgG );
+	if( s_gpu.uSteps >= 0 )       glUniform1i( s_gpu.uSteps, kConeSteps );
+	if( s_gpu.uInvViewProj >= 0 ) glUniformMatrix4fv( s_gpu.uInvViewProj, 1, GL_FALSE, invViewProj.m );
+	if( s_gpu.uZNear >= 0 )       glUniform1f( s_gpu.uZNear, view.zNear );
+	if( s_gpu.uZFar >= 0 )        glUniform1f( s_gpu.uZFar, view.zFar );
+
+	// One beam per registered spot light (L6a: single test spot in practice; the
+	// multi-light entity interface + hard cap is L6b). No view-cull here -- the GPU
+	// clips off-screen cones cheaply and a flashlight cone is tiny on screen.
+	float now = ClientTime();
+	int drawn = 0;
+	for( int i = 0; i < LightRegistry::kMaxLights; i++ )
+	{
+		ActiveLight *light = g_lights.Slot( i );
+		if( !light->used || light->desc.type != kLightSpot )
+			continue;
+		if( light->desc.die > 0.0f && light->desc.die < now )
+			continue;
+
+		SpotLightParams spot;
+		g_lights.BuildSpotParams( *light, spot );
+		DrawConeForSpot( view, spot, range, intensity );
+		drawn++;
+	}
+
+	BindVao( 0 );
+	UseProgram( 0 );
+	SkyComposeRestoreTmus();
+	SetBlend( kBlendNone );
+	// Restore the EnterTakeover baseline for the following Step-3 march / transparent
+	// / viewmodel passes (HDR FBO still bound; depth test+write back on).
+	SetDepthTest( true );
+	SetDepthWrite( true );
+
+	static float s_nextStats;
+	if( drawn > 0 && now >= s_nextStats )
+	{
+		s_nextStats = now + 1.0f;
+		CSZ_LogDev( "lightcone", "world beams drawn: %d", drawn );
+	}
+}
+
+void LightConeShutdown()
+{
+	if( s_gpu.built && s_gpu.gpuGeneration == GpuGeneration() )
+		DestroyGpuSameContext();
+	else
+		ForgetGpu();
+}
+
+}  // namespace csz

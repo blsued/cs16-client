@@ -55,9 +55,11 @@ namespace
 
 const float kDegToRad = 3.14159265358979323846f / 180.0f;
 
-// Reserved registry keys for the two M1 test lights.
+// Reserved registry keys for the M1 test lights.
 const int kTestSpotKey = -1;	// csz_testspot command (placed at the view)
 const int kTestLightKey = -2;	// csz_testlight cvar (demo spot at T spawn)
+const int kTestBeamKey = -3;	// csz_testbeam command (L6a: spot OFFSET from the view so the
+                            	// world-space beam VOLUME is seen externally from the fixed camera)
 
 // Test light tuning (plan section 9 step 2 for the csz_testspot numbers; the
 // T-spawn demo light shares them so both showcase the same cone profile).
@@ -363,6 +365,62 @@ void TestSpotCommand()
 	}
 }
 
+// L6a third-person test fixture (csz_testbeam). csz_testspot puts the spot AT the
+// eye (first-person: the camera sits at the cone apex and cannot see the volume from
+// outside); csz_testlight needs a working devcam aim to frame the T-spawn light, which
+// this devcam path does not provide. csz_testbeam instead places the spot OFFSET from
+// the current view (a little up + to the side) and pitched further DOWN, so the beam
+// shoots ahead into the scene while the camera stays OUTSIDE the cone -- the fixed
+// forward view then sees the world-space beam VOLUME obliquely (the L6a acceptance shot).
+void TestBeamCommand()
+{
+	if( gEngfuncs.Cmd_Argc() >= 2 && strcmp( gEngfuncs.Cmd_Argv( 1 ), "off" ) == 0 )
+	{
+		g_lights.Remove( kTestBeamKey );
+		CSZ_LogInfo( "lighting", "test beam light removed" );
+		return;
+	}
+
+	if( !s_haveView )
+	{
+		CSZ_LogWarn( "lighting", "csz_testbeam: no taken-over frame yet (enter a map with csz_renderer 1)" );
+		return;
+	}
+
+	float fwd[3], right[3], up[3];
+
+	AngleVectors( s_viewAngles, fwd, right, up );
+
+	LightDesc desc;
+
+	memset( &desc, 0, sizeof( desc ));
+	desc.type = kLightSpot;
+	// Apex up + to the right of the eye so the camera is clearly outside the cone.
+	for( int j = 0; j < 3; j++ )
+		desc.origin[j] = s_viewOrigin[j] + up[j] * 60.0f + right[j] * 50.0f + fwd[j] * 24.0f;
+	// Aim along the view yaw but pitched well DOWN: the beam descends into the floor
+	// ahead, fully inside the forward frustum, seen side-on from the upper-left.
+	desc.angles[0] = s_viewAngles[0] + 30.0f;	// quake +pitch = downward
+	desc.angles[1] = s_viewAngles[1];
+	desc.angles[2] = 0.0f;
+	desc.color[0] = kTestColor[0];
+	desc.color[1] = kTestColor[1];
+	desc.color[2] = kTestColor[2];
+	desc.radius = kTestRadius;
+	desc.fov = kTestFov;
+	desc.die = 0.0f;			// persistent until "csz_testbeam off"
+	desc.castShadow = true;
+
+	int slot = g_lights.AddOrUpdate( kTestBeamKey, desc );
+
+	if( slot >= 0 )
+	{
+		CSZ_LogInfo( "lighting", "beam light slot=%d key=%d origin=(%.0f %.0f %.0f) ang=(%.0f %.0f) fov=%.0f radius=%.0f",
+			slot, kTestBeamKey, desc.origin[0], desc.origin[1], desc.origin[2],
+			desc.angles[0], desc.angles[1], desc.fov, desc.radius );
+	}
+}
+
 }
 
 void RenderShadowMaps( const ViewSetup &mainView, cl_entity_s *const *studioEnts, int studioCount )
@@ -487,6 +545,7 @@ void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, 
 void RegisterLightingCommands()
 {
 	gEngfuncs.pfnAddCommand( "csz_testspot", TestSpotCommand );
+	gEngfuncs.pfnAddCommand( "csz_testbeam", TestBeamCommand );	// L6a third-person beam fixture
 
 	if( s_cvarTestLight == NULL )
 		s_cvarTestLight = gEngfuncs.pfnRegisterVariable( "csz_testlight", "0", FCVAR_CLIENTDLL );

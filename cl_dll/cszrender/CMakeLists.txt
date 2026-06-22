@@ -33,6 +33,7 @@ set(CSZRENDER_SRC
 	geom/csz_viewmodel.cpp
 	lighting/csz_light_registry.cpp
 	lighting/csz_light_pass.cpp
+	lighting/csz_light_cone.cpp
 	lighting/csz_shadowmap.cpp
 )
 add_library(cszrender STATIC ${CSZRENDER_SRC})
