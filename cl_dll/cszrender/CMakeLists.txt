@@ -34,6 +34,7 @@ set(CSZRENDER_SRC
 	lighting/csz_light_registry.cpp
 	lighting/csz_light_pass.cpp
 	lighting/csz_light_cone.cpp
+	lighting/csz_dust.cpp
 	lighting/csz_light_budget.cpp
 	lighting/csz_flashlight_state.cpp
 	lighting/csz_shadowmap.cpp

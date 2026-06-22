@@ -52,6 +52,7 @@
 #include "geom/csz_world.h"
 #include "lighting/csz_light_pass.h"
 #include "lighting/csz_light_cone.h"
+#include "lighting/csz_dust.h"
 #include "lighting/csz_light_budget.h"
 #include "lighting/csz_flashlight_state.h"
 #include "lighting/csz_light_registry.h"
@@ -274,6 +275,7 @@ void Renderer::OnHudInit()
 	RegisterSpriteCommands();	// csz_testsprite (T5)
 	RegisterLightingCommands();	// csz_testspot + csz_testlight (T6)
 	LightConeRegisterCvars();	// L6a: csz_flashlight_tp (default 1 = world-space visible beam) + _intensity
+	DustRegisterCvars();		// L7: csz_dust (default 1 = gated airborne dust) + _count/_intensity/_size
 	RegisterStudioTextureCvars();	// csz_dev_armskin (spec 4.3.1 layer 1 dev probe)
 	RegisterViewmodelDevCvars();	// csz_dev_viewmodel (dev stand-in model)
 	g_fog.RegisterDevCommands();	// csz_devfog/csz_devtint/csz_devmoon (A1; CSZ_DEV_TOOLS only)
@@ -312,6 +314,7 @@ void Renderer::Shutdown()
 		g_studio.DestroyAll();
 		g_spotShadow.Destroy();
 		LightConeShutdown();	// L6a: world beam program + VAO (generation-safe)
+		DustShutdown();		// L7: dust program + stream VBO/VAO (generation-safe)
 		FogVolumeShutdown();	// fog M1 Step 3: half-res FBO + march/upsample programs (generation-safe)
 		FogGodraysShutdown();	// fog M1 Step 4: half-res occl/scatter FBOs + 3 programs (generation-safe)
 		AtmosShutdown();	// atmosphere LUTs + programs + GPU timer (C2, generation-safe)
@@ -577,6 +580,11 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	// path / an on-screen above-horizon body. Restores HDR FBO + main viewport +
 	// blend + TMUs + depth before the transparent/viewmodel passes.
 	FogGodraysRender( view );
+	// slot 13.6 (L7): gated airborne dust. After the cone (13.4) + fog march/god rays
+	// (13.5), before the transparent pass. A separate additive soft-particle pass into
+	// the HDR FBO; motes materialise ONLY inside a flashlight cone or the moon Tyndall
+	// shaft (gate in the CPU spawn/cull fill -> unlit motes never reach the VBO).
+	DustRender( view );
 	EndPass( kTmVolume );
 
 	BeginPass( kTmTrans );
