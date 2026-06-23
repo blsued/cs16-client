@@ -127,9 +127,9 @@ struct WorldState
 	int uFogParams, uCamPos;	// analytic base fog (fog M1 Step 2): height b/sunGlow/maxOpacity + ray origin
 	int uSunDir, uSunColor;		// base pass only (sky 档1 directional N.L; lit/depth exempt, pitfall 23)
 	int uMoonInScatter, uShaftMask, uMoonShaft;	// fog M1 L4 moon Tyndall air-glow (base pass only; identity until fed)
-	int uNightModel, uNightness, uPhaseIntensity;	// S2 physical night model (base pass only)
+	int uNightModel, uNightness, uSunWarmColor;	// S2 physical night model (base pass only)
 	int uMoonDir, uMoonColor;			// S2 gated night moon directional (base pass only)
-	int uNightSky, uNightFloor, uNightK, uNightMoon, uNightLmKeep;	// S2 world night ambient calibration (base pass only)
+	int uNightSky, uNightFloor, uNightK, uNightMoon;	// S2 world night ambient calibration (base pass only)
 	int uBrushAlpha;		// per-entity translucency for blended brush modes (renderamt); 1.0 = opaque/world
 	ShaderProgram litProgram;	// additive per-light pass (T6)
 	int litUViewProj, litUAlphaTest;
@@ -193,14 +193,13 @@ void FeedNightModel( const WorldState &w, const AmbienceParams &amb )
 {
 	if( w.uNightModel >= 0 )     glUniform1f( w.uNightModel, amb.nightModel );
 	if( w.uNightness >= 0 )      glUniform1f( w.uNightness, amb.nightness );
-	if( w.uPhaseIntensity >= 0 ) glUniform1f( w.uPhaseIntensity, amb.phaseIntensity );
+	if( w.uSunWarmColor >= 0 )   glUniform3fv( w.uSunWarmColor, 1, amb.sunSurfaceDirect );	// warm sun-only premul (ungated; codex P2b), 0 when sun down
 	if( w.uMoonDir >= 0 )        glUniform3fv( w.uMoonDir, 1, amb.moonDir );
-	if( w.uMoonColor >= 0 )      glUniform3fv( w.uMoonColor, 1, amb.moonSurfaceDirect );	// premul, 0 when moon down
+	if( w.uMoonColor >= 0 )      glUniform3fv( w.uMoonColor, 1, amb.moonSurfaceDirect );	// moon-only premul, 0 when moon down
 	if( w.uNightSky >= 0 )       glUniform3fv( w.uNightSky, 1, amb.nightSky[0] );		// world calibration ([0])
 	if( w.uNightFloor >= 0 )     glUniform3fv( w.uNightFloor, 1, amb.nightFloor[0] );
 	if( w.uNightK >= 0 )         glUniform1f( w.uNightK, amb.nightK[0] );
 	if( w.uNightMoon >= 0 )      glUniform1f( w.uNightMoon, amb.nightMoonGain );
-	if( w.uNightLmKeep >= 0 )    glUniform1f( w.uNightLmKeep, amb.nightLmKeep );
 }
 
 // Conversion scratch for one lightmap block (engine standard maps: smax/tmax
@@ -1068,14 +1067,13 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.uMoonShaft = UniformLoc( s_world.program, "u_moonShaft" );		// L4
 	s_world.uNightModel = UniformLoc( s_world.program, "u_nightModel" );		// S2
 	s_world.uNightness = UniformLoc( s_world.program, "u_nightness" );		// S2
-	s_world.uPhaseIntensity = UniformLoc( s_world.program, "u_phaseIntensity" );	// S2
+	s_world.uSunWarmColor = UniformLoc( s_world.program, "u_sunWarmColor" );		// S2 (codex P2b)
 	s_world.uMoonDir = UniformLoc( s_world.program, "u_moonDir" );			// S2
 	s_world.uMoonColor = UniformLoc( s_world.program, "u_moonColor" );		// S2
 	s_world.uNightSky = UniformLoc( s_world.program, "u_nightSky" );			// S2
 	s_world.uNightFloor = UniformLoc( s_world.program, "u_nightFloor" );		// S2
 	s_world.uNightK = UniformLoc( s_world.program, "u_nightK" );			// S2
 	s_world.uNightMoon = UniformLoc( s_world.program, "u_nightMoon" );		// S2
-	s_world.uNightLmKeep = UniformLoc( s_world.program, "u_nightLmKeep" );		// S2
 	s_world.uBrushAlpha = UniformLoc( s_world.program, "u_brushAlpha" );
 
 	UseProgram( s_world.program.program );
@@ -1103,18 +1101,17 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	if( s_world.uShaftMask >= 0 )     glUniform1f( s_world.uShaftMask, 1.0f );	// L4: gaps-pass identity
 	if( s_world.uMoonShaft >= 0 )     glUniform1f( s_world.uMoonShaft, 0.0f );	// L4: disabled until fed (no-op)
 	// S2: default to the approved DAY look until the per-frame feed -- nightModel new,
-	// nightness 0 (-> approvedDay branch), phaseIntensity 1 (== luma of neutral tint).
+	// nightness 0 (-> approvedDay branch), sunWarmColor 0 (sun down -> no directional).
 	const float kNightZero3[3] = { 0.0f, 0.0f, 0.0f };
 	if( s_world.uNightModel >= 0 )     glUniform1f( s_world.uNightModel, 1.0f );
 	if( s_world.uNightness >= 0 )      glUniform1f( s_world.uNightness, 0.0f );
-	if( s_world.uPhaseIntensity >= 0 ) glUniform1f( s_world.uPhaseIntensity, 1.0f );
+	if( s_world.uSunWarmColor >= 0 )   glUniform3fv( s_world.uSunWarmColor, 1, kNightZero3 );
 	if( s_world.uMoonDir >= 0 )        glUniform3fv( s_world.uMoonDir, 1, kCamPosZero );	// any unit-ish; moonColor 0 nulls the term
 	if( s_world.uMoonColor >= 0 )      glUniform3fv( s_world.uMoonColor, 1, kNightZero3 );
 	if( s_world.uNightSky >= 0 )       glUniform3fv( s_world.uNightSky, 1, kNightZero3 );
 	if( s_world.uNightFloor >= 0 )     glUniform3fv( s_world.uNightFloor, 1, kNightZero3 );
 	if( s_world.uNightK >= 0 )         glUniform1f( s_world.uNightK, 0.7f );
 	if( s_world.uNightMoon >= 0 )      glUniform1f( s_world.uNightMoon, 1.0f );
-	if( s_world.uNightLmKeep >= 0 )    glUniform1f( s_world.uNightLmKeep, 0.0f );
 	UseProgram( 0 );
 
 	// Lit-additive program (T6 spot pass); init-time, so failure is FATAL.

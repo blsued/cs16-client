@@ -111,19 +111,18 @@ uniform float u_brushAlpha;       // per-entity translucency (curstate.renderamt
 uniform vec3  u_moonInScatter;    // L2 moonFogInScatter * intensity (premultiplied, linear); (0,0,0)=off
 uniform float u_shaftMask;        // L3a cloud-gap gating: gap=1, thick cloud=0; 1.0 neutral
 uniform float u_moonShaft;        // csz_moonshaft master toggle: 1=enhanced glow, 0=exact pre-L4
-// S2 physical night model (REWORK-SPEC §S2, findings 1,2,7,9). Default-fed to
-// reproduce the approved 3fd8b7e look: u_nightModel 0 = byte-identical pre-S2 path,
-// u_nightness 0 (day) -> the approvedDay branch is pixel-identical.
+// S2 physical night model (REWORK-SPEC §S2, findings 1,2,7,9; codex S2 red-team v1).
+// Default-fed to reproduce the approved 3fd8b7e look: u_nightModel 0 = byte-identical
+// pre-S2 path, u_nightness 0 (day/sunset) -> the approvedDay branch is byte-identical.
 uniform float u_nightModel;       // 1 = new physical model, 0 = legacy 3fd8b7e (A/B revert)
-uniform float u_nightness;        // explicit phase gate [0,1] (replaces u_ambTint.b-r derivation)
-uniform float u_phaseIntensity;   // approved-phase brightness anchor (== luma(u_ambTint) by default)
+uniform float u_nightness;        // explicit phase gate [0,1], phase-curve driven (codex P0; replaces u_ambTint.b-r)
+uniform vec3  u_sunWarmColor;     // warm SUN-ONLY premul directional (ungated; codex P2b); dir = -u_moonDir (antipode)
 uniform vec3  u_moonDir;          // surface -> moon (pure antipode L vector) for the gated night moon term
 uniform vec3  u_moonColor;        // moon-only premultiplied directional color (0 when the moon is down)
 uniform vec3  u_nightSky;         // night sky-ambient color (premul), modulated by pow(skyVis,k)
 uniform vec3  u_nightFloor;       // competitive readable ambient floor (premul), skyVis-independent
 uniform float u_nightK;           // skyVis exponent k for the world night ambient
 uniform float u_nightMoon;        // gain on the skyVis-GATED moon directional (wallhack-fixed moonlight)
-uniform float u_nightLmKeep;      // fraction of the baked daytime lightmap retained at night (default 0)
 out vec4 fragColor;
 // Analytic base-fog transmittance (fog M1 spec 4.3): closed-form integral of an
 // exponential-height density d(z)=a*e^(-b*z) along the camera->surface ray, with
@@ -163,34 +162,43 @@ void main()
 	// fully coherent, so the legacy path is a provable one-knob revert.
 	if( u_nightModel > 0.5 )
 	{
-		// === New physical night model (findings 1,2,7,9) ===
-		// (1) APPROVED DAY LOOK -- pixel-identical to 3fd8b7e at u_nightness=0. The
-		// u_ambTint dual role is split (finding 1): pure HUE = tint normalized to
-		// luma 1, brightness = the explicit u_phaseIntensity anchor (== luma(tint)
-		// by default, so hue*intensity reconstructs the approved tint). The approved
-		// sun/moon directional channel (u_sunColor/u_sunDir = day/moon blended main
-		// light) is PRESERVED UNGATED here (finding 2: only the night moon below is
-		// skyVis-gated; the warm dusk/dawn directional must not be killed).
-		float tintL   = max( dot( u_ambTint, vec3( 0.2126, 0.7152, 0.0722 )), 1e-4 );
-		vec3  tintHue = u_ambTint / tintL;
-		vec3  approvedDay = lit * tintHue * u_phaseIntensity * u_skyAmbScale
-		                  + albedo * u_sunColor * max( dot( nrm, u_sunDir ), 0.0 );
-		// (2) PHYSICAL NIGHT -- spatialized by the S1 geometric skyVis (finding 7
-		// replaces the old lightmap-luma sky proxy; finding 9: world-specific k +
-		// floor calibration). Indoor (skyVis~0) collapses to the cool readable
-		// ambFloor (competitive: silhouettes still visible, no pure black); open
-		// (skyVis~1) gets the night sky-ambient PLUS the skyVis-GATED moon
-		// directional -- 屋顶下 skyVis~0 so the moon cannot leak through walls
-		// (the穿模/wallhack fix). u_moonColor is 0 unless the moon is up, so this
-		// term self-disables by day. u_nightLmKeep optionally re-adds baked detail.
+		// === New physical night model (findings 1,2,7,9; codex P0/P1a/P1b/P2b) ===
+		// Shared SPLIT directional (codex P2b): the WARM SUN is UNGATED (dusk/dawn,
+		// finding 2 -- never kill it; direction = pure antipode -u_moonDir), the COOL
+		// MOON is skyVis-GATED so it can NEVER leak through walls at ANY nightness.
+		// Both branches below use this same pair -> no ungated moonlight anywhere.
 		float sv = clamp( v_skyVis, 0.0, 1.0 );
-		vec3  nightAmb  = u_nightSky * pow( sv, u_nightK ) + u_nightFloor;
-		vec3  moonTerm  = albedo * u_moonColor * max( dot( nrm, u_moonDir ), 0.0 ) * sv * u_nightMoon;
-		vec3  physicalNight = albedo * nightAmb + moonTerm + lit * u_nightLmKeep;
-		// (3) variable darkness = transition approvedDay -> physicalNight by the
-		// EXPLICIT phase gate u_nightness (finding 7: no longer u_ambTint.b-r). The
-		// world-only day-for-night cool grade is DEFERRED to S4 (unified Purkinje
-		// post, finding 8); the new path's cooling comes from u_nightSky's cool hue.
+		vec3  sunWarm  = albedo * u_sunWarmColor * max( dot( nrm, -u_moonDir ), 0.0 );             // warm sun, UNGATED
+		vec3  moonTerm = albedo * u_moonColor    * max( dot( nrm,  u_moonDir ), 0.0 ) * sv * u_nightMoon; // cool moon, skyVis-GATED
+		// (1) APPROVED DAY LOOK -- the 3fd8b7e ambient + day-for-night cool grade +
+		// indoor floor expression VERBATIM (codex P1a: NO tint reconstruction / phase
+		// gain), with the directional REPLACED by the split sunWarm+moonTerm above
+		// (codex P2b). The day-for-night cool grade lives HERE in the active path (codex
+		// P1b), keeping its OWN tint.b-r signal independent of u_nightness. At the
+		// nightness=0 phases (sunset/day) the moon is below the horizon so u_moonColor=0
+		// and sunWarm == the old blended directional -> approvedDay byte-identical to model0.
+		vec3  approvedDay = lit;
+		float csz_night = smoothstep( 0.0, 0.10, u_ambTint.b - u_ambTint.r );
+		float csz_lmLum = dot( lm, vec3( 0.2126, 0.7152, 0.0722 ));
+		const float CSZ_SKY_LO = 0.15, CSZ_SKY_HI = 0.50;   // bake-luma window: below=indoor, above=outdoor
+		float csz_sky = smoothstep( CSZ_SKY_LO, CSZ_SKY_HI, csz_lmLum );
+		const float CSZ_INDOOR_AMB = 0.25;                  // night indoor ambient floor (DARK end)
+		float csz_amb = mix( 1.0, mix( CSZ_INDOOR_AMB, 1.0, csz_sky ), csz_night );
+		approvedDay *= u_ambTint * csz_amb * u_skyAmbScale;
+		approvedDay += sunWarm + moonTerm;                  // P2b split directional (was blended u_sunColor * csz_moon)
+		float csz_l = dot( approvedDay, vec3( 0.2126, 0.7152, 0.0722 ));
+		vec3  csz_cool = vec3( csz_l ) * vec3( 0.75, 0.92, 1.25 );    // luminance pushed cool-blue
+		approvedDay = mix( approvedDay, csz_cool, csz_night * 0.70 ); // day-for-night grade (active path, codex P1b)
+		// (2) PHYSICAL NIGHT -- spatialized by the S1 geometric skyVis (finding 7
+		// replaces the old lightmap-luma sky proxy; finding 9: world-specific k + floor).
+		// Indoor (skyVis~0) collapses to the cool readable ambFloor (competitive: silhouettes
+		// still visible, no pure black); open (skyVis~1) gets the night sky-ambient PLUS the
+		// same skyVis-GATED moon directional (屋顶下 skyVis~0 -> no moon leak / wallhack fix).
+		vec3  nightAmb = u_nightSky * pow( sv, u_nightK ) + u_nightFloor;
+		vec3  physicalNight = albedo * nightAmb + sunWarm + moonTerm;
+		// (3) variable darkness = transition approvedDay -> physicalNight by the EXPLICIT
+		// phase-curve gate u_nightness (codex P0: no longer u_ambTint.b-r, so the cool dawn
+		// keyframe is no longer mis-read as full night). nightness=0 -> exactly approvedDay.
 		col = mix( approvedDay, physicalNight, clamp( u_nightness, 0.0, 1.0 ));
 	}
 	else

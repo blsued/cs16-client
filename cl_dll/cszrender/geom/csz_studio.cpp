@@ -73,7 +73,7 @@ struct PassLocs
 	int uSunDir, uSunColor;						// base program only (sky 档1 directional N.L; lit/depth exempt, pitfall 23)
 	int uSkyVis;							// S1: per-entity geometric sky visibility (base program only); 1.0 default
 	int uMoonInScatter, uShaftMask, uMoonShaft;			// fog M1 L4 moon Tyndall air-glow (base program only; identity until fed)
-	int uNightModel, uNightness, uPhaseIntensity;			// S2 physical night model (base program only)
+	int uNightModel, uNightness, uSunWarmColor;			// S2 physical night model (base program only)
 	int uMoonDir, uMoonColor;					// S2 gated night moon directional (base program only)
 	int uNightSky, uNightFloor, uNightK, uNightMoon;		// S2 studio night ambient calibration (base program only)
 	int uLightOrigin, uLightDir, uLightColor;			// lit program only
@@ -127,7 +127,7 @@ void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 	out.uMoonShaft = UniformLoc( prog, "u_moonShaft" );		// L4
 	out.uNightModel = UniformLoc( prog, "u_nightModel" );		// S2
 	out.uNightness = UniformLoc( prog, "u_nightness" );		// S2
-	out.uPhaseIntensity = UniformLoc( prog, "u_phaseIntensity" );	// S2
+	out.uSunWarmColor = UniformLoc( prog, "u_sunWarmColor" );	// S2 (codex P2b)
 	out.uMoonDir = UniformLoc( prog, "u_moonDir" );			// S2
 	out.uMoonColor = UniformLoc( prog, "u_moonColor" );		// S2
 	out.uNightSky = UniformLoc( prog, "u_nightSky" );		// S2
@@ -192,11 +192,11 @@ void EnsureShader()
 	if( s_studio.baseLocs.uShaftMask >= 0 )     glUniform1f( s_studio.baseLocs.uShaftMask, 1.0f );	// gaps-pass identity
 	if( s_studio.baseLocs.uMoonShaft >= 0 )     glUniform1f( s_studio.baseLocs.uMoonShaft, 0.0f );	// disabled until fed
 	// S2: default to the approved DAY look until the per-frame feed (nightness 0 ->
-	// approvedDay branch, phaseIntensity 1, moon/night colors 0 so the model is dormant).
+	// approvedDay branch, sunWarmColor/moon/night colors 0 so the model is dormant).
 	const float kNightZero3[3] = { 0.0f, 0.0f, 0.0f };
 	if( s_studio.baseLocs.uNightModel >= 0 )     glUniform1f( s_studio.baseLocs.uNightModel, 1.0f );
 	if( s_studio.baseLocs.uNightness >= 0 )      glUniform1f( s_studio.baseLocs.uNightness, 0.0f );
-	if( s_studio.baseLocs.uPhaseIntensity >= 0 ) glUniform1f( s_studio.baseLocs.uPhaseIntensity, 1.0f );
+	if( s_studio.baseLocs.uSunWarmColor >= 0 )   glUniform3fv( s_studio.baseLocs.uSunWarmColor, 1, kNightZero3 );
 	if( s_studio.baseLocs.uMoonDir >= 0 )        glUniform3fv( s_studio.baseLocs.uMoonDir, 1, kCamPosZero );
 	if( s_studio.baseLocs.uMoonColor >= 0 )      glUniform3fv( s_studio.baseLocs.uMoonColor, 1, kNightZero3 );
 	if( s_studio.baseLocs.uNightSky >= 0 )       glUniform3fv( s_studio.baseLocs.uNightSky, 1, kNightZero3 );
@@ -564,7 +564,7 @@ void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, cons
 	// are -1 (glUniform* no-op), so those passes stay exempt (pitfall 23).
 	if( locs.uNightModel >= 0 )     glUniform1f( locs.uNightModel, amb.nightModel );
 	if( locs.uNightness >= 0 )      glUniform1f( locs.uNightness, amb.nightness );
-	if( locs.uPhaseIntensity >= 0 ) glUniform1f( locs.uPhaseIntensity, amb.phaseIntensity );
+	if( locs.uSunWarmColor >= 0 )   glUniform3fv( locs.uSunWarmColor, 1, amb.sunSurfaceDirect );	// warm sun-only premul (ungated; codex P2b)
 	if( locs.uMoonDir >= 0 )        glUniform3fv( locs.uMoonDir, 1, amb.moonDir );
 	if( locs.uMoonColor >= 0 )      glUniform3fv( locs.uMoonColor, 1, amb.moonSurfaceDirect );	// premul, 0 when moon down
 	if( locs.uNightSky >= 0 )       glUniform3fv( locs.uNightSky, 1, amb.nightSky[1] );		// studio calibration ([1])

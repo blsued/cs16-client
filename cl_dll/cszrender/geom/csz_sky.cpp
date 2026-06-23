@@ -95,7 +95,9 @@ cvar_t *s_moonlightV2Cvar;	// csz_moonlight_v2 (L2): OPT-IN photometric phase re
 // to fill the AmbienceParams night-transport slots. Defaults reproduce the approved
 // 3fd8b7e look (csz_night_model 0 is the hard one-knob revert for A/B).
 cvar_t *s_nightModelCvar;	// csz_night_model: 1 (default) = new physical model, 0 = pre-S2 tiled-multiplier night
-cvar_t *s_nightPhaseGainCvar;	// csz_night_phase_gain: brightness multiplier on the approved-phase anchor (1.0 = identity; USER's "夕阳别死黑" dial)
+cvar_t *s_nightRiseEndCvar;	// csz_night_rise_end: phase where nightness reaches 1 ramping up from sunset (codex P0 curve)
+cvar_t *s_nightFallStartCvar;	// csz_night_fall_start: phase where nightness begins falling back toward dawn (codex P0 curve)
+cvar_t *s_nightFallEndCvar;	// csz_night_fall_end: phase where nightness reaches 0 (approved dawn restored) (codex P0 curve)
 cvar_t *s_nightKWorldCvar;	// csz_night_k_world: skyVis exponent k for the WORLD night ambient (higher = indoors darker faster)
 cvar_t *s_nightKStudioCvar;	// csz_night_k_studio: skyVis exponent k for STUDIO (per-entity), calibrated separately (finding 9)
 cvar_t *s_nightSkyWorldCvar;	// csz_night_sky_world: WORLD night sky-ambient intensity (scales the cool sky hue)
@@ -103,7 +105,6 @@ cvar_t *s_nightSkyStudioCvar;	// csz_night_sky_studio: STUDIO night sky-ambient 
 cvar_t *s_nightFloorWorldCvar;	// csz_night_floor_world: WORLD competitive ambient floor intensity (prevents pure-black indoors)
 cvar_t *s_nightFloorStudioCvar;	// csz_night_floor_studio: STUDIO ambient floor intensity (keeps enemy models readable)
 cvar_t *s_nightMoonCvar;	// csz_night_moon: gain on the skyVis-GATED moon directional in physical night (the wallhack-fixed moonlight)
-cvar_t *s_nightLmKeepCvar;	// csz_night_lmkeep: fraction of the baked daytime lightmap retained at night (world; 0 = spec-faithful pure physical)
 
 #if defined( CSZ_DEV_TOOLS )
 cvar_t *s_fullscreenCvar;	// csz_sky_fullscreen: dev overlay, draw the sky over the whole frame
@@ -214,8 +215,12 @@ void SkyRenderer::RegisterDevCvars()
 	// csz_night_model 0 is the hard A/B revert to the pre-S2 tiled-multiplier night.
 	if( s_nightModelCvar == NULL )
 		s_nightModelCvar = gEngfuncs.pfnRegisterVariable( "csz_night_model", "1", FCVAR_CLIENTDLL );
-	if( s_nightPhaseGainCvar == NULL )
-		s_nightPhaseGainCvar = gEngfuncs.pfnRegisterVariable( "csz_night_phase_gain", "1", FCVAR_CLIENTDLL );
+	if( s_nightRiseEndCvar == NULL )
+		s_nightRiseEndCvar = gEngfuncs.pfnRegisterVariable( "csz_night_rise_end", "0.30", FCVAR_CLIENTDLL );
+	if( s_nightFallStartCvar == NULL )
+		s_nightFallStartCvar = gEngfuncs.pfnRegisterVariable( "csz_night_fall_start", "0.72", FCVAR_CLIENTDLL );
+	if( s_nightFallEndCvar == NULL )
+		s_nightFallEndCvar = gEngfuncs.pfnRegisterVariable( "csz_night_fall_end", "0.88", FCVAR_CLIENTDLL );
 	if( s_nightKWorldCvar == NULL )
 		s_nightKWorldCvar = gEngfuncs.pfnRegisterVariable( "csz_night_k_world", "0.7", FCVAR_CLIENTDLL );
 	if( s_nightKStudioCvar == NULL )
@@ -230,8 +235,6 @@ void SkyRenderer::RegisterDevCvars()
 		s_nightFloorStudioCvar = gEngfuncs.pfnRegisterVariable( "csz_night_floor_studio", "0.05", FCVAR_CLIENTDLL );
 	if( s_nightMoonCvar == NULL )
 		s_nightMoonCvar = gEngfuncs.pfnRegisterVariable( "csz_night_moon", "1", FCVAR_CLIENTDLL );
-	if( s_nightLmKeepCvar == NULL )
-		s_nightLmKeepCvar = gEngfuncs.pfnRegisterVariable( "csz_night_lmkeep", "0", FCVAR_CLIENTDLL );
 
 #if defined( CSZ_DEV_TOOLS )
 	gEngfuncs.pfnAddCommand( "csz_devsun", DevSunCommand );	// mirror csz_devmoon (csz_fog.cpp)
@@ -567,6 +570,15 @@ void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 	amb.moonSurfaceDirect[0] = moonRGB[0] * moonLit;   // moon-only premul surface directional
 	amb.moonSurfaceDirect[1] = moonRGB[1] * moonLit;
 	amb.moonSurfaceDirect[2] = moonRGB[2] * moonLit;
+	// S2 codex P2b: the WARM SUN-ONLY premul surface directional (sunRGB * the raw warm
+	// sunLit, NO moonlight/cloud gains -- those are moon knobs). The physical-night shader
+	// path lights the surface with this UNGATED (dusk/dawn warm sun, finding 2) plus the
+	// skyVis-GATED moonSurfaceDirect, so the moon never leaks through walls at ANY nightness.
+	// 0 when the sun is below the horizon. When the moon is down (sunset/day, the nightness=0
+	// phases) this EQUALS the blended moonlightColor, so the shader stays byte-identical there.
+	amb.sunSurfaceDirect[0] = sunRGB[0] * sunLit;
+	amb.sunSurfaceDirect[1] = sunRGB[1] * sunLit;
+	amb.sunSurfaceDirect[2] = sunRGB[2] * sunLit;
 	amb.moonFogInScatter[0] = moonRGB[0];              // dedicated in-scatter color (unit-ish, NOT premul) for L4
 	amb.moonFogInScatter[1] = moonRGB[1];
 	amb.moonFogInScatter[2] = moonRGB[2];
@@ -594,18 +606,23 @@ void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 	// the full phase/cloud/csz_moonlight response already and is 0 unless the moon is up.
 	amb.nightModel = ( s_nightModelCvar != NULL && s_nightModelCvar->value == 0.0f ) ? 0.0f : 1.0f;
 
-	// Explicit phase gate (finding 7): the SAME cool-bias formula the shader used to
-	// derive night from u_ambTint.b-r, moved CPU-side so the night TIMING is unchanged
-	// but the shader no longer re-derives it. 0 at day/sunset, 1 by deep midnight.
-	amb.nightness = skymath::Smooth01( 0.0f, 0.10f, amb.tint[2] - amb.tint[0] );
-
-	// Approved-phase brightness anchor (finding 1): luma(tint) x a USER gain. The shader
-	// splits u_ambTint into pure HUE (luma-normalized) x this scalar, so hue/brightness
-	// decouple while gain=1 reconstructs the approved tint (~identity, zero regression).
-	float tintLuma = 0.2126f * amb.tint[0] + 0.7152f * amb.tint[1] + 0.0722f * amb.tint[2];
-	float phaseGain = ( s_nightPhaseGainCvar != NULL ) ? s_nightPhaseGainCvar->value : 1.0f;
-	if( phaseGain < 0.0f )  phaseGain = 0.0f;
-	amb.phaseIntensity = tintLuma * phaseGain;
+	// Explicit phase gate (finding 7, codex P0): nightness is an INDEPENDENT PHASE CURVE,
+	// NOT derived from u_ambTint.b-r. The old tint.b-r read mis-classified the cool dawn
+	// keyframe (dawn B=0.264 > R=0.172 -> nightness~0.98) as full night, dragging the
+	// approved dawn into the physical-night model and crushing the sunrise warm sun. Driving
+	// nightness from phase keeps dawn approved: ramp up from sunset(0) to full night by
+	// rise_end, hold through the dark hours, then fall back to 0 by fall_end (just before the
+	// dawn keyframe at 0.86). sunset(0.0)=0, midnight(0.5)=1, dawn(0.86)~0, day(1.0)=0. The
+	// legacy day-for-night COOL GRADE keeps its OWN separate tint.b-r signal inside the
+	// shader's approvedDay branch (unchanged), so this only gates the physical-night mix.
+	float riseEnd   = ( s_nightRiseEndCvar   != NULL ) ? s_nightRiseEndCvar->value   : 0.30f;
+	float fallStart = ( s_nightFallStartCvar != NULL ) ? s_nightFallStartCvar->value : 0.72f;
+	float fallEnd   = ( s_nightFallEndCvar   != NULL ) ? s_nightFallEndCvar->value   : 0.88f;
+	if( riseEnd < 1e-3f )        riseEnd = 1e-3f;                         // guard Smooth01 zero-width
+	if( fallEnd <= fallStart )   fallEnd = fallStart + 1e-3f;
+	float nightRise = skymath::Smooth01( 0.0f, riseEnd, phase );          // sunset 0 -> full night by rise_end
+	float nightFall = 1.0f - skymath::Smooth01( fallStart, fallEnd, phase ); // full night -> 0 by fall_end (dawn restored)
+	amb.nightness = ( nightRise < nightFall ) ? nightRise : nightFall;    // min: plateau at 1 through the dark hours
 
 	// Per-domain night ambient (finding 9: world and studio are calibrated SEPARATELY).
 	// Cool moonlit-ambient hues; cvar intensities scale them. skyHue drives the open-sky
@@ -633,9 +650,6 @@ void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 
 	amb.nightMoonGain = ( s_nightMoonCvar != NULL ) ? s_nightMoonCvar->value : 1.0f;
 	if( amb.nightMoonGain < 0.0f ) amb.nightMoonGain = 0.0f;
-	amb.nightLmKeep = ( s_nightLmKeepCvar != NULL ) ? s_nightLmKeepCvar->value : 0.0f;
-	if( amb.nightLmKeep < 0.0f ) amb.nightLmKeep = 0.0f;
-	if( amb.nightLmKeep > 1.0f ) amb.nightLmKeep = 1.0f;
 }
 
 }
