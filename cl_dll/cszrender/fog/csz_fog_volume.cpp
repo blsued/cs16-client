@@ -296,9 +296,11 @@ void FogVolumeRegisterCvars()
 	if( s_cvarRange == NULL )
 		// L5: a single hard range cap (world units). Bounds the spot attenuation
 		// falloff, the cone length (influence sphere), and the march step count;
-		// reserved as the L7 dust spawn-volume ceiling. Near-field default (the
-		// perf lever: an unlit far field costs nothing). Clamped to the light radius.
-		s_cvarRange = gEngfuncs.pfnRegisterVariable( "csz_flashlight_range", "800", FCVAR_CLIENTDLL );
+		// reserved as the L7 dust spawn-volume ceiling. Clamped to the light radius.
+		// Playtest r1 (operator ask 手电筒距离翻倍): doubled 800 -> 1600 so the lit
+		// cone/pool/march reaches ~2x farther; the falloff SHAPE is unchanged (every
+		// consumer normalizes by this length), only the throw extends. Live-tunable.
+		s_cvarRange = gEngfuncs.pfnRegisterVariable( "csz_flashlight_range", "1600", FCVAR_CLIENTDLL );
 	if( s_cvarUpSmooth == NULL )
 		// L-polish B: smooth the half-res shaft. Default 1 (fix ON, 3x3 gaussian spatial
 		// average); 0 reproduces the legacy 2x2 bilinear upsample byte-for-byte for A/B.
@@ -376,7 +378,7 @@ void FogVolumeRender( const ViewSetup &view )
 
 	if( v2 )
 	{
-		float range = ReadCvar( s_cvarRange, 800.0f );
+		float range = ReadCvar( s_cvarRange, 1600.0f );
 		if( range < 1.0f ) range = 1.0f;
 		// range is a CAP, never an extension beyond the light's own radius.
 		effRadius   = ( range < spot.radius ) ? range : spot.radius;

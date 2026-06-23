@@ -76,7 +76,10 @@ namespace
 
 // Fixed pool capacity. csz_dust_count clamps into [0, kMaxDust]; the pool is seeded
 // to capacity once so any count works without re-seeding (a re-seed would pop motes).
-const int kMaxDust = 4096;
+// Playtest r1 (operator ask 灰尘很小很小、多一点点): raised 4096 -> 8192 so the denser
+// default count (7000) fits under the cap with headroom. The per-mote area shrinks
+// ~5x (size 1.0 -> 0.45) so total fill DROPS despite the higher count (see DustRender).
+const int kMaxDust = 8192;
 
 const int   kVertsPerQuad  = 6;   // two triangles, non-indexed (no instancing)
 const int   kFloatsPerVert = 8;   // world(3) + uv(2) + color(3)
@@ -277,16 +280,22 @@ void DustRegisterCvars()
 	if( s_cvarDust == NULL )
 		s_cvarDust = gEngfuncs.pfnRegisterVariable( "csz_dust", "1", FCVAR_CLIENTDLL );
 	if( s_cvarCount == NULL )
-		// Fine dust reads as a dense haze, not sparse dots: fill the whole pool. The CPU
-		// pool walk is cheap scalar work and the GPU only ever draws the lit prefix, so
-		// 4096 fine motes stay far inside the L7 perf contract (smaller motes = fewer frags).
-		s_cvarCount = gEngfuncs.pfnRegisterVariable( "csz_dust_count", "4096", FCVAR_CLIENTDLL );
+		// Fine dust reads as a dense haze, not sparse dots. Playtest r1 (operator ask
+		// 多一点点): 4096 -> 7000 for a believable fine haze. The CPU pool walk is cheap
+		// scalar work and the GPU only ever draws the lit prefix; smaller motes (size
+		// 0.45) shrink per-mote fill ~5x so 7000 fine motes stay inside the L7 perf
+		// contract (net fill DROPS vs the old 4096x size-1.0 dust). Live-tunable.
+		s_cvarCount = gEngfuncs.pfnRegisterVariable( "csz_dust_count", "7000", FCVAR_CLIENTDLL );
 	if( s_cvarIntensity == NULL )
-		s_cvarIntensity = gEngfuncs.pfnRegisterVariable( "csz_dust_intensity", "1.0", FCVAR_CLIENTDLL );
+		// Playtest r1 (operator ask 像漂浮的光点 -> 应该是faint灰尘): lowered 1.0 -> 0.6 so each
+		// mote is a faint fine speck, NOT a bright glowing "光点". The brightness is purely
+		// this scale on the CPU radiance (vColor); the FS has no extra glint. Live-tunable.
+		s_cvarIntensity = gEngfuncs.pfnRegisterVariable( "csz_dust_intensity", "0.6", FCVAR_CLIENTDLL );
 	if( s_cvarSize == NULL )
-		// Fine specks (was 3.0 = glowing balls/bokeh -> "不像灰尘"). 1.0 half-size reads as
-		// airborne motes; per-mote jitter (0.6..1.4x) keeps them varied. Live-tunable 0.6..1.2.
-		s_cvarSize = gEngfuncs.pfnRegisterVariable( "csz_dust_size", "1.0", FCVAR_CLIENTDLL );
+		// Fine specks (was 3.0 = glowing balls/bokeh -> "不像灰尘"; then 1.0). Playtest r1
+		// (operator ask 很小很小): 1.0 -> 0.45 half-size reads as very fine airborne motes;
+		// per-mote jitter (0.6..1.4x) keeps them varied. Live-tunable 0.35..0.8.
+		s_cvarSize = gEngfuncs.pfnRegisterVariable( "csz_dust_size", "0.45", FCVAR_CLIENTDLL );
 	if( s_cvarOcclusion == NULL )
 		// Per-mote extinction coverage. Under kBlendPremulOver each lit mote dims the beam
 		// behind it by occlusion*coverage while still adding its own glint, so the flashlight
@@ -315,14 +324,14 @@ void DustRender( const ViewSetup &view )
 	if( !EnsureBuilt() )
 		return;
 
-	int count = (int)( ReadCvar( s_cvarCount, 4096.0f ) + 0.5f );
+	int count = (int)( ReadCvar( s_cvarCount, 7000.0f ) + 0.5f );
 	if( count < 0 )        count = 0;
 	if( count > kMaxDust ) count = kMaxDust;
 	if( count == 0 )
 		return;
 
-	const float intensity = ReadCvar( s_cvarIntensity, 1.0f );
-	const float moteSize  = ReadCvar( s_cvarSize, 1.0f );
+	const float intensity = ReadCvar( s_cvarIntensity, 0.6f );
+	const float moteSize  = ReadCvar( s_cvarSize, 0.45f );
 	float occlusion = ReadCvar( s_cvarOcclusion, 0.20f );
 	if( occlusion < 0.0f ) occlusion = 0.0f;
 	if( occlusion > 1.0f ) occlusion = 1.0f;
@@ -332,7 +341,7 @@ void DustRender( const ViewSetup &view )
 		s_lookedRange = true;
 		s_cvarRange = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_range" );
 	}
-	const float range  = ReadCvar( s_cvarRange, 800.0f );
+	const float range  = ReadCvar( s_cvarRange, 1600.0f );
 	// Pool box: a bit wider than the cone range so the lit region is strictly inside the
 	// box (lit motes never reach the wrap boundary). Moon-shaft motes are also confined
 	// to this near-field box around the camera (kept simple; the shaft look is near-field).

@@ -106,6 +106,7 @@ uniform vec3  u_color;          // linear, intensity-premultiplied spot tint
 uniform float u_intensity;      // beam brightness scale (csz_flashlight_tp_intensity)
 uniform float u_hgG;            // Henyey-Greenstein anisotropy
 uniform int   u_steps;          // bounded march sample count
+uniform float u_surfFade;       // 0 = local (tight band), 1 = non-local (wide surface fade)
 in vec3 vWorld;
 out vec4 fragColor;
 
@@ -159,6 +160,13 @@ void main()
 		discard;                                  // wholly behind a wall
 
 	float softBand = 0.06 * u_len + 8.0;          // soft intersection band (world units)
+	// Non-local beams (u_surfFade 1): widen the surface-proximity fade so the air shaft
+	// DISSOLVES before it reaches a surface -- no deposited "landing patch" (圈) on
+	// floors/walls, only the airborne 光柱. The contribution ramps smoothly to 0 over a
+	// large band, so the beam never looks detached/floating, it just thins out near
+	// geometry. Local first-person (u_surfFade 0) keeps the tight band: its crisp direct
+	// lit pool owns the near-surface look, so the cone stays unchanged there.
+	float occBand = mix( softBand, 0.25 * u_len + 48.0, clamp( u_surfFade, 0.0, 1.0 ) );
 	float dt = ( tFar - tNear ) / float( u_steps );
 	float jitter = ignDither( gl_FragCoord.xy );
 
@@ -181,8 +189,9 @@ void main()
 		float atten = clamp( 1.0 - s / u_len, 0.0, 1.0 );  // tip bright, far rim dim
 		atten *= atten;
 
-		// Soft camera-side occlusion: samples within softBand of the wall fade out.
-		float occ = ( tScene > 0.0 ) ? clamp( ( tScene - t ) / softBand, 0.0, 1.0 ) : 1.0;
+		// Soft camera-side occlusion: samples within occBand of the wall fade out
+		// (occBand widens for non-local so the shaft never deposits a surface patch).
+		float occ = ( tScene > 0.0 ) ? clamp( ( tScene - t ) / occBand, 0.0, 1.0 ) : 1.0;
 
 		// Forward scatter: brighter looking into the beam, with a base term so the
 		// side view (the L6a acceptance shot) stays clearly visible.

@@ -96,7 +96,7 @@ struct ConeGpu
 	int uMatViewProj, uApex, uAxis, uRight, uUp, uSegments;
 	int uDepthTex, uViewSize, uCamPos, uAxisDir, uLen;
 	int uCosInner, uCosOuter, uColor, uIntensity, uHgG, uSteps;
-	int uInvViewProj, uZNear, uZFar;
+	int uInvViewProj, uZNear, uZFar, uSurfFade;
 };
 ConeGpu s_gpu;
 
@@ -165,6 +165,7 @@ bool EnsureBuilt()
 	s_gpu.uInvViewProj = UniformLoc( s_gpu.prog, "u_invViewProj" );
 	s_gpu.uZNear       = UniformLoc( s_gpu.prog, "u_zNear" );
 	s_gpu.uZFar        = UniformLoc( s_gpu.prog, "u_zFar" );
+	s_gpu.uSurfFade    = UniformLoc( s_gpu.prog, "u_surfFade" );
 
 	s_gpu.built = true;
 	CSZ_LogDev( "lightcone", "world beam program built (gpu gen %d)", s_gpu.gpuGeneration );
@@ -196,7 +197,7 @@ void BasisFromAxis( const float d[3], float right[3], float up[3] )
 // Draw ONE spot's beam volume. State (FBO/viewport/blend/depth/program/VAO/depth
 // tex) is set up once by the caller; this only pushes per-spot uniforms + draws.
 void DrawConeForSpot( const ViewSetup &view, const SpotLightParams &spot,
-                      float range, float intensity, int steps )
+                      float range, float intensity, int steps, float surfFade )
 {
 	float len = spot.radius;
 	if( range > 0.0f && range < len )
@@ -235,6 +236,8 @@ void DrawConeForSpot( const ViewSetup &view, const SpotLightParams &spot,
 	if( s_gpu.uIntensity >= 0 )   glUniform1f( s_gpu.uIntensity, intensity );
 	// Per-spot march steps: full tier = kConeSteps, cheap tier = reduced (L6b budget).
 	if( s_gpu.uSteps >= 0 )       glUniform1i( s_gpu.uSteps, steps );
+	// Non-local beams fade out before any surface (no deposited 圈); local keeps tight.
+	if( s_gpu.uSurfFade >= 0 )    glUniform1f( s_gpu.uSurfFade, surfFade );
 
 	glDrawArrays( GL_TRIANGLES, 0, 3 * kConeSegments );
 }
@@ -287,7 +290,7 @@ void LightConeRender( const ViewSetup &view )
 		s_lookedRange = true;
 		s_cvarRange = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_range" );
 	}
-	float range = ReadCvar( s_cvarRange, 800.0f );
+	float range = ReadCvar( s_cvarRange, 1600.0f );
 	float intensity = ReadCvar( s_cvarTpIntensity, 3.0f );
 
 	// L5R master switch: when on, the local first-person beam's air volume is rendered by the
@@ -359,7 +362,11 @@ void LightConeRender( const ViewSetup &view )
 
 		SpotLightParams spot;
 		g_lights.BuildSpotParams( *light, spot );
-		DrawConeForSpot( view, spot, range, intensity, steps );
+		// Non-local beams (other players' flashlights) get the wide surface fade so they
+		// read as a pure airborne 光柱 with no surface patch (operator T4 ask). Local
+		// first-person cones (only drawn when v3 0) keep the tight legacy band.
+		float surfFade = ( v3 && !light->desc.isLocal ) ? 1.0f : 0.0f;
+		DrawConeForSpot( view, spot, range, intensity, steps, surfFade );
 
 		if( light->budgetTier == kBudgetCheap ) drawnCheap++;
 		else                                    drawnFull++;

@@ -56,7 +56,12 @@ const int kKeyBase = -100;
 
 // Module defaults when a state leaves a field at 0 (same warm-white spot profile
 // as the M1 test lights so a single published beam looks identical to csz_testbeam).
-const float kDefaultRange = 700.0f;
+// Playtest r1 (operator ask 手电筒距离翻倍): the real F-key flashlight publishes
+// st.range == 0 (CollectRealFlashlights), so this default IS the spotlight reach
+// that drives the direct lit pool, the fog march far, and the world-cone length.
+// Doubled 700 -> 1400 so the throw reaches ~2x farther; falloff shape unchanged
+// (every consumer normalizes by the radius). Pairs with csz_flashlight_range 1600.
+const float kDefaultRange = 1400.0f;
 const float kDefaultFov   = 50.0f;
 const float kDefaultColor[3] = { 1.0f, 0.95f, 0.85f };
 
