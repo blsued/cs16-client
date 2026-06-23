@@ -107,6 +107,17 @@ struct AmbienceParams
 	float maxOpacity;       // server reveal floor: shader clamps T to max(T, 1-maxOpacity); 1 = full fog
 	int   fogPreset;        // kCszFogPreset* (0 = environmental cosmetic; >=1 = black gameplay)
 	bool  fogBypassTint;    // black fog bypasses the sky phase-tint multiply (spec 3.6)
+	// --- Client-side achromatic ambient in-scatter (fog rewrite §5.1). The physical
+	// fix for "the map looks black, not foggy": a real participating medium does not
+	// just SUBTRACT scene radiance (col*T), it ADDS back the in-scattered light it
+	// catches. Server "black fog" ships fogColor=(0,0,0) so the in-scatter term was 0
+	// and the blend collapsed to a pure multiplicative darken. This is a low-luminance
+	// NEUTRAL (very slightly cool) gray the renderer computes from client cvars each
+	// frame (csz_fog_ambient / csz_fog_ambient_cool, via CszFogComputeAmbient) and
+	// folds into the base in-scatter at the world/studio feed sites (CszApplyFogAmbient).
+	// Linear, premultiplied. (0,0,0) = legacy byte-identical (no ambient). NOT server-
+	// authoritative -- it rides in the snapshot purely as a per-frame transport slot.
+	float fogAmbient[3];
 };
 // (0,0,0,0)/(1,1,1)/disabled everything -- the vanilla daylight look.
 inline AmbienceParams AmbienceNeutral()
@@ -147,6 +158,23 @@ inline void CszFogUniformVecs( const AmbienceParams &amb, float fogVec[4], float
 	fogParams[1] = amb.sunGlow;
 	fogParams[2] = amb.maxOpacity > 0.0f ? amb.maxOpacity : 1.0f;	// 0 -> 1 (never clamp fog to fully transparent)
 	fogParams[3] = 0.0f;
+}
+// Fold the client achromatic ambient in-scatter (amb.fogAmbient, computed once per
+// frame by the renderer from cvars) into the fog in-scatter color the base shaders
+// read as u_fog.rgb. u_fog.rgb is ADDITIVE in-scatter only (shader: inscatter =
+// u_fog.rgb + ...), blended by (1-T), so adding a low neutral gray makes the medium
+// CONTRIBUTE faint radiance that thickens with distance instead of only multiplying
+// the scene toward black -- the core "darkness -> fog" fix (§5.1). It also softens the
+// maxOpacity plateau for free: where T floors low, (1-T) is large, so the beyond-range
+// region tends to the ambient gray (thickening haze) rather than a pure-black void.
+// Applied ONLY at the world + studio feed sites (geometry + players); sprites (emitters)
+// and the sky dome keep the server fog color untouched. fogAmbient=(0,0,0) -> no-op
+// (legacy byte-identical). Scattering albedo sigma_s/sigma_t ~ 1 for fog, so no scale.
+inline void CszApplyFogAmbient( const AmbienceParams &amb, float fogVec[4] )
+{
+	fogVec[0] += amb.fogAmbient[0];
+	fogVec[1] += amb.fogAmbient[1];
+	fogVec[2] += amb.fogAmbient[2];
 }
 // L2 downstream accessor: the dedicated moon in-scatter feed for L4 (light-shafts /
 // fog in-scatter). One chokepoint so every future consumer reads the SAME channel

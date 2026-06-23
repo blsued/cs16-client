@@ -498,6 +498,7 @@ void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, cons
 	const AmbienceParams &amb = view.ambience;
 	float fogVec[4], fogParams[4];
 	CszFogUniformVecs( amb, fogVec, fogParams );	// analytic base fog (fog M1 Step 2): density->extinction + params
+	CszApplyFogAmbient( amb, fogVec );		// §5.1: players/models fog with the SAME achromatic ambient as the world (consistency)
 
 	glUniform4fv( locs.uFog, 1, fogVec );
 	glUniform4fv( locs.uFogParams, 1, fogParams );

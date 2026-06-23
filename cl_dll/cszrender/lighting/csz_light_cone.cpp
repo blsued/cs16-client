@@ -74,7 +74,6 @@ const int kConeSegments = 64;
 // this, so the cost is local; 16 anti-bands the gradient without temporal noise.
 const int kConeSteps = 16;
 
-const float kConeHgG = 0.35f;   // gentle forward anisotropy (side view stays lit)
 
 // --- cvars (read live each frame) --------------------------------------------
 cvar_t *s_cvarTp;          // csz_flashlight_tp           default "1": world beam visible (0 = off, A/B)
@@ -83,6 +82,8 @@ cvar_t *s_cvarNlSurfFade;  // csz_flashlight_nl_surffade default "1.0": non-loca
 cvar_t *s_cvarRange;       // csz_flashlight_range (owned by FogVolume); caps beam length. Fetched lazily.
 bool    s_lookedRange;
 cvar_t *s_cvarV3;          // csz_flashlight_v3 (owned by light_pass); L5R master A/B. Fetched lazily.
+cvar_t *s_cvarTpG;         // csz_flashlight_tp_g         default "0.7": §5.3 world-cone HG g (unify with the shaft; was const 0.35)
+cvar_t *s_cvarTpFogCouple; // csz_flashlight_tp_fogcouple default "0": §5.3 density-couple amount 0..1 (0 = vacuum/legacy, 1 = beam scales with fog)
 bool    s_lookedV3;
 
 // --- GPU resources (generation-keyed; forget on a foreign context) -----------
@@ -264,8 +265,18 @@ void LightConeRegisterCvars()
 		// 1.0 = tuned to fully kill the patch; larger fades even earlier; 0 = legacy
 		// non-local (tight band, surface patch returns) for A/B.
 		s_cvarNlSurfFade = gEngfuncs.pfnRegisterVariable( "csz_flashlight_nl_surffade", "1.0", FCVAR_CLIENTDLL );
+	if( s_cvarTpG == NULL )
+		// §5.3: unify the 3rd-person world cone with the first-person shaft -- raise the HG g
+		// from the old vacuum 0.35 to the physical fog 0.70 (clamped 0.5-0.85 below). Tighter,
+		// crisper world beam that reads as the same phenomenon as the flashlight march.
+		s_cvarTpG = gEngfuncs.pfnRegisterVariable( "csz_flashlight_tp_g", "0.7", FCVAR_CLIENTDLL );
+	if( s_cvarTpFogCouple == NULL )
+		// §5.3 (lower-risk, default OFF): density-couple the world cone so other players' beams
+		// brighten with fog instead of scattering in vacuum. 0 = legacy (beam always visible,
+		// no regression); 1 = beam intensity scales fully with fog density. Live-tunable.
+		s_cvarTpFogCouple = gEngfuncs.pfnRegisterVariable( "csz_flashlight_tp_fogcouple", "0", FCVAR_CLIENTDLL );
 
-	CSZ_LogDev( "lightcone", "cvars registered (csz_flashlight_tp/csz_flashlight_tp_intensity/csz_flashlight_nl_surffade)" );
+	CSZ_LogDev( "lightcone", "cvars registered (csz_flashlight_tp/_tp_intensity/_nl_surffade/_tp_g/_tp_fogcouple)" );
 }
 
 void LightConeRender( const ViewSetup &view )
@@ -304,6 +315,25 @@ void LightConeRender( const ViewSetup &view )
 	float nlSurfFade = ReadCvar( s_cvarNlSurfFade, 1.0f );
 	if( nlSurfFade < 0.0f ) nlSurfFade = 0.0f;
 
+	// §5.3: world-cone HG g, clamped to the physical fog window 0.5-0.85 (default 0.70,
+	// unified with the flashlight march so 1st- and 3rd-person beams read as one medium).
+	float coneG = ReadCvar( s_cvarTpG, 0.70f );
+	if( coneG < 0.50f ) coneG = 0.50f;
+	if( coneG > 0.85f ) coneG = 0.85f;
+
+	// §5.3 density coupling (default OFF = no regression): brighten the world cone with fog
+	// instead of scattering in vacuum. couple=0 -> identity; couple=1 -> intensity scales
+	// fully with a saturating fog factor (1-exp(-sigmaE*ref)) over a ~400u reference depth.
+	float couple = ReadCvar( s_cvarTpFogCouple, 0.0f );
+	if( couple < 0.0f ) couple = 0.0f;
+	if( couple > 1.0f ) couple = 1.0f;
+	if( couple > 0.0f )
+	{
+		float sigmaE = FogExtinctionFromDensity( view.ambience.fogDensity );
+		float fogFactor = 1.0f - expf( -sigmaE * 400.0f );   // 0 (no fog) .. ~1 (thick fog)
+		intensity *= ( 1.0f - couple ) + couple * fogFactor;
+	}
+
 	// L5R master switch: when on, the local first-person beam's air volume is rendered by the
 	// L5 fog march (shadowed, view-aligned), so its redundant + dome-prone world cone is
 	// skipped below. Non-local (3rd-person) world beams are UNCHANGED (kept at full intensity
@@ -339,7 +369,7 @@ void LightConeRender( const ViewSetup &view )
 	if( s_gpu.uDepthTex >= 0 )    glUniform1i( s_gpu.uDepthTex, kSkyTmuBase + 0 );
 	if( s_gpu.uViewSize >= 0 )    glUniform2fv( s_gpu.uViewSize, 1, fViewSize );
 	if( s_gpu.uCamPos >= 0 )      glUniform3fv( s_gpu.uCamPos, 1, view.origin );
-	if( s_gpu.uHgG >= 0 )         glUniform1f( s_gpu.uHgG, kConeHgG );
+	if( s_gpu.uHgG >= 0 )         glUniform1f( s_gpu.uHgG, coneG );	// §5.3 unified physical g (was const kConeHgG 0.35)
 	if( s_gpu.uInvViewProj >= 0 ) glUniformMatrix4fv( s_gpu.uInvViewProj, 1, GL_FALSE, invViewProj.m );
 	if( s_gpu.uZNear >= 0 )       glUniform1f( s_gpu.uZNear, view.zNear );
 	if( s_gpu.uZFar >= 0 )        glUniform1f( s_gpu.uZFar, view.zFar );

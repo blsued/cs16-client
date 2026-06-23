@@ -81,12 +81,18 @@ uniform int   u_steps;                 // march sample count (legacy 4..32; v2 r
 uniform float u_marchFar;              // hard distance cap (world units); v2 = csz_flashlight_range
 uniform int   u_econserve;             // 1 = energy-conserving slice (v2); 0 = pre-L5 linear sum
 uniform float u_surfFade;              // L5R: surface-proximity fade band (world units); <=0 disables (legacy)
+uniform float u_halo;                  // §5.2 halo/glare strength: wider 2nd forward lobe (multiple-scatter bloom); 0 = none
+uniform float u_frame;                 // §5.2 animated-IGN temporal offset (frame counter); breaks banding, NO history
 out vec4 fragColor;
 
-// Interleaved-gradient-noise dither (no blue-noise texture asset for M1): breaks
-// the per-step banding into high-frequency noise the eye reads as smooth.
+// Animated interleaved-gradient-noise dither (no blue-noise texture asset for M1):
+// breaks per-step banding into high-frequency noise the eye reads as smooth. §5.2:
+// shift the IGN sample lattice each frame by the golden ratio (Wronski) so the dither
+// pattern decorrelates over time and integrates to smooth -- NO temporal history
+// buffer, so ZERO ghosting on the moving flashlight (temporal reprojection rejected).
 float ignDither( vec2 p )
 {
+	p += 5.588238 * fract( u_frame * 0.6180339887 );   // golden-ratio per-frame lattice shift
 	return fract( 52.9829189 * fract( dot( p, vec2( 0.06711056, 0.00583715 ) ) ) );
 }
 
@@ -96,6 +102,20 @@ float hgPhase( float c, float g )
 	float g2 = g * g;
 	float denom = 1.0 + g2 - 2.0 * g * c;
 	return ( 1.0 - g2 ) / ( 4.0 * 3.14159265 * max( pow( denom, 1.5 ), 1e-4 ) );
+}
+
+// §5.2 beam phase = the tight physical forward lobe (g) PLUS a wider, dimmer lobe
+// (g*0.5) scaled by u_halo. The second lobe approximates the multiple-scatter bloom /
+// glare that rings a light in fog: it broadens the visible glow around the bright core
+// (the "halo" the user asked for) without a separate screen-space pass. Energy stays
+// bounded -- the whole in-scatter is still capped by the analytic slice (sigmaS/sigmaE)
+// (1-exp(-sigmaE*dt)) below, and thicker fog (bigger slice) grows the halo for free.
+float beamPhase( float c, float g )
+{
+	float p = hgPhase( c, g );
+	if( u_halo > 0.0 )
+		p += u_halo * hgPhase( c, g * 0.5 );
+	return p;
 }
 
 void main()
@@ -175,7 +195,7 @@ void main()
 			continue;
 
 		float cosTheta = dot( rd, -L );           // forward-scatter angle
-		float phase = hgPhase( cosTheta, u_hgG );
+		float phase = beamPhase( cosTheta, u_hgG );   // §5.2: forward lobe + halo lobe
 		// L5R surface-proximity fade: the last samples before the marched surface (t -> tSurf)
 		// otherwise pile in-scatter into a bright shell exactly where the beam meets the floor
 		// (the "floor dome"). Fade them out over u_surfFade world units. <=0 disables (legacy).

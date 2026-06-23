@@ -69,6 +69,16 @@ float   s_serverMaskOverride = -1.0f;
 // forced 0 at the renderer chokepoint). See CszFogBaseCorrected() / csz_fog.h.
 cvar_t *s_cvarFogBase;               // csz_fog_base, default "1"
 
+// Fog rewrite §5.1 -- achromatic ambient in-scatter (the "black fog reads as REAL FOG"
+// core fix). csz_fog_ambient = the medium's ambient in-scatter LUMINANCE (linear); this
+// is the USER "how foggy-gray vs how black" art-direction knob. csz_fog_ambient_cool =
+// 0..1 cool bias (fog is neutral and TAKES light color; a slight cool reads as night air
+// per scotopic/Purkinje). Both FCVAR_CLIENTDLL = live-tunable. Default 0.014 luminance
+// (~ linear (0.012,0.014,0.018)) + 0.35 cool = a DIM neutral-cool gray: still reads dark
+// /oppressive, but now as fog (a non-zero medium) rather than a multiplicative void.
+cvar_t *s_cvarFogAmbient;            // csz_fog_ambient,      default "0.014"
+cvar_t *s_cvarFogAmbientCool;        // csz_fog_ambient_cool, default "0.35"
+
 float ClampUnit( float v )
 {
 	return v < 0.0f ? 0.0f : ( v > 1.0f ? 1.0f : v );
@@ -477,7 +487,40 @@ void CszFogRegisterCvars()
 	if( s_cvarFogBase == NULL )
 		s_cvarFogBase = gEngfuncs.pfnRegisterVariable( "csz_fog_base", "1", FCVAR_CLIENTDLL );
 
-	CSZ_LogDev( "fog", "L0/L1 fog cvars registered (csz_fog_server_mask=1 identity; csz_fog_base=1 corrected)" );
+	if( s_cvarFogAmbient == NULL )
+		s_cvarFogAmbient = gEngfuncs.pfnRegisterVariable( "csz_fog_ambient", "0.014", FCVAR_CLIENTDLL );
+
+	if( s_cvarFogAmbientCool == NULL )
+		s_cvarFogAmbientCool = gEngfuncs.pfnRegisterVariable( "csz_fog_ambient_cool", "0.35", FCVAR_CLIENTDLL );
+
+	CSZ_LogDev( "fog", "L0/L1 fog cvars registered (csz_fog_server_mask=1 identity; csz_fog_base=1 corrected; csz_fog_ambient=0.014 cool=0.35)" );
+}
+
+// Fog rewrite §5.1: compute the client achromatic ambient in-scatter color (linear,
+// premultiplied) from the live cvars. Neutral gray at luminance L = csz_fog_ambient,
+// lerped toward a cool night-air bias (R down, B up) by csz_fog_ambient_cool. Fog is a
+// neutral Mie scatterer so saturation stays near 0; the cool bias is the slight scotopic
+// /Purkinje night look. out=(0,0,0) when csz_fog_ambient<=0 (legacy void, byte-identical).
+// The renderer calls this once per frame into view.ambience.fogAmbient; the world/studio
+// feed sites fold it into the base in-scatter via CszApplyFogAmbient.
+void CszFogComputeAmbient( float out[3] )
+{
+	float L = ( s_cvarFogAmbient != NULL ) ? s_cvarFogAmbient->value : 0.014f;
+	if( L <= 0.0f )
+	{
+		out[0] = out[1] = out[2] = 0.0f;	// ambient disabled -> exact legacy (pure col*T void)
+		return;
+	}
+
+	float cool = ( s_cvarFogAmbientCool != NULL ) ? s_cvarFogAmbientCool->value : 0.35f;
+	cool = ClampUnit( cool );
+
+	// Neutral (1,1,1) -> cool (0.86,1.0,1.30): keeps luminance ~ L while tinting toward
+	// night air. Linear weights (R 0.86, G 1.0, B 1.30) mirror the report's ~(0.012,
+	// 0.014,0.018) reference at L=0.014, cool=1.
+	out[0] = L * ( 1.0f - 0.14f * cool );
+	out[1] = L;
+	out[2] = L * ( 1.0f + 0.30f * cool );
 }
 
 // L1 fog-base correctness A/B switch. true = corrected analytic fog (verbatim,

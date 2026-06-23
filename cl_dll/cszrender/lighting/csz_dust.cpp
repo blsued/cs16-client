@@ -79,7 +79,11 @@ namespace
 // Playtest r1 (operator ask 灰尘很小很小、多一点点): raised 4096 -> 8192 so the denser
 // default count (7000) fits under the cap with headroom. The per-mote area shrinks
 // ~5x (size 1.0 -> 0.45) so total fill DROPS despite the higher count (see DustRender).
-const int kMaxDust = 8192;
+// Fog rewrite §5.4 (USER ask: MORE dust): raised 8192 -> 16384 so csz_dust_count can be
+// pushed to a denser haze. Motes are tiny (size 0.45) and only LIT motes ever enter the
+// VBO, so the cap is a headroom ceiling, not a per-frame cost; the scratch grows to
+// ~16384*6*8 floats (~3 MB static), still trivial.
+const int kMaxDust = 16384;
 
 const int   kVertsPerQuad  = 6;   // two triangles, non-indexed (no instancing)
 const int   kFloatsPerVert = 8;   // world(3) + uv(2) + color(3)
@@ -91,7 +95,9 @@ const float kPi            = 3.14159265358979323846f;
 // brightening that matters for third-person / moon shafts.
 const float kScatterBase = 0.80f;
 const float kScatterHg   = 0.60f;
-const float kHgG         = 0.60f;
+// §5.4: aligned to the shaft's physical g (0.60 -> 0.70, same fog anisotropy as the
+// flashlight march) so the dust glint forward-peaks consistently with the beam.
+const float kHgG         = 0.70f;
 
 const float kNearSkip    = 8.0f;   // ignore motes basically at the muzzle (axial < this)
 const float kCullEps     = 0.0004f;// luminance below this = unlit -> not simmed/drawn. Lower
@@ -285,7 +291,10 @@ void DustRegisterCvars()
 		// scalar work and the GPU only ever draws the lit prefix; smaller motes (size
 		// 0.45) shrink per-mote fill ~5x so 7000 fine motes stay inside the L7 perf
 		// contract (net fill DROPS vs the old 4096x size-1.0 dust). Live-tunable.
-		s_cvarCount = gEngfuncs.pfnRegisterVariable( "csz_dust_count", "7000", FCVAR_CLIENTDLL );
+		// Fog rewrite §5.4 (USER ask: MORE dust): 7000 -> 10000 for a denser, more obviously
+		// airborne haze in the beam. Only LIT motes draw and they are tiny (size 0.45), so
+		// net fill stays inside the L7 perf contract; cap is kMaxDust (16384). Live-tunable.
+		s_cvarCount = gEngfuncs.pfnRegisterVariable( "csz_dust_count", "10000", FCVAR_CLIENTDLL );
 	if( s_cvarIntensity == NULL )
 		// Playtest r1 (operator ask 像漂浮的光点 -> 应该是faint灰尘): lowered 1.0 -> 0.6 so each
 		// mote is a faint fine speck, NOT a bright glowing "光点". The brightness is purely

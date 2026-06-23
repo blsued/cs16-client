@@ -69,11 +69,14 @@ cvar_t *s_cvarV3;          // csz_flashlight_v3 (owned by light_pass); L5R maste
 bool    s_lookedV3;
 cvar_t *s_cvarUpSmooth;    // csz_fog_upsample_smooth default "1": 1 = 5x5 gaussian spatial avg (smooth shaft), 0 = legacy 2x2 bilinear
 cvar_t *s_cvarUpSigma;     // csz_fog_upsample_sigma  default "1.5": gaussian spatial sigma (half-res texels) for the 5x5 path
+cvar_t *s_cvarHalo;        // csz_fog_halo            default "0.6": §5.2 halo/glare strength (wider 2nd forward lobe; 0 = no halo)
+cvar_t *s_cvarAir;         // csz_fog_march_air       default "0.18": §5.2 v3 air-vs-surface balance (was hardcoded kV3MarchScale)
 
-// L5R: the first-person march is the air-glow main act once the local world cone is dropped,
-// but it must NOT wash the surface direct pool. Default march_intensity 1.5 * 0.18 -> ~0.27,
-// inside the codex 0.15-0.3 band; tune the cvar to recalibrate against screenshot peaks.
-const float kV3MarchScale = 0.18f;
+// §5.2: the first-person march is the air-glow main act once the local world cone is dropped,
+// but it must NOT wash the surface direct pool. The v3 surface-vs-air balance is now the live
+// csz_fog_march_air cvar (default 0.18, was this hardcoded constant): with the §5.1 gray base
+// layer the cone can be re-balanced brighter without the air glow washing the floor pool.
+const float kV3MarchScaleDefault = 0.18f;
 // Surface-proximity fade band (world units) for v3; 0 disables (legacy exact A/B).
 const float kV3SurfFade = 40.0f;
                            //   spot attenuation / cone length / march steps (+L7 dust spawn volume)
@@ -104,6 +107,7 @@ struct VolGpu
 	int mTargetSize, mCamPos, mSpotOrigin, mSpotDir, mSpotColor, mSpotRadius;
 	int mCosInner, mCosOuter, mMatShadow, mSigmaE, mSigmaS, mHgG, mIntensity, mSteps, mMarchFar, mEconserve;
 	int mSurfFade;	// L5R surface-proximity fade (floor-dome fix)
+	int mHalo, mFrame;	// §5.2 halo/glare strength + animated-IGN frame offset
 	int mDepthTex, mShadowMap, mZNear, mZFar, mInvProj, mInvViewProj;
 
 	// upsample uniforms
@@ -231,6 +235,8 @@ void BuildVolPrograms()
 	s_gpu.mMarchFar    = UniformLoc( s_gpu.march, "u_marchFar" );
 	s_gpu.mEconserve   = UniformLoc( s_gpu.march, "u_econserve" );
 	s_gpu.mSurfFade    = UniformLoc( s_gpu.march, "u_surfFade" );	// L5R floor-dome fix
+	s_gpu.mHalo        = UniformLoc( s_gpu.march, "u_halo" );	// §5.2 halo/glare
+	s_gpu.mFrame       = UniformLoc( s_gpu.march, "u_frame" );	// §5.2 animated IGN
 	s_gpu.mDepthTex    = UniformLoc( s_gpu.march, "u_depthTex" );
 	s_gpu.mShadowMap   = UniformLoc( s_gpu.march, "u_shadowMap" );
 	s_gpu.mZNear       = UniformLoc( s_gpu.march, "u_zNear" );
@@ -288,7 +294,21 @@ void FogVolumeRegisterCvars()
 		// (csz_tonemap 1) rolls off cleanly and tolerates much higher. Dev-tunable.
 		s_cvarIntensity = gEngfuncs.pfnRegisterVariable( "csz_fog_march_intensity", "1.5", FCVAR_CLIENTDLL );
 	if( s_cvarG == NULL )
-		s_cvarG = gEngfuncs.pfnRegisterVariable( "csz_fog_march_g", "0.55", FCVAR_CLIENTDLL );
+		// §5.2: raised 0.55 -> 0.70 to physical fog anisotropy (HG g for fog/cloud is
+		// 0.7-0.9). Higher g = tighter, brighter, crisper FORWARD beam + a stronger
+		// up-beam halo -- exactly the "crisp 光柱 edges + visible scattering" ask. Clamped
+		// to the physical 0.5-0.85 window in FogVolumeRender (fog is never near-isotropic).
+		s_cvarG = gEngfuncs.pfnRegisterVariable( "csz_fog_march_g", "0.70", FCVAR_CLIENTDLL );
+	if( s_cvarHalo == NULL )
+		// §5.2: halo/glare around the spot source -- a wider, dimmer 2nd forward lobe in
+		// the march phase that broadens the glow (multiple-scatter bloom). 0 = no halo
+		// (legacy). 0.6 = a clearly visible but bounded halo; live-tunable.
+		s_cvarHalo = gEngfuncs.pfnRegisterVariable( "csz_fog_halo", "0.6", FCVAR_CLIENTDLL );
+	if( s_cvarAir == NULL )
+		// §5.2: v3 surface-vs-air balance (was the hardcoded 0.18 kV3MarchScale). With the
+		// §5.1 gray base layer the cone tolerates a brighter air glow; tune live against the
+		// surface pool. >0; <=0 falls back to the 0.18 default to avoid a black cone.
+		s_cvarAir = gEngfuncs.pfnRegisterVariable( "csz_fog_march_air", "0.18", FCVAR_CLIENTDLL );
 	if( s_cvarV2 == NULL )
 		// L5: enhanced first-person beam (energy-conserving slice + range-bounded
 		// steps). 0 reproduces the pre-L5 march byte-for-byte for A/B.
@@ -409,12 +429,29 @@ void FogVolumeRender( const ViewSetup &view )
 	bool v3 = ( ReadCvar( s_cvarV3, 1.0f ) >= 0.5f );
 
 	float intensity = ReadCvar( s_cvarIntensity, 1.5f );
-	if( v3 ) intensity *= kV3MarchScale;
+	if( v3 )
+	{
+		float air = ReadCvar( s_cvarAir, kV3MarchScaleDefault );   // §5.2: surface-vs-air balance (live cvar, was hardcoded 0.18)
+		if( air <= 0.0f ) air = kV3MarchScaleDefault;             // guard a 0 that would black out the cone
+		intensity *= air;
+	}
 	float surfFade = v3 ? kV3SurfFade : 0.0f;
-	float hgG = ReadCvar( s_cvarG, 0.55f );
-	if( hgG < -0.95f ) hgG = -0.95f;
-	if( hgG > 0.95f ) hgG = 0.95f;
+	// §5.2: clamp g to the physical fog window 0.5-0.85 (fog is strongly forward, never
+	// near-isotropic). Default 0.70. (Was -0.95..0.95; the wide range only served pre-
+	// rewrite A/B and let g drift unphysically low / isotropic.)
+	float hgG = ReadCvar( s_cvarG, 0.70f );
+	if( hgG < 0.50f ) hgG = 0.50f;
+	if( hgG > 0.85f ) hgG = 0.85f;
+	float halo = ReadCvar( s_cvarHalo, 0.6f );   // §5.2 halo/glare strength
+	if( halo < 0.0f ) halo = 0.0f;
+	if( halo > 4.0f ) halo = 4.0f;               // bound so the 2nd lobe can't dominate
 	float sigmaS = sigmaE;   // scattering = extinction (albedo 1); intensity tunes brightness
+
+	// §5.2 animated-IGN frame offset: a monotonically-advancing counter (wrapped to keep
+	// float precision) so the dither lattice shifts every frame -- no temporal history.
+	static unsigned int s_marchFrame = 0u;
+	s_marchFrame = ( s_marchFrame + 1u ) & 1023u;
+	float frame = (float)s_marchFrame;
 
 	float fTarget[2]  = { (float)halfW, (float)halfH };
 	float fFullSize[2] = { (float)fullW, (float)fullH };
@@ -462,6 +499,8 @@ void FogVolumeRender( const ViewSetup &view )
 	if( s_gpu.mMarchFar >= 0 )   glUniform1f( s_gpu.mMarchFar, effMarchFar );
 	if( s_gpu.mEconserve >= 0 )  glUniform1i( s_gpu.mEconserve, econserve );
 	if( s_gpu.mSurfFade >= 0 )   glUniform1f( s_gpu.mSurfFade, surfFade );	// L5R floor-dome fix
+	if( s_gpu.mHalo >= 0 )       glUniform1f( s_gpu.mHalo, halo );	// §5.2 halo/glare
+	if( s_gpu.mFrame >= 0 )      glUniform1f( s_gpu.mFrame, frame );	// §5.2 animated IGN
 
 	glDrawArrays( GL_TRIANGLES, 0, 3 );
 

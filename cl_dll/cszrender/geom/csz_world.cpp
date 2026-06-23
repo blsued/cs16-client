@@ -925,6 +925,7 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 	const AmbienceParams &amb = view.ambience;
 	float fogVec[4], fogParams[4];
 	CszFogUniformVecs( amb, fogVec, fogParams );	// analytic base fog (fog M1 Step 2): density->extinction + params
+	CszApplyFogAmbient( amb, fogVec );		// §5.1: add the achromatic ambient in-scatter (medium adds gray, not just darken)
 
 	glUniform4fv( s_world.uFog, 1, fogVec );
 	glUniform4fv( s_world.uFogParams, 1, fogParams );
@@ -1118,6 +1119,7 @@ void WorldRenderer::DrawBrushOpaque( const ViewSetup &view, cl_entity_s *const *
 	const AmbienceParams &amb = view.ambience;
 	float fogVec[4], fogParams[4];
 	CszFogUniformVecs( amb, fogVec, fogParams );	// analytic base fog (fog M1 Step 2)
+	CszApplyFogAmbient( amb, fogVec );		// §5.1: ambient in-scatter (brush surfaces fog identically to the world)
 
 	glUniform4fv( s_world.uFog, 1, fogVec );
 	glUniform4fv( s_world.uFogParams, 1, fogParams );
@@ -1235,6 +1237,7 @@ void WorldRenderer::DrawBrushTransparent( const ViewSetup &view, cl_entity_s *co
 	const AmbienceParams &amb = view.ambience;
 	float fogVec[4], fogParams[4];
 	CszFogUniformVecs( amb, fogVec, fogParams );	// analytic base fog (fog M1 Step 2)
+	CszApplyFogAmbient( amb, fogVec );		// §5.1: ambient in-scatter (alpha-test/blended surfaces eat fog like the world; additive modes below force fogOff)
 	const float fogOff[4] = { 0.0f, 0.0f, 0.0f, 0.0f };	// additive fades to black, not fog color
 
 	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
