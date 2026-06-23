@@ -34,6 +34,7 @@
  */
 #include "csz_world.h"
 #include "csz_lightmap.h"
+#include "../fog/csz_fog_volume.h"	// FogVolumeLocalSpot: same shadowed flashlight the march uses (defog cone)
 #include "../core/csz_engine.h"
 #include "../core/csz_engine_bsp.h"
 #include "../core/csz_glcaps.h"
@@ -132,6 +133,7 @@ struct WorldState
 	int uMoonDir, uMoonColor;			// S2 gated night moon directional (base pass only)
 	int uNightSky, uNightFloor, uNightK, uNightMoon;	// S2 world night ambient calibration (base pass only)
 	int uBrushAlpha;		// per-entity translucency for blended brush modes (renderamt); 1.0 = opaque/world
+	int uSpotOrigin, uSpotDir, uSpotRange, uSpotCosInner, uSpotCosOuter, uSpotDefog;	// flashlight defog cone (base pass only; local clear of black fog)
 	ShaderProgram litProgram;	// additive per-light pass (T6)
 	int litUViewProj, litUModel, litUAlphaTest;
 	int litULightOrigin, litULightDir, litULightColor;
@@ -203,6 +205,8 @@ void FeedNightModel( const WorldState &w, const AmbienceParams &amb )
 	if( w.uNightMoon >= 0 )      glUniform1f( w.uNightMoon, amb.nightMoonGain );
 }
 
+void FeedSpotDefog( const WorldState &w );	// fwd: flashlight defog cone feed (defined below)
+
 // S3 fog feed (REWORK-SPEC §S3, finding 5: ONE inscatter owner). Single chokepoint shared
 // by all three base-pass feed sites (DrawOpaque / DrawBrushOpaque / DrawBrushTransparent),
 // replacing the inline CszFogUniformVecs + the RETIRED CszApplyFogAmbient achromatic gray.
@@ -217,6 +221,49 @@ void FeedFog( const WorldState &w, const AmbienceParams &amb )
 	if( w.uFogParams2 >= 0 ) glUniform4fv( w.uFogParams2, 1, fogParams2 );
 	if( w.uFogParams3 >= 0 ) glUniform4fv( w.uFogParams3, 1, fogParams3 );
 	if( w.uFogLit >= 0 )     glUniform3fv( w.uFogLit, 1, fogLit );
+	FeedSpotDefog( w );	// flashlight defog cone (opaque + brush-opaque base sites)
+}
+
+// Flashlight defog feed (base pass only). Pushes the local player's shadowed-flashlight cone
+// + a "defog strength" floorK so the base FS can locally LOWER the fog extinction INSIDE the
+// cone (a see-through path) while the server fog stays untouched everywhere else. Same spot the
+// volumetric march uses (FogVolumeLocalSpot). No flashlight this frame -> u_spotRange 0 ->
+// shader is identity. Pure render-side; never touches u_fog / the server black-fog protocol.
+void FeedSpotDefog( const WorldState &w )
+{
+	// csz_flashlight_defog (NEW, floorK) + csz_flashlight_range (FogVolume-owned) fetched once.
+	static cvar_t *s_cvarDefog = NULL;
+	static cvar_t *s_cvarRange = NULL;
+	static bool    s_looked = false;
+	if( !s_looked )
+	{
+		s_looked = true;
+		// floorK: extinction multiplier at the cone core. 0.2 = clearly see-through but a thin
+		// fog remains (锥内不全干); 1.0 = off/identity; lower = clears more. Live-tunable.
+		s_cvarDefog = gEngfuncs.pfnRegisterVariable( "csz_flashlight_defog", "0.2", FCVAR_CLIENTDLL );
+		s_cvarRange = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_range" );	// owned by FogVolume
+	}
+	float floorK = ( s_cvarDefog != NULL ) ? s_cvarDefog->value : 0.2f;
+	if( floorK < 0.0f ) floorK = 0.0f;
+	if( floorK > 1.0f ) floorK = 1.0f;	// 1 = identity (no defog)
+	float range = ( s_cvarRange != NULL ) ? s_cvarRange->value : 1600.0f;
+
+	SpotLightParams spot;
+	if( FogVolumeLocalSpot( spot ) )
+	{
+		float len = spot.radius;
+		if( range > 0.0f && range < len ) len = range;	// csz_flashlight_range caps the clear distance
+		if( w.uSpotOrigin >= 0 )   glUniform3fv( w.uSpotOrigin, 1, spot.origin );
+		if( w.uSpotDir >= 0 )      glUniform3fv( w.uSpotDir, 1, spot.dir );
+		if( w.uSpotRange >= 0 )    glUniform1f( w.uSpotRange, len );
+		if( w.uSpotCosInner >= 0 ) glUniform1f( w.uSpotCosInner, spot.cosInner );
+		if( w.uSpotCosOuter >= 0 ) glUniform1f( w.uSpotCosOuter, spot.cosOuter );
+		if( w.uSpotDefog >= 0 )    glUniform1f( w.uSpotDefog, floorK );
+	}
+	else if( w.uSpotRange >= 0 )
+	{
+		glUniform1f( w.uSpotRange, 0.0f );	// no shadowed flashlight -> shader skips (identity)
+	}
 }
 
 // Conversion scratch for one lightmap block (engine standard maps: smax/tmax
@@ -1077,6 +1124,12 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.uFogParams2 = UniformLoc( s_world.program, "u_fogParams2" );	// S3
 	s_world.uFogParams3 = UniformLoc( s_world.program, "u_fogParams3" );	// S3
 	s_world.uFogLit = UniformLoc( s_world.program, "u_fogLit" );		// S3
+	s_world.uSpotOrigin = UniformLoc( s_world.program, "u_spotOrigin" );	// flashlight defog cone
+	s_world.uSpotDir = UniformLoc( s_world.program, "u_spotDir" );
+	s_world.uSpotRange = UniformLoc( s_world.program, "u_spotRange" );
+	s_world.uSpotCosInner = UniformLoc( s_world.program, "u_spotCosInner" );
+	s_world.uSpotCosOuter = UniformLoc( s_world.program, "u_spotCosOuter" );
+	s_world.uSpotDefog = UniformLoc( s_world.program, "u_spotDefog" );
 	s_world.uCamPos = UniformLoc( s_world.program, "u_camPos" );
 	s_world.uAmbTint = UniformLoc( s_world.program, "u_ambTint" );
 	s_world.uSkyAmbScale = UniformLoc( s_world.program, "u_skyAmbScale" );
@@ -1121,6 +1174,10 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	if( s_world.uFogParams2 >= 0 ) glUniform4fv( s_world.uFogParams2, 1, kFogParams2Default );
 	if( s_world.uFogParams3 >= 0 ) glUniform4fv( s_world.uFogParams3, 1, kFogParams3Default );
 	if( s_world.uFogLit >= 0 )     glUniform3fv( s_world.uFogLit, 1, kCamPosZero );
+	// Flashlight defog defaults to OFF: u_spotRange 0 -> the shader's `if(u_spotRange>0)`
+	// guard is skipped so the fog extinction is byte-identical until a frame feeds a spot.
+	if( s_world.uSpotRange >= 0 )    glUniform1f( s_world.uSpotRange, 0.0f );
+	if( s_world.uSpotDefog >= 0 )    glUniform1f( s_world.uSpotDefog, 1.0f );	// floorK 1 = identity even if range fed
 	glUniform3fv( s_world.uCamPos, 1, kCamPosZero );
 	glUniform3fv( s_world.uAmbTint, 1, kTintNeutral );
 	glUniform1f( s_world.uSkyAmbScale, 1.0f );	// L3b: neutral until fed (no sky-ambient dimming)
@@ -1557,6 +1614,7 @@ void WorldRenderer::DrawBrushTransparent( const ViewSetup &view, cl_entity_s *co
 	if( s_world.uFogParams2 >= 0 ) glUniform4fv( s_world.uFogParams2, 1, fogParams2 );
 	if( s_world.uFogParams3 >= 0 ) glUniform4fv( s_world.uFogParams3, 1, fogParams3 );
 	if( s_world.uFogLit >= 0 )     glUniform3fv( s_world.uFogLit, 1, fogLit );
+	FeedSpotDefog( s_world );	// flashlight defog cone (transparent base site; inlined fog path)
 	glUniform3fv( s_world.uCamPos, 1, view.origin );
 	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
 	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off

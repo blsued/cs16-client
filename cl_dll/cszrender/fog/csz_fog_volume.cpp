@@ -279,6 +279,14 @@ bool FindShadowedSpot( SpotLightParams &out )
 
 }  // anonymous namespace
 
+// Public wrapper over the file-local FindShadowedSpot so the world base pass clears the black
+// fog inside the EXACT same cone the volumetric march lights (single source of truth -> the
+// defog path and the shaft can never disagree on which flashlight is active).
+bool FogVolumeLocalSpot( SpotLightParams &out )
+{
+	return FindShadowedSpot( out );
+}
+
 void FogVolumeRegisterCvars()
 {
 	if( s_cvarQuality == NULL )

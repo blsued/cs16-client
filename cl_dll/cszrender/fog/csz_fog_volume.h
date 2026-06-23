@@ -36,6 +36,7 @@
 namespace csz
 {
 struct ViewSetup;
+struct SpotLightParams;
 
 // fog M1 Step 3 -- half-res flashlight ray-march producing shadowed light shafts
 // (the "Unreal-like" volumetric layer). Gated behind csz_fog_quality >= 1; needs
@@ -51,4 +52,8 @@ struct ViewSetup;
 void FogVolumeRegisterCvars();                  // csz_fog_quality/steps/halfres/march_* (OnHudInit)
 void FogVolumeRender( const ViewSetup &view );  // the pass; no-op when gated off
 void FogVolumeShutdown();                        // generation-safe GL teardown (Renderer::Shutdown)
+// Expose THIS FRAME's shadow-casting flashlight (the single spot the volumetric march uses)
+// so the world base pass can locally clear the black fog inside that same cone. Returns false
+// when no shadowed flashlight is active this frame (caller must feed an "off" range then).
+bool FogVolumeLocalSpot( SpotLightParams &out );
 }

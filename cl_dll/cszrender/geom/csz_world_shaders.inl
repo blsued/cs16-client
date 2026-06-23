@@ -126,6 +126,16 @@ uniform vec3  u_nightSky;         // night sky-ambient color (premul), modulated
 uniform vec3  u_nightFloor;       // competitive readable ambient floor (premul), skyVis-independent
 uniform float u_nightK;           // skyVis exponent k for the world night ambient
 uniform float u_nightMoon;        // gain on the skyVis-GATED moon directional (wallhack-fixed moonlight)
+// Flashlight defog (local player's shadowed spot). Inside the cone the base fog's SCALAR
+// extinction is LOCALLY lowered so the player sees a path through the black fog; outside the
+// cone (or with no flashlight) it is byte-identical to the server fog -- pure render-side
+// modulation, the server fog state/protocol (u_fog) is never touched. Gameplay blackout kept.
+uniform vec3  u_spotOrigin;       // cone apex (world); kept for parity (view-ray test below uses dir only)
+uniform vec3  u_spotDir;          // normalized cone forward
+uniform float u_spotRange;        // beam length (world units); <=0 => no flashlight this frame -> shader is identity
+uniform float u_spotCosInner;     // soft cone rim start (cos half-angle, inner)
+uniform float u_spotCosOuter;     // cone cutoff       (cos half-angle, outer)
+uniform float u_spotDefog;        // floorK: extinction multiplier at the cone core (1 = off/identity; lower = clears more; non-0 keeps thin fog)
 out vec4 fragColor;
 // S3 procedural 2D value noise (finding 6: 2D only -- the GL function table has no
 // glTexImage3D, so this is in-shader hash noise, pure ALU, NO texture binding). Two
@@ -186,6 +196,10 @@ vec3 cszFogT3( vec3 worldPos, vec3 camPos, vec3 aRGB, float b, float maxOpacity,
 	vec3 T = exp( -max( F, vec3( 0.0 )));
 	return max( T, vec3( 1.0 - maxOpacity ));                // server reveal floor (silhouettes/blackout)
 }
+)GLSL"
+// MSVC C2026: a single raw string literal is capped (~16KB). kWorldFs now exceeds it, so it is
+// split into two ADJACENT raw literals (the compiler concatenates them into one source string).
+R"GLSL(
 void main()
 {
 	vec4 base = texture( u_texDiffuse, v_uv );
@@ -284,7 +298,21 @@ void main()
 	float dens = 1.0;
 	if( u_fogParams2.w > 0.0 )                                    // 2D noise density modulation (drifts with wind)
 		dens = mix( 1.0, 2.0 * cszFogNoise( v_worldPos.xy, u_fogParams3.x, u_fogParams3.y, u_fogParams3.w ), u_fogParams2.w );
-	vec3 aRGB = u_fog.w * u_fogParams2.xyz;                       // per-channel extinction (b_ch = a * tint)
+	// Flashlight defog: lower the base fog's SCALAR extinction along the view ray INSIDE the
+	// local flashlight cone so the player sees a path through the black fog. Angular mask =
+	// view ray vs cone dir (smoothstep cosOuter..cosInner -> 0 outside the cone); distance
+	// falloff fades the clearing toward the beam's range so far fog re-thickens. Outside the
+	// cone -- or with no flashlight (u_spotRange<=0) -- clearFactor=0 and the extinction byte
+	// is UNCHANGED from the server value (gameplay blackout preserved; cszFogT3 itself unchanged).
+	float fogA = u_fog.w;
+	if( u_spotRange > 0.0 )
+	{
+		float ang      = smoothstep( u_spotCosOuter, u_spotCosInner, dot( rd, u_spotDir ) );
+		float distFall = 1.0 - smoothstep( u_spotRange * 0.6, u_spotRange, tLen );
+		float clearFactor = ang * distFall;                      // 1 = cone core in range, 0 = rim/outside/no-light
+		fogA *= mix( 1.0, u_spotDefog, clearFactor );            // core -> floorK*a (see-through); rim/outside -> a unchanged
+	}
+	vec3 aRGB = fogA * u_fogParams2.xyz;                          // per-channel extinction (b_ch = a * tint)
 	vec3 T = cszFogT3( v_worldPos, u_camPos, aRGB, u_fogParams.x, u_fogParams.z,
 		u_fogParams.w, u_fogParams3.z, dens );
 	// Directional in-scatter: Henyey-Greenstein lobe toward the dominant body (u_sunDir =
