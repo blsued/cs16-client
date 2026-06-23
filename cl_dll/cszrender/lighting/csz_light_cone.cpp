@@ -83,6 +83,7 @@ cvar_t *s_cvarRange;       // csz_flashlight_range (owned by FogVolume); caps be
 bool    s_lookedRange;
 cvar_t *s_cvarV3;          // csz_flashlight_v3 (owned by light_pass); L5R master A/B. Fetched lazily.
 cvar_t *s_cvarTpG;         // csz_flashlight_tp_g         default "0.7": §5.3 world-cone HG g (unify with the shaft; was const 0.35)
+cvar_t *s_cvarTpSteps;     // csz_flashlight_tp_steps     default "16": full-tier world-cone march samples (clamp 8..32). Live knob for the visual gate now that animated IGN replaces the static dither grid; bump if any residual noise.
 cvar_t *s_cvarTpFogCouple; // csz_flashlight_tp_fogcouple default "0": §5.3 density-couple amount 0..1 (0 = vacuum/legacy, 1 = beam scales with fog)
 bool    s_lookedV3;
 
@@ -98,7 +99,7 @@ struct ConeGpu
 	int uMatViewProj, uApex, uAxis, uRight, uUp, uSegments;
 	int uDepthTex, uViewSize, uCamPos, uAxisDir, uLen;
 	int uCosInner, uCosOuter, uColor, uIntensity, uHgG, uSteps;
-	int uInvViewProj, uZNear, uZFar, uSurfFade;
+	int uInvViewProj, uZNear, uZFar, uSurfFade, uFrame;
 };
 ConeGpu s_gpu;
 
@@ -168,6 +169,7 @@ bool EnsureBuilt()
 	s_gpu.uZNear       = UniformLoc( s_gpu.prog, "u_zNear" );
 	s_gpu.uZFar        = UniformLoc( s_gpu.prog, "u_zFar" );
 	s_gpu.uSurfFade    = UniformLoc( s_gpu.prog, "u_surfFade" );
+	s_gpu.uFrame       = UniformLoc( s_gpu.prog, "u_frame" );	// animated IGN temporal offset
 
 	s_gpu.built = true;
 	CSZ_LogDev( "lightcone", "world beam program built (gpu gen %d)", s_gpu.gpuGeneration );
@@ -276,7 +278,14 @@ void LightConeRegisterCvars()
 		// no regression); 1 = beam intensity scales fully with fog density. Live-tunable.
 		s_cvarTpFogCouple = gEngfuncs.pfnRegisterVariable( "csz_flashlight_tp_fogcouple", "0", FCVAR_CLIENTDLL );
 
-	CSZ_LogDev( "lightcone", "cvars registered (csz_flashlight_tp/_tp_intensity/_nl_surffade/_tp_g/_tp_fogcouple)" );
+	if( s_cvarTpSteps == NULL )
+		// Full-tier world-cone march samples. 16 anti-bands the gradient; now that the
+		// dither is animated (golden-ratio per-frame lattice) the eye integrates the
+		// noise to smooth, so 16 is normally plenty. Live knob 8..32 for the visual gate
+		// to bump if any residual speckle remains (perf is local: cone-silhouette pixels only).
+		s_cvarTpSteps = gEngfuncs.pfnRegisterVariable( "csz_flashlight_tp_steps", "16", FCVAR_CLIENTDLL );
+
+	CSZ_LogDev( "lightcone", "cvars registered (csz_flashlight_tp/_tp_intensity/_nl_surffade/_tp_g/_tp_fogcouple/_tp_steps)" );
 }
 
 void LightConeRender( const ViewSetup &view )
@@ -374,6 +383,15 @@ void LightConeRender( const ViewSetup &view )
 	if( s_gpu.uZNear >= 0 )       glUniform1f( s_gpu.uZNear, view.zNear );
 	if( s_gpu.uZFar >= 0 )        glUniform1f( s_gpu.uZFar, view.zFar );
 
+	// Animated-IGN frame offset: a monotonically-advancing counter (wrapped to keep
+	// float precision) so the dither lattice shifts every frame -- breaks the static
+	// per-pixel noise grid (网点) into temporally-decorrelated noise the eye integrates
+	// to smooth. Same range-derived 1024 wrap as the first-person fog march. Uploaded
+	// once per frame (identical for every spot in the loop below).
+	static unsigned int s_coneFrame = 0u;
+	s_coneFrame = ( s_coneFrame + 1u ) & 1023u;
+	if( s_gpu.uFrame >= 0 )       glUniform1f( s_gpu.uFrame, (float)s_coneFrame );
+
 	// One beam per registered spot light. L6b hard cap (LightBudgetCompute, run
 	// earlier this frame): full-tier beams march kConeSteps, cheap-tier beams march
 	// the reduced step count, culled beams (off-screen or over budget) are skipped
@@ -382,6 +400,10 @@ void LightConeRender( const ViewSetup &view )
 	// identical to L6a.
 	float now = ClientTime();
 	int cheapSteps = LightBudgetCheapSteps();
+	// Full-tier march samples: cvar-overridable (default kConeSteps); clamp 8..32.
+	int fullSteps = (int)( ReadCvar( s_cvarTpSteps, (float)kConeSteps ) + 0.5f );
+	if( fullSteps < 8 )  fullSteps = 8;
+	if( fullSteps > 32 ) fullSteps = 32;
 	int drawnFull = 0, drawnCheap = 0;
 	for( int i = 0; i < LightRegistry::kMaxLights; i++ )
 	{
@@ -399,7 +421,7 @@ void LightConeRender( const ViewSetup &view )
 		if( v3 && light->desc.isLocal )
 			continue;
 
-		int steps = ( light->budgetTier == kBudgetCheap ) ? cheapSteps : kConeSteps;
+		int steps = ( light->budgetTier == kBudgetCheap ) ? cheapSteps : fullSteps;
 
 		SpotLightParams spot;
 		g_lights.BuildSpotParams( *light, spot );

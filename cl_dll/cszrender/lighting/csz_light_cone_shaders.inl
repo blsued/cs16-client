@@ -107,11 +107,19 @@ uniform float u_intensity;      // beam brightness scale (csz_flashlight_tp_inte
 uniform float u_hgG;            // Henyey-Greenstein anisotropy
 uniform int   u_steps;          // bounded march sample count
 uniform float u_surfFade;       // 0 = local (tight band), 1 = non-local (wide surface fade)
+uniform float u_frame;          // animated-IGN temporal offset (frame counter); breaks the fixed dither grid, NO history
 in vec3 vWorld;
 out vec4 fragColor;
 
+// Animated interleaved-gradient-noise dither (matches the first-person fog shaft,
+// csz_fog_volume_shaders.inl). The static IGN here produced a FIXED per-pixel noise
+// grid that never changed frame-to-frame -- the eye could not integrate it away, so
+// the low-step march read as a stationary speckle ("网点"). Shifting the IGN lattice
+// each frame by the golden ratio (Wronski) decorrelates the pattern over time so it
+// integrates to smooth -- NO temporal history buffer, ZERO ghosting on the moving beam.
 float ignDither( vec2 p )
 {
+	p += 5.588238 * fract( u_frame * 0.6180339887 );   // golden-ratio per-frame lattice shift
 	return fract( 52.9829189 * fract( dot( p, vec2( 0.06711056, 0.00583715 ) ) ) );
 }
 
