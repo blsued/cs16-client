@@ -90,6 +90,20 @@ cvar_t *s_skyDebugCvar;	// csz_sky_debug: 0 = OFF (default); != 0 = csz_renderer
 cvar_t *s_moonPhaseCvar;	// csz_moon_phase (registered by C3 csz_sunmoon.cpp): looked up here for Option II phase-scaled moonlight; single source of truth shared with the disc shader
 cvar_t *s_moonlightCvar;	// csz_moonlight: USER-tunable multiplier on the NIGHT moonlight intensity ONLY (default 1.3 = "one notch" stronger per 2026-06-19 real-machine feedback). Scales moonLit, which is already 0 except mid-night, so day/dusk/round-start identity is preserved.
 cvar_t *s_moonlightV2Cvar;	// csz_moonlight_v2 (L2): OPT-IN photometric phase response for the surface moonlight. 0 (default) = legacy LINEAR illuminated fraction (approved look, partial phases unchanged); >0 = exponent on the lit fraction so partial phases dim photometrically (e.g. 3.0 -> half-moon ~0.125 instead of 0.5). Full moon (frac==1) and legacy csz_moon_phase=-1 stay 1.0 at any exponent, so the APPROVED full-moon look is byte-identical regardless of this cvar.
+// --- S2 physical night model knobs (REWORK-SPEC §S2). All registered in
+// RegisterDevCvars (always, not dev-only); read once per frame in PublishLighting
+// to fill the AmbienceParams night-transport slots. Defaults reproduce the approved
+// 3fd8b7e look (csz_night_model 0 is the hard one-knob revert for A/B).
+cvar_t *s_nightModelCvar;	// csz_night_model: 1 (default) = new physical model, 0 = pre-S2 tiled-multiplier night
+cvar_t *s_nightPhaseGainCvar;	// csz_night_phase_gain: brightness multiplier on the approved-phase anchor (1.0 = identity; USER's "夕阳别死黑" dial)
+cvar_t *s_nightKWorldCvar;	// csz_night_k_world: skyVis exponent k for the WORLD night ambient (higher = indoors darker faster)
+cvar_t *s_nightKStudioCvar;	// csz_night_k_studio: skyVis exponent k for STUDIO (per-entity), calibrated separately (finding 9)
+cvar_t *s_nightSkyWorldCvar;	// csz_night_sky_world: WORLD night sky-ambient intensity (scales the cool sky hue)
+cvar_t *s_nightSkyStudioCvar;	// csz_night_sky_studio: STUDIO night sky-ambient intensity
+cvar_t *s_nightFloorWorldCvar;	// csz_night_floor_world: WORLD competitive ambient floor intensity (prevents pure-black indoors)
+cvar_t *s_nightFloorStudioCvar;	// csz_night_floor_studio: STUDIO ambient floor intensity (keeps enemy models readable)
+cvar_t *s_nightMoonCvar;	// csz_night_moon: gain on the skyVis-GATED moon directional in physical night (the wallhack-fixed moonlight)
+cvar_t *s_nightLmKeepCvar;	// csz_night_lmkeep: fraction of the baked daytime lightmap retained at night (world; 0 = spec-faithful pure physical)
 
 #if defined( CSZ_DEV_TOOLS )
 cvar_t *s_fullscreenCvar;	// csz_sky_fullscreen: dev overlay, draw the sky over the whole frame
@@ -194,6 +208,30 @@ void SkyRenderer::RegisterDevCvars()
 	// (~lit^value). Registered like csz_moonlight; A/B with "1" vs "0".
 	if( s_moonlightV2Cvar == NULL )
 		s_moonlightV2Cvar = gEngfuncs.pfnRegisterVariable( "csz_moonlight_v2", "0", FCVAR_CLIENTDLL );
+
+	// S2 physical night model (REWORK-SPEC §S2). Always registered (not dev-only),
+	// same pattern as the cvars above. Defaults reproduce the approved 3fd8b7e look;
+	// csz_night_model 0 is the hard A/B revert to the pre-S2 tiled-multiplier night.
+	if( s_nightModelCvar == NULL )
+		s_nightModelCvar = gEngfuncs.pfnRegisterVariable( "csz_night_model", "1", FCVAR_CLIENTDLL );
+	if( s_nightPhaseGainCvar == NULL )
+		s_nightPhaseGainCvar = gEngfuncs.pfnRegisterVariable( "csz_night_phase_gain", "1", FCVAR_CLIENTDLL );
+	if( s_nightKWorldCvar == NULL )
+		s_nightKWorldCvar = gEngfuncs.pfnRegisterVariable( "csz_night_k_world", "0.7", FCVAR_CLIENTDLL );
+	if( s_nightKStudioCvar == NULL )
+		s_nightKStudioCvar = gEngfuncs.pfnRegisterVariable( "csz_night_k_studio", "0.7", FCVAR_CLIENTDLL );
+	if( s_nightSkyWorldCvar == NULL )
+		s_nightSkyWorldCvar = gEngfuncs.pfnRegisterVariable( "csz_night_sky_world", "0.16", FCVAR_CLIENTDLL );
+	if( s_nightSkyStudioCvar == NULL )
+		s_nightSkyStudioCvar = gEngfuncs.pfnRegisterVariable( "csz_night_sky_studio", "0.20", FCVAR_CLIENTDLL );
+	if( s_nightFloorWorldCvar == NULL )
+		s_nightFloorWorldCvar = gEngfuncs.pfnRegisterVariable( "csz_night_floor_world", "0.03", FCVAR_CLIENTDLL );
+	if( s_nightFloorStudioCvar == NULL )
+		s_nightFloorStudioCvar = gEngfuncs.pfnRegisterVariable( "csz_night_floor_studio", "0.05", FCVAR_CLIENTDLL );
+	if( s_nightMoonCvar == NULL )
+		s_nightMoonCvar = gEngfuncs.pfnRegisterVariable( "csz_night_moon", "1", FCVAR_CLIENTDLL );
+	if( s_nightLmKeepCvar == NULL )
+		s_nightLmKeepCvar = gEngfuncs.pfnRegisterVariable( "csz_night_lmkeep", "0", FCVAR_CLIENTDLL );
 
 #if defined( CSZ_DEV_TOOLS )
 	gEngfuncs.pfnAddCommand( "csz_devsun", DevSunCommand );	// mirror csz_devmoon (csz_fog.cpp)
@@ -545,6 +583,59 @@ void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 	amb.moonColor[1] = moonRGB[1];
 	amb.moonColor[2] = moonRGB[2];
 	amb.moonHalo = 0.9f;
+
+	// --- S2 physical night model transport (REWORK-SPEC §S2, findings 1,2,7,9). Fill
+	// the AmbienceParams night slots from phase + cvars. The world/studio base passes
+	// turn "go dark" from a tiled brightness multiplier into physical incident light
+	// gated by the S1 geometric skyVis. Defaults reproduce the approved 3fd8b7e look:
+	// nightness=0 (day/dusk) -> the shader's approvedDay branch is pixel-identical, and
+	// csz_night_model 0 reverts the whole mechanism. The skyVis-GATED moon directional
+	// in the shader reuses amb.moonDir + amb.moonSurfaceDirect (set above), so it carries
+	// the full phase/cloud/csz_moonlight response already and is 0 unless the moon is up.
+	amb.nightModel = ( s_nightModelCvar != NULL && s_nightModelCvar->value == 0.0f ) ? 0.0f : 1.0f;
+
+	// Explicit phase gate (finding 7): the SAME cool-bias formula the shader used to
+	// derive night from u_ambTint.b-r, moved CPU-side so the night TIMING is unchanged
+	// but the shader no longer re-derives it. 0 at day/sunset, 1 by deep midnight.
+	amb.nightness = skymath::Smooth01( 0.0f, 0.10f, amb.tint[2] - amb.tint[0] );
+
+	// Approved-phase brightness anchor (finding 1): luma(tint) x a USER gain. The shader
+	// splits u_ambTint into pure HUE (luma-normalized) x this scalar, so hue/brightness
+	// decouple while gain=1 reconstructs the approved tint (~identity, zero regression).
+	float tintLuma = 0.2126f * amb.tint[0] + 0.7152f * amb.tint[1] + 0.0722f * amb.tint[2];
+	float phaseGain = ( s_nightPhaseGainCvar != NULL ) ? s_nightPhaseGainCvar->value : 1.0f;
+	if( phaseGain < 0.0f )  phaseGain = 0.0f;
+	amb.phaseIntensity = tintLuma * phaseGain;
+
+	// Per-domain night ambient (finding 9: world and studio are calibrated SEPARATELY).
+	// Cool moonlit-ambient hues; cvar intensities scale them. skyHue drives the open-sky
+	// micro-ambient (modulated by pow(skyVis,k)); floorHue is the competitive readable
+	// floor that keeps indoors/缝隙 from going pure black (silhouettes still discernible).
+	const float skyHue[3]   = { 0.62f, 0.74f, 1.00f };	// cool blue night sky ambient
+	const float floorHue[3] = { 0.70f, 0.80f, 1.00f };	// slightly cool readable floor
+	float wSky   = ( s_nightSkyWorldCvar    != NULL ) ? s_nightSkyWorldCvar->value    : 0.16f;
+	float sSky   = ( s_nightSkyStudioCvar   != NULL ) ? s_nightSkyStudioCvar->value   : 0.20f;
+	float wFloor = ( s_nightFloorWorldCvar  != NULL ) ? s_nightFloorWorldCvar->value  : 0.03f;
+	float sFloor = ( s_nightFloorStudioCvar != NULL ) ? s_nightFloorStudioCvar->value : 0.05f;
+	if( wSky < 0.0f ) wSky = 0.0f;  if( sSky < 0.0f ) sSky = 0.0f;
+	if( wFloor < 0.0f ) wFloor = 0.0f;  if( sFloor < 0.0f ) sFloor = 0.0f;
+	for( int c = 0; c < 3; c++ )
+	{
+		amb.nightSky[0][c]   = skyHue[c]   * wSky;	// world
+		amb.nightSky[1][c]   = skyHue[c]   * sSky;	// studio
+		amb.nightFloor[0][c] = floorHue[c] * wFloor;	// world
+		amb.nightFloor[1][c] = floorHue[c] * sFloor;	// studio
+	}
+	amb.nightK[0] = ( s_nightKWorldCvar  != NULL ) ? s_nightKWorldCvar->value  : 0.7f;
+	amb.nightK[1] = ( s_nightKStudioCvar != NULL ) ? s_nightKStudioCvar->value : 0.7f;
+	if( amb.nightK[0] < 0.0f ) amb.nightK[0] = 0.0f;
+	if( amb.nightK[1] < 0.0f ) amb.nightK[1] = 0.0f;
+
+	amb.nightMoonGain = ( s_nightMoonCvar != NULL ) ? s_nightMoonCvar->value : 1.0f;
+	if( amb.nightMoonGain < 0.0f ) amb.nightMoonGain = 0.0f;
+	amb.nightLmKeep = ( s_nightLmKeepCvar != NULL ) ? s_nightLmKeepCvar->value : 0.0f;
+	if( amb.nightLmKeep < 0.0f ) amb.nightLmKeep = 0.0f;
+	if( amb.nightLmKeep > 1.0f ) amb.nightLmKeep = 1.0f;
 }
 
 }

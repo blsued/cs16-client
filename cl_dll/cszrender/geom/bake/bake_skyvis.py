@@ -354,9 +354,6 @@ def main():
 
     # World-diagonal as the ray length (a fully open ray must reach a sky leaf or
     # escape within the world bound).
-    big = 1.0e9
-    for m in bsp.models[:1]:
-        pass
     # derive map extent from vertex AABB
     xs = [v[0] for v in bsp.vertexes]
     ys = [v[1] for v in bsp.vertexes]

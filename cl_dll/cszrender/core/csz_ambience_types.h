@@ -118,6 +118,38 @@ struct AmbienceParams
 	// Linear, premultiplied. (0,0,0) = legacy byte-identical (no ambient). NOT server-
 	// authoritative -- it rides in the snapshot purely as a per-frame transport slot.
 	float fogAmbient[3];
+	// --- S2 physical night model (REWORK-SPEC §S2, codex findings 1,2,7,9). Like
+	// fogAmbient above, these are CLIENT-side per-frame transport slots (derived in
+	// PublishLighting from phase + cvars), NOT server-authoritative. They turn the
+	// "go dark" mechanism from a global tiled brightness multiplier into physical
+	// incident light gated by the geometric skyVis baked in S1. All default to the
+	// approved 3fd8b7e look (nightModel drives the A/B, nightness=0 day -> identity).
+	//   * nightModel   = master A/B (csz_night_model): 1 = new physical model,
+	//                    0 = byte-identical pre-S2 tiled-multiplier night (one-knob revert).
+	//   * nightness    = explicit phase gate [0,1] (finding 7): 0 day/dusk -> approved
+	//                    look, 1 midnight -> physical night. Replaces the shader's old
+	//                    u_ambTint.b-r derivation. Computed CPU-side from the SAME tint
+	//                    cool-bias formula so the night TIMING does not shift.
+	//   * phaseIntensity = approved-phase brightness anchor (finding 1): == luma(tint) *
+	//                    csz_night_phase_gain. The shader splits u_ambTint into pure HUE
+	//                    (luma-normalized) x this scalar, so hue and brightness decouple
+	//                    while the default reconstructs the approved tint (~identity).
+	//   * nightK / nightSky / nightFloor are SEPARATELY calibrated for world [0] and
+	//     studio [1] (finding 9: world has overbright+lightmap proxy, studio is the
+	//     ambient/shadeColor domain -- they must not share one k+floor). nightSky/Floor
+	//     are linear premultiplied night-ambient colors (cool hue x cvar intensity).
+	//   * nightMoonGain = gain on the skyVis-GATED moon directional in physical night
+	//     (the wallhack fix: 屋顶下 skyVis~0 -> no moonlight). Shared.
+	//   * nightLmKeep = optional fraction of the baked daytime lightmap re-added at
+	//     night (world only; default 0 = spec-faithful pure-physical, USER may dial up).
+	float nightModel;       // 1 = new physical model, 0 = legacy 3fd8b7e (A/B)
+	float nightness;        // explicit phase gate [0,1]
+	float phaseIntensity;   // approved-phase brightness anchor (== luma(tint)*gain)
+	float nightK[2];        // skyVis exponent k; [0] = world, [1] = studio
+	float nightSky[2][3];   // night sky-ambient color (premul); [0] = world, [1] = studio
+	float nightFloor[2][3]; // competitive readable ambient floor (premul); [0] world [1] studio
+	float nightMoonGain;    // gated moon directional gain (shared)
+	float nightLmKeep;      // world baked-lightmap retain fraction (default 0)
 };
 // (0,0,0,0)/(1,1,1)/disabled everything -- the vanilla daylight look.
 inline AmbienceParams AmbienceNeutral()
@@ -132,6 +164,15 @@ inline AmbienceParams AmbienceNeutral()
 	p.directTransmittance = 1.0f;	// L3a: clear sky = full moonlight transmission (identity; computed-not-applied)
 	p.skyAmbientScale     = 1.0f;	// L3a: clear sky = no sky-ambient dimming (identity)
 	p.shaftMask           = 1.0f;	// L3a: clear sky = light shafts fully pass (identity)
+	// S2 physical night defaults: neutral daylight is nightness=0 so the night model
+	// is dormant, but seed the slots so a pre-feed frame reconstructs the approved look
+	// (phaseIntensity = luma(neutral tint (1,1,1)) = 1 -> approvedDay = lit; never black).
+	p.nightModel     = 1.0f;	// new physical model active by default (A/B: csz_night_model 0 reverts)
+	p.nightness      = 0.0f;	// neutral = full day -> approvedDay branch (identity)
+	p.phaseIntensity = 1.0f;	// == luma(1,1,1); shader hue/intensity split reconstructs identity
+	p.nightK[0] = 0.7f;  p.nightK[1] = 0.7f;
+	p.nightMoonGain  = 1.0f;
+	p.nightLmKeep    = 0.0f;
 	return p;
 }
 // Legacy exp2 fog rendered 2^(-density*d); the analytic base fog renders the

@@ -110,6 +110,18 @@ uniform float u_skyVis;           // S1: per-entity geometric sky visibility [0,
 uniform vec3  u_moonInScatter;    // L2 moonFogInScatter * intensity (premultiplied, linear); (0,0,0)=off
 uniform float u_shaftMask;        // L3a cloud-gap gating: gap=1, thick cloud=0; 1.0 neutral
 uniform float u_moonShaft;        // csz_moonshaft master toggle: 1=enhanced glow, 0=exact pre-L4
+// S2 physical night model (REWORK-SPEC §S2, findings 1,2,7,9). Mirrors the world base
+// pass with STUDIO-specific calibration (finding 9). Defaults reproduce 3fd8b7e:
+// u_nightModel 0 = legacy path, u_nightness 0 (day) -> approvedDay branch identical.
+uniform float u_nightModel;       // 1 = new physical model, 0 = legacy 3fd8b7e (A/B revert)
+uniform float u_nightness;        // explicit phase gate [0,1] (replaces u_ambTint.b-r derivation)
+uniform float u_phaseIntensity;   // approved-phase brightness anchor (== luma(u_ambTint) by default)
+uniform vec3  u_moonDir;          // surface -> moon (pure antipode L vector) for the gated night moon term
+uniform vec3  u_moonColor;        // moon-only premultiplied directional color (0 when the moon is down)
+uniform vec3  u_nightSky;         // studio night sky-ambient color (premul), modulated by pow(u_skyVis,k)
+uniform vec3  u_nightFloor;       // studio competitive readable ambient floor (premul)
+uniform float u_nightK;           // skyVis exponent k for studio (per-entity)
+uniform float u_nightMoon;        // gain on the skyVis-GATED moon directional (wallhack-fixed moonlight)
 out vec4 fragColor;
 // Analytic base-fog transmittance (fog M1 spec 4.3) -- closed-form exponential
 // height+distance with the |b|<eps and |rd.z|<eps guards; world up axis is Z.
@@ -138,34 +150,51 @@ void main()
 		discard;
 	vec3 n = normalize( v_normal );
 	float ndl = max( dot( n, u_shadeDir ), 0.0 );
-	vec3 col = base.rgb * ( u_ambient + u_shadeColor * ndl );
-	// Indoor sky-occlusion (Chunk C, defect 8): studio meshes have no lightmap,
-	// so use the per-entity baked u_ambient luminance as the DAYTIME sky-access
-	// proxy (the engine samples it from the lightmap at the entity origin: bright
-	// -> outdoor, dim -> indoor). The window is shifted up vs the world pass
-	// because u_ambient carries the overbright factor. csz_night gates so DAYTIME
-	// stays EXACT identity, and everything is multiplicative so it composes with
-	// Chunk A's phase-scaled moonlight (via u_sunColor). DARK / flashlight-required.
-	float csz_night = smoothstep( 0.0, 0.10, u_ambTint.b - u_ambTint.r );
-	float csz_lmLum = dot( u_ambient, vec3( 0.2126, 0.7152, 0.0722 ));
-	const float CSZ_SKY_LO = 0.25, CSZ_SKY_HI = 0.90;   // u_ambient window (overbright): below=indoor, above=outdoor
-	float csz_sky = smoothstep( CSZ_SKY_LO, CSZ_SKY_HI, csz_lmLum );
-	const float CSZ_INDOOR_AMB = 0.25;                  // night indoor ambient floor (DARK end)
-	float csz_amb = mix( 1.0, mix( CSZ_INDOOR_AMB, 1.0, csz_sky ), csz_night );
-	// L3b: sky-ambient cloud dimming (mirrors the world base pass for a consistent
-	// darkened look). SEPARATE scalar multiplied AFTER csz_night is derived from the
-	// RAW u_ambTint above -- never folded into u_ambTint (would break day-for-night).
-	// 1.0 = clear sky (identity); CPU floors at 0.6 so enemy models stay readable.
-	col *= u_ambTint * csz_amb * u_skyAmbScale;
-	// Shadowless directional sun/moon (Option A, base pass only, pitfall 23):
-	// add N.L on top of the model's own lambert before the fog mix. v_normal is
-	// bone-transformed to world space (kStudioVs), same space as u_sunDir.
-	// u_sunColor is 0 when the body light is off, so the term vanishes.
-	// Gated by sky-access (scoped to night via the outer mix): outdoor full,
-	// indoor a faint reflected fraction; dusk/dawn not regressed (csz_night~0).
-	const float CSZ_INDOOR_MOON = 0.08;                 // night indoor directional floor (DARK end)
-	float csz_moon = mix( 1.0, mix( CSZ_INDOOR_MOON, 1.0, csz_sky ), csz_night );
-	col += base.rgb * u_sunColor * max( dot( n, u_sunDir ), 0.0 ) * csz_moon;
+	vec3 albedo = base.rgb;
+	vec3 modelLit = albedo * ( u_ambient + u_shadeColor * ndl );   // baked two-term lambert
+	vec3 col;
+	// S2 variable darkness (REWORK-SPEC §S2). u_nightModel master A/B: 1 = new
+	// physical model, 0 = byte-identical pre-S2 (3fd8b7e). Uniform branch = coherent.
+	if( u_nightModel > 0.5 )
+	{
+		// === New physical night model (findings 1,2,7,9) ===
+		// (1) APPROVED DAY LOOK -- pixel-identical to 3fd8b7e at u_nightness=0:
+		// u_ambTint split into pure HUE x explicit u_phaseIntensity brightness anchor
+		// (finding 1); approved sun/moon directional preserved UNGATED (finding 2).
+		float tintL   = max( dot( u_ambTint, vec3( 0.2126, 0.7152, 0.0722 )), 1e-4 );
+		vec3  tintHue = u_ambTint / tintL;
+		vec3  approvedDay = modelLit * tintHue * u_phaseIntensity * u_skyAmbScale
+		                  + albedo * u_sunColor * max( dot( n, u_sunDir ), 0.0 );
+		// (2) PHYSICAL NIGHT -- spatialized by the per-entity geometric u_skyVis
+		// (finding 7 replaces the u_ambient luma proxy; finding 9: STUDIO-specific
+		// k + floor, NOT shared with the world). Indoor (skyVis~0) -> cool readable
+		// floor so enemy models stay discernible; open -> night sky-ambient + the
+		// skyVis-GATED moon directional (under a roof skyVis~0 -> no moon leak).
+		float sv = clamp( u_skyVis, 0.0, 1.0 );
+		vec3  nightAmb  = u_nightSky * pow( sv, u_nightK ) + u_nightFloor;
+		vec3  moonTerm  = albedo * u_moonColor * max( dot( n, u_moonDir ), 0.0 ) * sv * u_nightMoon;
+		vec3  physicalNight = albedo * nightAmb + moonTerm;
+		// (3) variable darkness via the explicit phase gate (finding 7).
+		col = mix( approvedDay, physicalNight, clamp( u_nightness, 0.0, 1.0 ));
+	}
+	else
+	{
+		// === Legacy pre-S2 (3fd8b7e) -- byte-identical A/B fallback ===
+		col = modelLit;
+		// Indoor sky-occlusion via the per-entity baked u_ambient luma as the DAYTIME
+		// sky-access proxy (window shifted up because u_ambient carries overbright).
+		float csz_night = smoothstep( 0.0, 0.10, u_ambTint.b - u_ambTint.r );
+		float csz_lmLum = dot( u_ambient, vec3( 0.2126, 0.7152, 0.0722 ));
+		const float CSZ_SKY_LO = 0.25, CSZ_SKY_HI = 0.90;   // u_ambient window (overbright): below=indoor, above=outdoor
+		float csz_sky = smoothstep( CSZ_SKY_LO, CSZ_SKY_HI, csz_lmLum );
+		const float CSZ_INDOOR_AMB = 0.25;                  // night indoor ambient floor (DARK end)
+		float csz_amb = mix( 1.0, mix( CSZ_INDOOR_AMB, 1.0, csz_sky ), csz_night );
+		col *= u_ambTint * csz_amb * u_skyAmbScale;
+		// Shadowless directional sun/moon (Option A), sky-access scaled.
+		const float CSZ_INDOOR_MOON = 0.08;                 // night indoor directional floor (DARK end)
+		float csz_moon = mix( 1.0, mix( CSZ_INDOOR_MOON, 1.0, csz_sky ), csz_night );
+		col += albedo * u_sunColor * max( dot( n, u_sunDir ), 0.0 ) * csz_moon;
+	}
 	// Analytic base fog (fog M1 Step 2): single extinction + directional in-scatter
 	// glow, composited in linear HDR (replaces the old exp2 mix). Viewmodel rides
 	// this program: at arm's reach t~0 -> T~1 -> visually fog-free, as before.
