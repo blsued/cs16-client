@@ -317,15 +317,22 @@ layout(location = 0) in vec3 a_pos;
 layout(location = 1) in vec2 a_uv;
 layout(location = 3) in vec3 a_normal;
 uniform mat4 u_viewProj;
+// u_model maps local model space -> world space. World submodel-0 geometry is
+// baked in world space and feeds u_model = identity (byte-identical to the
+// pre-u_model shader). Brush submodels (func_*) are baked in LOCAL space and
+// feed a per-entity matrix, so the FS gets a genuine world-space position +
+// normal for its ndotl / attenuation / spot projection / shadow textureProj.
+uniform mat4 u_model;
 out vec2 v_uv;
 out vec3 v_worldPos;
 out vec3 v_worldNormal;
 void main()
 {
+	vec4 worldPos = u_model * vec4( a_pos, 1.0 );
 	v_uv = a_uv;
-	v_worldPos = a_pos;
-	v_worldNormal = a_normal;
-	gl_Position = u_viewProj * vec4( a_pos, 1.0 );
+	v_worldPos = worldPos.xyz;
+	v_worldNormal = mat3( u_model ) * a_normal;	// rigid rotation; identity for world
+	gl_Position = u_viewProj * worldPos;
 }
 )GLSL";
 

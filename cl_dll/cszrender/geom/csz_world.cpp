@@ -133,7 +133,7 @@ struct WorldState
 	int uNightSky, uNightFloor, uNightK, uNightMoon;	// S2 world night ambient calibration (base pass only)
 	int uBrushAlpha;		// per-entity translucency for blended brush modes (renderamt); 1.0 = opaque/world
 	ShaderProgram litProgram;	// additive per-light pass (T6)
-	int litUViewProj, litUAlphaTest;
+	int litUViewProj, litUModel, litUAlphaTest;
 	int litULightOrigin, litULightDir, litULightColor;
 	int litULightRadius, litUCosInner, litUCosOuter;
 	int litUMatShadow, litUHasShadow;
@@ -1145,6 +1145,7 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	// Lit-additive program (T6 spot pass); init-time, so failure is FATAL.
 	BuildProgram( "csz_world_lit", kWorldLitVs, kWorldLitFs, true, s_world.litProgram );
 	s_world.litUViewProj = UniformLoc( s_world.litProgram, "u_viewProj" );
+	s_world.litUModel = UniformLoc( s_world.litProgram, "u_model" );	// identity for world model0, per-entity for brush
 	s_world.litUAlphaTest = UniformLoc( s_world.litProgram, "u_alphaTest" );
 	s_world.litULightOrigin = UniformLoc( s_world.litProgram, "u_lightOrigin" );
 	s_world.litULightDir = UniformLoc( s_world.litProgram, "u_lightDir" );
@@ -1164,6 +1165,7 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	glUniform1i( UniformLoc( s_world.litProgram, "u_texDiffuse" ), 0 );
 	glUniform1i( UniformLoc( s_world.litProgram, "u_shadowMap" ), 2 );
 	glUniform1f( s_world.litUAlphaTest, 0.0f );
+	glUniformMatrix4fv( s_world.litUModel, 1, GL_FALSE, identity.m );	// default world identity (per-pass re-pinned)
 	UseProgram( 0 );
 
 	// Depth program (T7 shadow map pass); init-time, so failure is FATAL.
@@ -1752,6 +1754,14 @@ void WorldRenderer::DrawLitAdditive( const ViewSetup &view, const SpotLightParam
 
 	UseProgram( s_world.litProgram.program );
 	glUniformMatrix4fv( s_world.litUViewProj, 1, GL_FALSE, view.matViewProj.m );
+	// World geometry is baked in world space: u_model = identity so v_worldPos =
+	// a_pos and v_worldNormal = a_normal exactly (model0 flashlight bytes unchanged).
+	// The brush lit pass may have left a per-entity matrix here, so re-pin.
+	{
+		Mat4 identity;
+		Mat4Identity( identity );
+		glUniformMatrix4fv( s_world.litUModel, 1, GL_FALSE, identity.m );
+	}
 	glUniform3fv( s_world.litULightOrigin, 1, light.origin );
 	glUniform3fv( s_world.litULightDir, 1, light.dir );
 	glUniform3fv( s_world.litULightColor, 1, light.color );
@@ -1837,6 +1847,187 @@ void WorldRenderer::DrawLitAdditive( const ViewSetup &view, const SpotLightParam
 		s_nextStatsTime = now + 1.0f;
 		CSZ_LogDev( "world", "lit %d faces (spot at %.0f %.0f %.0f)",
 			drawn, light.origin[0], light.origin[1], light.origin[2] );
+	}
+}
+
+// Brush submodel (func_*) additive spot pass (companion to DrawLitAdditive).
+// World submodel-0 lit-additive only covers s_world.faces[]; brush surfaces are
+// a SEPARATE structure (s_world.brushFaces[]) baked in LOCAL space and drawn via
+// a per-entity u_model -- so without this pass the flashlight's lit-additive pool
+// never lands on func_ boxes (they go fully dark once the night base is pressed
+// down). Mirrors DrawBrushOpaque's per-entity model-matrix loop, but draws
+// through litProgram with the same spot uniforms DrawLitAdditive feeds.
+//
+// C-class trap (model-space culling): brushFaces[].planeNormal/planeDist/mins/
+// maxs are LOCAL-space constants. The view-side and light-side plane culls and
+// the SpotTouchesBox AABB reject must run in the entity's LOCAL frame, so the
+// world-space view origin, light origin and light dir are pushed through the
+// rigid inverse (R^T*(p-origin) for points, R^T*v for directions -- same basis
+// as DrawBrushEntityFaces). radius/cone cosines are rotation-invariant. Skipping
+// this would cull the wrong faces on any rotated/translated brush.
+void WorldRenderer::DrawBrushLitAdditive( const ViewSetup &view, const SpotLightParams &light,
+	cl_entity_s *const *ents, int count )
+{
+	if( !s_world.built || count <= 0 )
+		return;
+
+	UseProgram( s_world.litProgram.program );
+	glUniformMatrix4fv( s_world.litUViewProj, 1, GL_FALSE, view.matViewProj.m );
+	// World-space spot uniforms are shared across every brush entity (only u_model
+	// changes per entity below); v_worldPos/v_worldNormal are world-space again
+	// after u_model, so origin/dir/shadow projection all stay in world space.
+	glUniform3fv( s_world.litULightOrigin, 1, light.origin );
+	glUniform3fv( s_world.litULightDir, 1, light.dir );
+	glUniform3fv( s_world.litULightColor, 1, light.color );
+	glUniform1f( s_world.litULightRadius, light.radius );
+	glUniform1f( s_world.litUCosInner, light.cosInner );
+	glUniform1f( s_world.litUCosOuter, light.cosOuter );
+	glUniformMatrix4fv( s_world.litUMatShadow, 1, GL_FALSE, light.matShadow.m );
+	glUniform1i( s_world.litUHasShadow, ( light.shadowTexSlot != 0 ) ? 1 : 0 );
+	glUniform1f( s_world.litUV3, light.v3 );
+	glUniform1f( s_world.litUEdgeExp, light.edgeExp );
+	glUniform1f( s_world.litUHotspotGain, light.hotspotGain );
+	glUniform1f( s_world.litUHotspotSharp, light.hotspotSharp );
+	glUniform1f( s_world.litUDirectGain, light.directGain );
+
+	if( light.shadowTexSlot != 0 )
+		BindTextureSlot( 2, light.shadowTexSlot );
+
+	BindVao( s_world.vao );
+	SetCull( false );
+	SetBlend( kBlendAdditive );
+	SetDepthWrite( false );
+	glUniform1f( s_world.litUAlphaTest, 0.0f );
+
+	int drawnEnts = 0;
+	int drawnFaces = 0;
+
+	for( int i = 0; i < count; i++ )
+	{
+		cl_entity_t *ent = ents[i];
+
+		if( ent == NULL || ent->model == NULL || ent->model->type != mod_brush )
+			continue;
+
+		if( ResolveBrushRenderMode( ent ) != kRenderNormal )
+			continue;	// transparent brushes light in their own domain (out of scope)
+
+		const EngModel *bmod = EngBsp( ent->model );
+		int first = bmod->firstmodelsurface;
+		int faceCount = bmod->nummodelsurfaces;
+
+		if( first < 0 || faceCount <= 0 || first + faceCount > s_world.bsp->numsurfaces )
+			continue;
+
+		Mat4 model;
+		BuildBrushModelMatrix( ent, model );
+		glUniformMatrix4fv( s_world.litUModel, 1, GL_FALSE, model.m );
+
+		// Rigid inverse of view origin, light origin (points) and light dir
+		// (direction) into this brush's local model space for the plane/cone culls.
+		float relView[3] = {
+			view.origin[0] - model.m[12], view.origin[1] - model.m[13], view.origin[2] - model.m[14],
+		};
+		float relLight[3] = {
+			light.origin[0] - model.m[12], light.origin[1] - model.m[13], light.origin[2] - model.m[14],
+		};
+		float localView[3] = {
+			relView[0] * model.m[0] + relView[1] * model.m[1] + relView[2] * model.m[2],
+			relView[0] * model.m[4] + relView[1] * model.m[5] + relView[2] * model.m[6],
+			relView[0] * model.m[8] + relView[1] * model.m[9] + relView[2] * model.m[10],
+		};
+		float localLightOrigin[3] = {
+			relLight[0] * model.m[0] + relLight[1] * model.m[1] + relLight[2] * model.m[2],
+			relLight[0] * model.m[4] + relLight[1] * model.m[5] + relLight[2] * model.m[6],
+			relLight[0] * model.m[8] + relLight[1] * model.m[9] + relLight[2] * model.m[10],
+		};
+
+		// Local-space copy of the spot for SpotTouchesBox (origin + dir rotated into
+		// the local frame; radius/cosines are rotation-invariant).
+		SpotLightParams localSpot = light;
+		localSpot.origin[0] = localLightOrigin[0];
+		localSpot.origin[1] = localLightOrigin[1];
+		localSpot.origin[2] = localLightOrigin[2];
+		localSpot.dir[0] = light.dir[0] * model.m[0] + light.dir[1] * model.m[1] + light.dir[2] * model.m[2];
+		localSpot.dir[1] = light.dir[0] * model.m[4] + light.dir[1] * model.m[5] + light.dir[2] * model.m[6];
+		localSpot.dir[2] = light.dir[0] * model.m[8] + light.dir[1] * model.m[9] + light.dir[2] * model.m[10];
+
+		int curTex = -1;
+		float curAlpha = 0.0f;
+		int entFaces = 0;
+		glUniform1f( s_world.litUAlphaTest, 0.0f );
+
+		for( int g = first; g < first + faceCount; g++ )
+		{
+			int slot = s_world.brushForGlobal[g];
+
+			if( slot < 0 )
+				continue;	// sky/turb surface: nothing emitted
+
+			const FaceRec &f = s_world.brushFaces[slot];
+
+			if( f.firstVert < 0 )
+				continue;
+
+			// View-side plane cull (local space): skip faces the camera cannot see.
+			float dv = localView[0] * f.planeNormal[0] + localView[1] * f.planeNormal[1] +
+				localView[2] * f.planeNormal[2] - f.planeDist;
+
+			if( f.planeBack ? ( dv > -kBackfaceEpsilon ) : ( dv < kBackfaceEpsilon ))
+				continue;
+
+			// Light-side plane cull (local space): a face whose front faces away from
+			// the light gets zero ndotl everywhere.
+			float dl = localLightOrigin[0] * f.planeNormal[0] + localLightOrigin[1] * f.planeNormal[1] +
+				localLightOrigin[2] * f.planeNormal[2] - f.planeDist;
+
+			if( f.planeBack ? ( dl > -kBackfaceEpsilon ) : ( dl < kBackfaceEpsilon ))
+				continue;
+
+			// Spot/box reject in LOCAL space (local light vs local face AABB).
+			if( !SpotTouchesBox( localSpot, f.mins, f.maxs ))
+				continue;
+
+			if( f.texSlot != curTex )
+			{
+				BindTextureSlot( 0, f.texSlot );
+				curTex = f.texSlot;
+			}
+
+			if( f.alphaTest != curAlpha )
+			{
+				glUniform1f( s_world.litUAlphaTest, f.alphaTest );
+				curAlpha = f.alphaTest;
+			}
+
+			glDrawArrays( GL_TRIANGLE_FAN, f.firstVert, f.numVerts );
+			entFaces++;
+		}
+
+		drawnFaces += entFaces;
+		if( entFaces > 0 )
+			drawnEnts++;
+	}
+
+	// Restore identity so the next litProgram user (world DrawLitAdditive re-pins
+	// anyway, but be defensive) never inherits a stale brush matrix.
+	{
+		Mat4 identity;
+		Mat4Identity( identity );
+		glUniformMatrix4fv( s_world.litUModel, 1, GL_FALSE, identity.m );
+	}
+
+	SetBlend( kBlendNone );
+	SetDepthWrite( true );
+
+	static float s_nextStatsTime;
+	float now = ClientTime();
+
+	if( drawnEnts > 0 && now >= s_nextStatsTime )
+	{
+		s_nextStatsTime = now + 1.0f;
+		CSZ_LogDev( "world", "brush lit %d ents (%d faces, spot at %.0f %.0f %.0f)",
+			drawnEnts, drawnFaces, light.origin[0], light.origin[1], light.origin[2] );
 	}
 }
 

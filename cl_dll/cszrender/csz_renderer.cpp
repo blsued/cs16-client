@@ -580,7 +580,7 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	EndPass( kTmStudio );
 
 	BeginPass( kTmLights );
-	RunLightPasses( view, m_frame.studio, m_frame.numStudio );	// slot 13: additive light passes (spot DIRECT: world+studio lit, world-space)
+	RunLightPasses( view, m_frame.studio, m_frame.numStudio, m_frame.brush, m_frame.numBrush );	// slot 13: additive light passes (spot DIRECT: world+brush+studio lit, world-space)
 	// slot 13.4 (L6a): world-space visible flashlight beam VOLUME. After the spot
 	// direct add (the lit pool + holder body), before the Step-3 first-person march.
 	// Additive air in-scatter cone-mesh, visible from ANY camera angle, occluded

@@ -55,6 +55,12 @@ public:
 	void DrawBrushTransparent( const ViewSetup &view, cl_entity_s *const *ents, int count );
 	void DrawDepth( const ViewSetup &lightView, const Frustum &lightCull );
 	void DrawLitAdditive( const ViewSetup &view, const SpotLightParams &light );
+	// Brush submodel (func_*) companion to DrawLitAdditive: lights opaque brush
+	// entities through the same litProgram with a per-entity u_model, so the
+	// flashlight's direct pool reaches func_ boxes (their faces live in the
+	// separate brushFaces[] structure the world lit pass never touches).
+	void DrawBrushLitAdditive( const ViewSetup &view, const SpotLightParams &light,
+		cl_entity_s *const *ents, int count );
 	bool IsBuilt() const;
 	// S1: geometric sky visibility [0,1] sampled at a world point (studio entity
 	// origin). Averages baked skyVis of retained world verts within a small

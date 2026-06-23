@@ -641,7 +641,8 @@ void RenderShadowMaps( const ViewSetup &mainView, cl_entity_s *const *studioEnts
 	}
 }
 
-void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, int studioCount )
+void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, int studioCount,
+	cl_entity_s *const *brushEnts, int brushCount )
 {
 	// Latch the view for the csz_testspot command (runs between frames).
 	s_viewOrigin[0] = mainView.origin[0];
@@ -708,6 +709,11 @@ void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, 
 
 		g_lights.BuildSpotParams( *light, params );
 		g_world.DrawLitAdditive( mainView, params );
+		// Brush submodels (func_ boxes) are a separate VBO structure the world lit
+		// pass never touches; without this the flashlight's direct pool skips them
+		// and they read dark under the physical-night base. Same spot params,
+		// per-entity u_model inside.
+		g_world.DrawBrushLitAdditive( mainView, params, brushEnts, brushCount );
 		g_studio.DrawLitAdditive( mainView, params, studioEnts, studioCount );
 		drawn++;
 	}
