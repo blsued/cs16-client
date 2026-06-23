@@ -538,6 +538,14 @@ bool DrawEntity( const ViewSetup &view, cl_entity_s *ent, bool doCull, const Spo
 	return true;
 }
 
+// S4 §7 competitive rim-light cvars (csz_rim strength + csz_rim_power Fresnel exponent).
+// USER "口味" knobs, registered once at HUD init via StudioRegisterCvars() (defined below,
+// in the csz namespace) for init parity with the other layers' …RegisterCvars() seams
+// (CONVENTIONS.md), then read live in BeginStudioPassWith. NULL until that registration runs;
+// the feed below falls back to the baked defaults if so.
+cvar_t *s_rimCvar = NULL;
+cvar_t *s_rimPowerCvar = NULL;
+
 // Common pass prologue: program, view uniforms, chrome basis, dedup reset.
 void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, const PassLocs &locs )
 {
@@ -592,15 +600,10 @@ void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, cons
 	if( locs.uNightK >= 0 )         glUniform1f( locs.uNightK, amb.nightK[1] );
 	if( locs.uNightMoon >= 0 )      glUniform1f( locs.uNightMoon, amb.nightMoonGain );
 	// S4 §7 competitive rim light feed. USER "口味" knobs (csz_rim strength, csz_rim_power
-	// Fresnel exponent), registered lazily here (studio has no other cvar-register seam) and
-	// read live. The shader gates the rim on u_nightness so DAY is byte-identical regardless.
+	// Fresnel exponent), registered once at HUD init via StudioRegisterCvars() (S4-fix: codex
+	// S4 Low -- init parity, no more lazy register in this draw prologue) and read live here.
+	// The shader gates the rim on u_nightness so DAY is byte-identical regardless.
 	{
-		static cvar_t *s_rimCvar;
-		static cvar_t *s_rimPowerCvar;
-		if( s_rimCvar == NULL )
-			s_rimCvar = gEngfuncs.pfnRegisterVariable( "csz_rim", "0.30", FCVAR_CLIENTDLL );
-		if( s_rimPowerCvar == NULL )
-			s_rimPowerCvar = gEngfuncs.pfnRegisterVariable( "csz_rim_power", "3.0", FCVAR_CLIENTDLL );
 		float rim = ( s_rimCvar != NULL ) ? s_rimCvar->value : 0.30f;
 		float rimP = ( s_rimPowerCvar != NULL ) ? s_rimPowerCvar->value : 3.0f;
 		if( rim < 0.0f ) rim = 0.0f;  if( rim > 2.0f ) rim = 2.0f;	// sane band
@@ -700,6 +703,16 @@ void EndStudioDepthPass()
 	EndStudioPass();
 }
 
+}
+
+// S4-fix (codex S4 Low): register the studio rim cvars once at HUD init, parity with the
+// other layers' …RegisterCvars() seams. Idempotent (guards re-entry on vid restart paths).
+void StudioRegisterCvars()
+{
+	if( s_rimCvar == NULL )
+		s_rimCvar = gEngfuncs.pfnRegisterVariable( "csz_rim", "0.30", FCVAR_CLIENTDLL );
+	if( s_rimPowerCvar == NULL )
+		s_rimPowerCvar = gEngfuncs.pfnRegisterVariable( "csz_rim_power", "3.0", FCVAR_CLIENTDLL );
 }
 
 void StudioRenderer::OnModelUnloaded( model_t *mod )

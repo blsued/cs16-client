@@ -51,4 +51,9 @@ public:
 	void DrawSingle( const ViewSetup &view, cl_entity_s *ent );   // viewmodel path; caller owns depth range/projection
 };
 extern StudioRenderer g_studio;
+
+// S4-fix (codex S4 Low): register the studio rim-light cvars (csz_rim, csz_rim_power)
+// once at HUD init for init parity with the other layers (CONVENTIONS.md), instead of
+// the old lazy register inside the per-frame draw prologue. Call from Renderer::OnHudInit.
+void StudioRegisterCvars();
 }

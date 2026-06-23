@@ -667,9 +667,11 @@ void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 	// approved dawn into the physical-night model and crushing the sunrise warm sun. Driving
 	// nightness from phase keeps dawn approved: ramp up from sunset(0) to full night by
 	// rise_end, hold through the dark hours, then fall back to 0 by fall_end (just before the
-	// dawn keyframe at 0.86). sunset(0.0)=0, midnight(0.5)=1, dawn(0.86)~0, day(1.0)=0. The
-	// legacy day-for-night COOL GRADE keeps its OWN separate tint.b-r signal inside the
-	// shader's approvedDay branch (unchanged), so this only gates the physical-night mix.
+	// dawn keyframe at 0.86). sunset(0.0)=0, midnight(0.5)=1, dawn(0.86)~0, day(1.0)=0. NOTE (S4):
+	// the active-path day-for-night COOL GRADE was retired to the unified compose post; the tint.b-r
+	// (csz_night) signal still lives in the shader's approvedDay branch but now drives ONLY the indoor
+	// ambient floor (csz_amb), independent of u_nightness -- so this nightness curve gates solely the
+	// physical-night mix.
 	float riseEnd   = ( s_nightRiseEndCvar   != NULL ) ? s_nightRiseEndCvar->value   : 0.30f;
 	float fallStart = ( s_nightFallStartCvar != NULL ) ? s_nightFallStartCvar->value : 0.72f;
 	float fallEnd   = ( s_nightFallEndCvar   != NULL ) ? s_nightFallEndCvar->value   : 0.88f;

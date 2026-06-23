@@ -210,13 +210,15 @@ void main()
 		float sv = clamp( v_skyVis, 0.0, 1.0 );
 		vec3  sunWarm  = albedo * u_sunWarmColor * max( dot( nrm, -u_moonDir ), 0.0 );             // warm sun, UNGATED
 		vec3  moonTerm = albedo * u_moonColor    * max( dot( nrm,  u_moonDir ), 0.0 ) * sv * u_nightMoon; // cool moon, skyVis-GATED
-		// (1) APPROVED DAY LOOK -- the 3fd8b7e ambient + day-for-night cool grade +
-		// indoor floor expression VERBATIM (codex P1a: NO tint reconstruction / phase
-		// gain), with the directional REPLACED by the split sunWarm+moonTerm above
-		// (codex P2b). The day-for-night cool grade lives HERE in the active path (codex
-		// P1b), keeping its OWN tint.b-r signal independent of u_nightness. At the
-		// nightness=0 phases (sunset/day) the moon is below the horizon so u_moonColor=0
-		// and sunWarm == the old blended directional -> approvedDay byte-identical to model0.
+		// (1) APPROVED DAY LOOK -- the 3fd8b7e ambient + indoor floor expression VERBATIM
+		// (codex P1a: NO tint reconstruction / phase gain), with the directional REPLACED by
+		// the split sunWarm+moonTerm above (codex P2b). NOTE (S4): the world-only day-for-night
+		// COOL GRADE no longer lives here -- it was RETIRED and folded into the UNIFIED compose
+		// post (see the RETIRED note at :229-234 below); approvedDay is now just ambient + floor
+		// + split directional. The tint.b-r (csz_night) signal survives, but it drives ONLY the
+		// indoor ambient floor (csz_amb) here, not a cool grade. At the nightness=0 phases
+		// (sunset/day) the moon is below the horizon so u_moonColor=0 and sunWarm == the old
+		// blended directional -> approvedDay byte-identical to model0.
 		vec3  approvedDay = lit;
 		float csz_night = smoothstep( 0.0, 0.10, u_ambTint.b - u_ambTint.r );
 		float csz_lmLum = dot( lm, vec3( 0.2126, 0.7152, 0.0722 ));

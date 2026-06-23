@@ -277,6 +277,7 @@ void Renderer::OnHudInit()
 	LightConeRegisterCvars();	// L6a: csz_flashlight_tp (default 1 = world-space visible beam) + _intensity
 	DustRegisterCvars();		// L7: csz_dust (default 1 = gated airborne dust) + _count/_intensity/_size
 	RegisterStudioTextureCvars();	// csz_dev_armskin (spec 4.3.1 layer 1 dev probe)
+	StudioRegisterCvars();		// S4 §7: csz_rim + csz_rim_power (S4-fix: init parity, was lazy in draw prologue)
 	RegisterViewmodelDevCvars();	// csz_dev_viewmodel (dev stand-in model)
 	g_fog.RegisterDevCommands();	// csz_devfog/csz_devtint/csz_devmoon (A1; CSZ_DEV_TOOLS only)
 	CszFogRegisterCvars();		// L0: csz_fog_server_mask (black-fog decouple seam; always, Release-safe)
@@ -393,7 +394,17 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	// S4 (REWORK-SPEC §S4): hand the freshly-published phase nightness to the HDR resolve so its
 	// night grade (exposure / shadow-toe / Purkinje) follows the same curve as the world/studio
 	// passes. nightness 0 (day) -> the resolve skips the whole grade -> bit-identical day frame.
-	SkyComposePublishNight( view.ambience.nightness );
+	// S4-fix (codex S4 Medium): the unified compose night grade is the SINGLE cool grade ONLY for
+	// csz_night_model 1 (default shipping). Under csz_night_model 0 (legacy A/B baseline) the world
+	// base still runs its OWN pre-S2 world-only cool grade in the legacy branch (csz_world_shaders.inl);
+	// layering the compose night grade ON TOP would DOUBLE-COOL model0 and cool world twice vs studio
+	// once -> model0 is no longer a clean pre-S2 fallback. So bypass the compose night grade in model0
+	// by feeding nightness 0; the legacy world cool grade then stands alone == pre-S2 baseline. This is
+	// COMPOSE-ONLY: world/studio still receive the real amb.nightness on their own uniforms (model0
+	// world ignores it and reads csz_night from tint). amb.nightModel is 1 on the default path, so
+	// shipping (csz_night_model 1) is byte-identical.
+	float composeNightness = ( view.ambience.nightModel < 0.5f ) ? 0.0f : view.ambience.nightness;
+	SkyComposePublishNight( composeNightness );
 
 	// L0 black-fog decouple seam (CONVENTIONS.md). SINGLE chokepoint: every fog
 	// consumer -- world/studio/sprite analytic-fog uniforms (CszFogUniformVecs),
