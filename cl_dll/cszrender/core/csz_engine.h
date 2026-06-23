@@ -66,5 +66,5 @@ bool RoundTiming( float &outDuration, float &outRemaining );
 // the EXACT pre-L4 behaviour (byte-identical clean A/B). Read live each frame by
 // the surface in-scatter feed (world/studio) and the screen-space god rays.
 float CszMoonShaftEnabled();
-void  CszRegisterMoonShaftCvar();   // registers csz_moonshaft (default "1"); OnHudInit
+void  CszRegisterMoonShaftCvar();   // registers csz_moonshaft (default "0"); OnHudInit
 }

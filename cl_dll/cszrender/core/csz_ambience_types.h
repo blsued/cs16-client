@@ -107,19 +107,8 @@ struct AmbienceParams
 	float maxOpacity;       // server reveal floor: shader clamps T to max(T, 1-maxOpacity); 1 = full fog
 	int   fogPreset;        // kCszFogPreset* (0 = environmental cosmetic; >=1 = black gameplay)
 	bool  fogBypassTint;    // black fog bypasses the sky phase-tint multiply (spec 3.6)
-	// --- Client-side achromatic ambient in-scatter (fog rewrite §5.1). The physical
-	// fix for "the map looks black, not foggy": a real participating medium does not
-	// just SUBTRACT scene radiance (col*T), it ADDS back the in-scattered light it
-	// catches. Server "black fog" ships fogColor=(0,0,0) so the in-scatter term was 0
-	// and the blend collapsed to a pure multiplicative darken. This is a low-luminance
-	// NEUTRAL (very slightly cool) gray the renderer computes from client cvars each
-	// frame (csz_fog_ambient / csz_fog_ambient_cool, via CszFogComputeAmbient) and
-	// folds into the base in-scatter at the world/studio feed sites (CszApplyFogAmbient).
-	// Linear, premultiplied. (0,0,0) = legacy byte-identical (no ambient). NOT server-
-	// authoritative -- it rides in the snapshot purely as a per-frame transport slot.
-	float fogAmbient[3];
 	// --- S2 physical night model (REWORK-SPEC §S2, codex findings 1,2,7,9; codex S2
-	// red-team v1 fixes P0/P1a/P2b). Like fogAmbient above, these are CLIENT-side
+	// red-team v1 fixes P0/P1a/P2b). These are CLIENT-side
 	// per-frame transport slots (derived in PublishLighting from phase + cvars), NOT
 	// server-authoritative. They turn the "go dark" mechanism from a global tiled
 	// brightness multiplier into physical incident light gated by the geometric skyVis

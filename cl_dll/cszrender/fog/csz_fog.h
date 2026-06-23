@@ -102,10 +102,4 @@ float CszFogServerMask();               // live [0,1]: override if armed, else t
 //                 EXACTLY what the exponential-height integral buys (visible only
 //                 when a map/csz_devfogx sets b>0); it manufactures no wrong path.
 bool  CszFogBaseCorrected();            // true unless csz_fog_base == 0 (fails safe to corrected)
-
-// Fog rewrite §5.1: compute the client achromatic ambient in-scatter color (linear,
-// premultiplied) from csz_fog_ambient / csz_fog_ambient_cool. The renderer writes the
-// result into view.ambience.fogAmbient each frame; world/studio fold it into the base
-// in-scatter (CszApplyFogAmbient). out=(0,0,0) when csz_fog_ambient<=0 (legacy void).
-void  CszFogComputeAmbient( float out[3] );
 }

@@ -158,8 +158,8 @@ float cszFogNoise( vec2 worldXY, float scale, float wind, float t )
 vec3 cszFogT3( vec3 worldPos, vec3 camPos, vec3 aRGB, float b, float maxOpacity,
 	float startD, float cutoffD, float densMul )
 {
-	if( aRGB.g <= 0.0 )
-		return vec3( 1.0 );
+	if( all( lessThanEqual( aRGB, vec3( 0.0 ))))
+		return vec3( 1.0 );                                  // ALL channels' extinction<=0 -> fog off (per-channel safe: a red/blue-only medium still scatters)
 	vec3 d = worldPos - camPos;
 	float t = length( d );
 	float rdz = ( t > 1e-4 ) ? d.z / t : 0.0;

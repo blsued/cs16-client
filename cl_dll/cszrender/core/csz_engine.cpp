@@ -66,16 +66,20 @@ bool RoundTiming( float &outDuration, float &outRemaining )
 	return gHUD.m_Timer.GetRoundTiming( ClientTime(), outDuration, outRemaining );
 }
 
-// fog M1 L4 moonlight Tyndall air-glow toggle (csz_moonshaft). Default "1" =
-// enhanced HG forward-scatter glow + cloud-gap gating; "0" = EXACT pre-L4 look
-// (the new in-scatter / god-ray-gating terms all multiply by this -> 0 cancels
-// them to byte-identity). Registered once at HUD init; read live each frame.
+// fog M1 L4 moonlight Tyndall air-glow toggle (csz_moonshaft). Default "0" =
+// the L4 moon-axis shaft is OFF: it is a cloud-gap volumetric effect that needs a
+// meaningful shaftMask (clouds = a future milestone), and the S3 HG in-scatter lobe
+// already owns the moon forward-scatter glow -- leaving L4 on double-adds a second
+// moon-directional lobe over the HG one (codex S3 Major1). "1" re-enables it for the
+// clouds milestone, where the HG/L4 coordination gets tuned. The in-scatter / god-ray
+// terms all multiply by this -> 0 cancels them to byte-identity. Registered once at
+// HUD init; read live each frame.
 static cvar_t *s_cvarMoonShaft = NULL;
 
 void CszRegisterMoonShaftCvar()
 {
 	if( s_cvarMoonShaft == NULL )
-		s_cvarMoonShaft = gEngfuncs.pfnRegisterVariable( "csz_moonshaft", "1", FCVAR_CLIENTDLL );
+		s_cvarMoonShaft = gEngfuncs.pfnRegisterVariable( "csz_moonshaft", "0", FCVAR_CLIENTDLL );
 }
 
 float CszMoonShaftEnabled()

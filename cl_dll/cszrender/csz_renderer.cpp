@@ -289,7 +289,7 @@ void Renderer::OnHudInit()
 	PanoramaRegisterCvars();	// MW-rework: csz_pano/pano_intensity/pano_lon_offset (must follow StarsRegisterCvars: fetches the moon-wash cvar pointers it registers)
 	FogVolumeRegisterCvars();	// fog M1 Step 3: csz_fog_quality/steps/halfres/march_intensity/march_g
 	FogGodraysRegisterCvars();	// fog M1 Step 4: csz_fog_godrays/_intensity/_dev (sun/moon god rays)
-	CszRegisterMoonShaftCvar();	// fog M1 L4: csz_moonshaft (default 1 = enhanced moon Tyndall air-glow; 0 = exact pre-L4)
+	CszRegisterMoonShaftCvar();	// fog M1 L4: csz_moonshaft (default 0 = off, S3 HG owns moon glow; 1 = L4 cloud-gap shaft, clouds milestone)
 	gEngfuncs.pfnRegisterVariable( "csz_sky_glcheck", "0", FCVAR_CLIENTDLL );	// A2: per-sky-pass glGetError bisection (dev, default off)
 }
 
@@ -367,8 +367,8 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	// S3 (REWORK-SPEC §S3, finding 5): the §5.1 achromatic-gray ambient in-scatter is
 	// RETIRED. PublishLighting now computes the full sky/moon-coupled fog (per-channel
 	// extinction + HG + height + noise) as the SINGLE in-scatter owner, so the old flat
-	// CszFogComputeAmbient(view.ambience.fogAmbient) fold is gone (it was the "single flat
-	// gray wash" disease). fogAmbient/CszFogComputeAmbient remain defined but unconsumed.
+	// gray fold (the "single flat gray wash" disease) is gone -- the helper, cvars and
+	// transport slot were deleted in S3-fix (codex S3 Minor: no defined-but-unconsumed dead code).
 
 	// Phase drives both the cloud-state scalars and the published night tint /
 	// celestial light below, all BEFORE any pass uploads the snapshot (A3): the
