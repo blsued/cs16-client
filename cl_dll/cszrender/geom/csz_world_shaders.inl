@@ -55,16 +55,19 @@ layout(location = 0) in vec3 a_pos;
 layout(location = 1) in vec2 a_uv;
 layout(location = 2) in vec2 a_lmuv;
 layout(location = 3) in vec3 a_normal;
+layout(location = 4) in float a_skyVis;  // S1: geometric sky visibility [0,1] (1=open); baked sidecar
 uniform mat4 u_viewProj;
 uniform mat4 u_model;
 out vec2 v_uv;
 out vec2 v_lmuv;
 out vec3 v_normal;
 out vec3 v_worldPos;
+out float v_skyVis;                       // S1: forwarded to FS (S2 replaces the lightmap-luma proxy with it)
 void main()
 {
 	v_uv = a_uv;
 	v_lmuv = a_lmuv;
+	v_skyVis = a_skyVis;
 	// World-space normal forwarded raw (BSP face plane normal, baked world-space
 	// at build time, csz_world.cpp:330). u_model is not applied: the lit VS
 	// (kWorldLitVs) likewise forwards a_normal unrotated, so the base directional
@@ -89,6 +92,8 @@ in vec2 v_uv;
 in vec2 v_lmuv;
 in vec3 v_normal;
 in vec3 v_worldPos;
+in float v_skyVis;                // S1: geometric sky visibility [0,1], plumbed but NOT consumed yet
+                                  // (S2 replaces the csz_lmLum/csz_sky luma proxy below with clamp(v_skyVis,0,1)).
 uniform sampler2D u_texDiffuse;   // unit 0
 uniform sampler2D u_texLightmap;  // unit 1
 uniform float u_alphaTest;        // 0 = off, else discard threshold (0.25)

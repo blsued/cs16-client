@@ -56,6 +56,10 @@ public:
 	void DrawDepth( const ViewSetup &lightView, const Frustum &lightCull );
 	void DrawLitAdditive( const ViewSetup &view, const SpotLightParams &light );
 	bool IsBuilt() const;
+	// S1: geometric sky visibility [0,1] sampled at a world point (studio entity
+	// origin). Averages baked skyVis of retained world verts within a small
+	// radius; returns 1.0 (outdoor fail-safe) when the map has no bake.
+	float SkyVisAtPoint( const float origin[3] ) const;
 };
 extern WorldRenderer g_world;
 }

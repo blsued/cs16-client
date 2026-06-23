@@ -35,6 +35,7 @@
 #include "csz_studio.h"
 #include "csz_studio_bones.h"
 #include "csz_studio_mesh.h"
+#include "csz_world.h"			// S1: g_world.SkyVisAtPoint for per-entity sky visibility
 #include "../core/csz_engine.h"
 #include "../core/csz_glcaps.h"
 #include "../core/csz_glfuncs.h"
@@ -70,6 +71,7 @@ struct PassLocs
 	int uSkyAmbScale;						// L3b sky-ambient cloud dimmer scalar (base program only); 1.0 neutral
 	int uFogParams, uCamPos;					// analytic base fog (fog M1 Step 2): height b/sunGlow/maxOpacity + ray origin
 	int uSunDir, uSunColor;						// base program only (sky 档1 directional N.L; lit/depth exempt, pitfall 23)
+	int uSkyVis;							// S1: per-entity geometric sky visibility (base program only); 1.0 default
 	int uMoonInScatter, uShaftMask, uMoonShaft;			// fog M1 L4 moon Tyndall air-glow (base program only; identity until fed)
 	int uLightOrigin, uLightDir, uLightColor;			// lit program only
 	int uLightRadius, uCosInner, uCosOuter, uMatShadow, uHasShadow;	// lit program only
@@ -115,6 +117,8 @@ void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 	out.uSkyAmbScale = UniformLoc( prog, "u_skyAmbScale" );
 	out.uSunDir = UniformLoc( prog, "u_sunDir" );
 	out.uSunColor = UniformLoc( prog, "u_sunColor" );
+	out.uSkyVis = UniformLoc( prog, "u_skyVis" );			// S1 per-entity sky visibility
+
 	out.uMoonInScatter = UniformLoc( prog, "u_moonInScatter" );	// L4
 	out.uShaftMask = UniformLoc( prog, "u_shaftMask" );		// L4
 	out.uMoonShaft = UniformLoc( prog, "u_moonShaft" );		// L4
@@ -170,6 +174,7 @@ void EnsureShader()
 	glUniform3fv( s_studio.baseLocs.uCamPos, 1, kCamPosZero );
 	glUniform3fv( s_studio.baseLocs.uAmbTint, 1, kTintNeutral );
 	glUniform1f( s_studio.baseLocs.uSkyAmbScale, 1.0f );	// L3b: neutral until fed (no sky-ambient dimming)
+	glUniform1f( s_studio.baseLocs.uSkyVis, 1.0f );		// S1: outdoor fail-safe until a per-entity value is fed
 	const float kMoonInScatterZero[3] = { 0.0f, 0.0f, 0.0f };	// L4: no moon in-scatter until fed (no-op)
 	if( s_studio.baseLocs.uMoonInScatter >= 0 ) glUniform3fv( s_studio.baseLocs.uMoonInScatter, 1, kMoonInScatterZero );
 	if( s_studio.baseLocs.uShaftMask >= 0 )     glUniform1f( s_studio.baseLocs.uShaftMask, 1.0f );	// gaps-pass identity
@@ -444,7 +449,16 @@ bool DrawEntity( const ViewSetup &view, cl_entity_s *ent, bool doCull, const Spo
 	// The lit/depth passes ignore ambient/shade (locations -1); skip the
 	// LightVec trace there -- it would run once per entity per pass otherwise.
 	if( !s_studio.litPass && !s_studio.depthPass )
+	{
 		SampleEntityLight( ent, lightColor );
+		// S1: per-entity geometric sky visibility sampled at the entity origin
+		// (base pass only). The studio FS does not consume u_skyVis yet, so the
+		// GLSL compiler strips it (uSkyVis == -1) and we skip the sample entirely
+		// -- this auto-activates in S2 the moment the FS reads u_skyVis. S1 proves
+		// the wiring; S2 reads it.
+		if( s_studio.locs->uSkyVis >= 0 )
+			glUniform1f( s_studio.locs->uSkyVis, g_world.SkyVisAtPoint( ent->origin ));
+	}
 
 	// Mirrored setups (right-hand viewmodel) have reversed triangle winding;
 	// the stock path solves this by drawing the flipped viewmodel with

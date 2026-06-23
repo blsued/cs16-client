@@ -1,0 +1,41 @@
+{
+  "map": "cs_assault.bsp",
+  "samples_per_vertex": 128,
+  "total_faces": 3206,
+  "sky_faces": 295,
+  "baked_vertices": 13165,
+  "unique_traced": 8586,
+  "skyVis_min": 0.0,
+  "skyVis_max": 1.0,
+  "skyVis_mean": 0.13237098841625522,
+  "histogram_bins": [
+    "0.0-0.1",
+    "0.1-0.2",
+    "0.2-0.3",
+    "0.3-0.4",
+    "0.4-0.5",
+    "0.5-0.6",
+    "0.6-0.7",
+    "0.7-0.8",
+    "0.8-0.9",
+    "0.9-1.0"
+  ],
+  "histogram_counts": [
+    8655,
+    1138,
+    919,
+    885,
+    575,
+    325,
+    128,
+    200,
+    153,
+    187
+  ],
+  "roofed_face_count": 1663,
+  "open_face_count": 1248,
+  "roofed_mean_skyVis": 0.016591719416645192,
+  "open_mean_skyVis": 0.2868935435585826,
+  "sidecar": "out/cs_assault.skyvis",
+  "sidecar_bytes": 71436
+}

@@ -1,0 +1,41 @@
+{
+  "map": "de_dust2.bsp",
+  "samples_per_vertex": 128,
+  "total_faces": 5383,
+  "sky_faces": 1356,
+  "baked_vertices": 18038,
+  "unique_traced": 12334,
+  "skyVis_min": 0.0,
+  "skyVis_max": 1.0,
+  "skyVis_mean": 0.2361823823317441,
+  "histogram_bins": [
+    "0.0-0.1",
+    "0.1-0.2",
+    "0.2-0.3",
+    "0.3-0.4",
+    "0.4-0.5",
+    "0.5-0.6",
+    "0.6-0.7",
+    "0.7-0.8",
+    "0.8-0.9",
+    "0.9-1.0"
+  ],
+  "histogram_counts": [
+    7473,
+    2022,
+    2412,
+    1733,
+    1514,
+    915,
+    872,
+    452,
+    174,
+    471
+  ],
+  "roofed_face_count": 1302,
+  "open_face_count": 2725,
+  "roofed_mean_skyVis": 0.016535459584764742,
+  "open_mean_skyVis": 0.3379933877603029,
+  "sidecar": "out/de_dust2.skyvis",
+  "sidecar_bytes": 119436
+}

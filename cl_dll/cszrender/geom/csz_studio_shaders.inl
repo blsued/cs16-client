@@ -101,6 +101,9 @@ uniform vec3 u_ambTint;           // night tint; (1,1,1) neutral
 uniform float u_skyAmbScale;      // L3b sky-ambient cloud dimmer; 1.0 neutral (>=0.6 floor on CPU)
 uniform vec3 u_sunDir;            // surface -> dominant body, normalized; base pass only
 uniform vec3 u_sunColor;          // intensity-premultiplied light color; (0,0,0) = off
+uniform float u_skyVis;           // S1: per-entity geometric sky visibility [0,1] (1=outdoor); sampled at
+                                  // the entity origin. Plumbed but NOT consumed yet (S2 replaces the
+                                  // u_ambient luma proxy below with it); defaults to 1.0 (fail-safe).
 // fog M1 L4 -- moonlight Tyndall air-glow (forward HG fog in-scatter); mirrors the
 // world base pass so both surfaces scatter identically. All three default to the
 // no-op identity so at csz_moonshaft 0 the in-scatter is byte-for-byte pre-L4.

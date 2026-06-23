@@ -62,9 +62,12 @@ namespace
 const float kBackfaceEpsilon = 0.01f;
 
 // Interleaved vertex layout (plan section 5 step 2.4): pos3 + uv2 + lmuv2 +
-// normal3 = 10 floats, 40 bytes. Attribute locations are the plan 2.4 contract.
-const int kVertexFloats = 10;
+// normal3 + skyVis1 = 11 floats, 44 bytes. Attribute locations are the plan 2.4
+// contract; a_skyVis at location 4 is the S1 geometric sky-visibility channel
+// (AO-SKYACCESS-RESEARCH.md §3.1, chosen over the rejected atlas-alpha bake).
+const int kVertexFloats = 11;
 const int kVertexStride = kVertexFloats * (int)sizeof( float );
+const int kSkyVisFloatOffset = 10;	// out[10] within the interleaved vertex
 
 struct FaceRec
 {
@@ -78,6 +81,30 @@ struct FaceRec
 	float planeDist;
 	bool planeBack;
 	float mins[3], maxs[3];		// surface bounds (engine mextrasurf, light cull)
+};
+
+// Loaded "<map>.skyvis" sidecar (geom/bake/bake_skyvis.py): per GLOBAL surface
+// index, the per-vertex geometric sky-visibility scalar in the SAME edge order
+// EmitFaceVerts emits, so each value drops straight into a_skyVis. Absent or
+// malformed -> loaded=false and every fetch returns the 1.0 fail-safe (outdoor):
+// an un-baked map renders exactly as before, never black, never crashes
+// (AO-SKYACCESS-RESEARCH.md §6 Stage 0).
+struct SkyVisData
+{
+	byte *raw;		// COM_LoadFile block (freed with COM_FreeFile)
+	int numFaces;		// == bsp->numsurfaces when valid
+	int *vertCount;		// [numFaces]
+	const float **vals;	// [numFaces] -> pointer into raw (or NULL)
+	bool loaded;
+
+	float Get( int globalFace, int vert ) const
+	{
+		if( !loaded || globalFace < 0 || globalFace >= numFaces )
+			return 1.0f;
+		if( vals[globalFace] == NULL || vert < 0 || vert >= vertCount[globalFace] )
+			return 1.0f;
+		return vals[globalFace][vert];
+	}
 };
 
 // All persistent state lives here (single g_world instance; header stays
@@ -126,6 +153,13 @@ struct WorldState
 	FaceRec *brushFaces;
 	int *brushForGlobal;		// [bsp->numsurfaces]; -1 = world surface
 	int numBrushFaces;
+
+	// S1 studio sky-visibility sampler: world-space (submodel 0) vertex
+	// positions + their baked skyVis, retained on CPU so studio entities can
+	// sample sky-access at their origin (SkyVisAtPoint). NULL/0 if no sidecar.
+	float *svVertPos;		// [svNumVerts*3] world-space xyz
+	float *svVertVis;		// [svNumVerts] skyVis in [0,1]
+	int svNumVerts;
 };
 
 WorldState s_world;
@@ -334,12 +368,122 @@ bool BuildFaceRec( const EngModel *bsp, int globalIndex, int localSlot, FaceRec 
 	return true;
 }
 
-// Packs one face's vertices (10-float interleaved layout) into verts[] at
+void FreeSkyVis( SkyVisData &sv )
+{
+	delete[] sv.vertCount;
+	delete[] sv.vals;
+
+	if( sv.raw != NULL )
+		gEngfuncs.COM_FreeFile( sv.raw );
+
+	sv.raw = NULL;
+	sv.vertCount = NULL;
+	sv.vals = NULL;
+	sv.numFaces = 0;
+	sv.loaded = false;
+}
+
+// Loads "<map>.skyvis" next to the BSP (bake_skyvis.py output). On ANY problem
+// -- absent, bad magic, wrong version, truncated, or a face-count that does not
+// match the loaded BSP -- leaves loaded=false so every Get() returns the 1.0
+// outdoor fail-safe (AO-SKYACCESS §6 Stage 0: un-baked maps render unchanged).
+void LoadSkyVis( const char *bspName, int expectFaces, SkyVisData &sv )
+{
+	memset( &sv, 0, sizeof( sv ));
+
+	// "maps/<x>.bsp" -> "maps/<x>.skyvis"
+	char path[128];
+	strncpy( path, bspName, sizeof( path ) - 1 );
+	path[sizeof( path ) - 1] = '\0';
+
+	size_t baseLen = strlen( path );
+	if( baseLen >= 4 && strcmp( path + baseLen - 4, ".bsp" ) == 0 )
+		baseLen -= 4;
+
+	const char *ext = ".skyvis";
+	if( baseLen + strlen( ext ) >= sizeof( path ))
+		return;
+
+	strcpy( path + baseLen, ext );
+
+	int len = 0;
+	byte *raw = gEngfuncs.COM_LoadFile( path, 5, &len );
+
+	if( raw == NULL || len < 16 || memcmp( raw, "CSZSKYV1", 8 ) != 0 )
+	{
+		if( raw != NULL )
+			gEngfuncs.COM_FreeFile( raw );
+
+		CSZ_LogInfo( "world", "no sky-visibility sidecar (%s); skyVis defaults to 1.0 (outdoor)", path );
+		return;
+	}
+
+	unsigned int ver = 0, numFaces = 0;
+	memcpy( &ver, raw + 8, 4 );
+	memcpy( &numFaces, raw + 12, 4 );
+
+	if( ver != 1 || (int)numFaces != expectFaces )
+	{
+		gEngfuncs.COM_FreeFile( raw );
+		CSZ_LogWarn( "world", "skyvis sidecar face mismatch (file %u vs bsp %d); ignoring (skyVis=1.0)",
+			numFaces, expectFaces );
+		return;
+	}
+
+	int *vertCount = new( std::nothrow ) int[numFaces];
+	const float **vals = new( std::nothrow ) const float *[numFaces];
+
+	if( vertCount == NULL || vals == NULL )
+	{
+		delete[] vertCount;
+		delete[] vals;
+		gEngfuncs.COM_FreeFile( raw );
+		return;
+	}
+
+	const byte *p = raw + 16;
+	const byte *end = raw + len;
+	bool ok = true;
+
+	for( unsigned int i = 0; i < numFaces; i++ )
+	{
+		if( p + 4 > end ) { ok = false; break; }
+
+		unsigned int cnt = 0;
+		memcpy( &cnt, p, 4 );
+		p += 4;
+
+		if( (size_t)( end - p ) < (size_t)cnt * sizeof( float )) { ok = false; break; }
+
+		vertCount[i] = (int)cnt;
+		vals[i] = ( cnt > 0 ) ? (const float *)p : NULL;
+		p += (size_t)cnt * sizeof( float );
+	}
+
+	if( !ok )
+	{
+		delete[] vertCount;
+		delete[] vals;
+		gEngfuncs.COM_FreeFile( raw );
+		CSZ_LogWarn( "world", "skyvis sidecar truncated; ignoring (skyVis=1.0)" );
+		return;
+	}
+
+	sv.raw = raw;
+	sv.numFaces = (int)numFaces;
+	sv.vertCount = vertCount;
+	sv.vals = vals;
+	sv.loaded = true;
+	CSZ_LogInfo( "world", "loaded sky-visibility sidecar %s (%u faces)", path, numFaces );
+}
+
+// Packs one face's vertices (11-float interleaved layout) into verts[] at
 // vertCursor and stamps f.firstVert/f.numVerts. Vertices are emitted in the
 // surface's local model space; the world's submodel-0 origin is (0,0,0) so its
 // faces are effectively world-space, while brush submodels carry their offset
 // in the per-draw u_model matrix.
-void EmitFaceVerts( const EngModel *bsp, int globalIndex, FaceRec &f, float *verts, int vertCursor )
+void EmitFaceVerts( const EngModel *bsp, int globalIndex, FaceRec &f, float *verts, int vertCursor,
+	const SkyVisData &sv )
 {
 	const EngSurface &surf = bsp->surfaces[globalIndex];
 	const EngTexinfo *ti = surf.texinfo;
@@ -392,6 +536,11 @@ void EmitFaceVerts( const EngModel *bsp, int globalIndex, FaceRec &f, float *ver
 		out[7] = nx;
 		out[8] = ny;
 		out[9] = nz;
+
+		// S1: per-vertex geometric sky visibility (a_skyVis, location 4). The
+		// sidecar stores values in this exact edge order; Get() returns the 1.0
+		// outdoor fail-safe when the map has no bake or the face count mismatches.
+		out[kSkyVisFloatOffset] = sv.Get( globalIndex, e );
 	}
 }
 
@@ -557,6 +706,47 @@ bool WorldRenderer::IsBuilt() const
 	return s_world.built;
 }
 
+// S1 studio sky-visibility sample. Averages baked skyVis of retained world verts
+// within a small radius of the point (the floor luxels under an entity's feet),
+// falling back to the single nearest vert, then to the 1.0 outdoor fail-safe
+// when no bake is loaded. Brute-force O(verts); the value is not yet consumed by
+// the studio FS (S1 plumbs, S2 consumes), so a grid/per-leaf accelerator is a
+// deliberate S2 follow-up if profiling flags it once it goes live.
+float WorldRenderer::SkyVisAtPoint( const float origin[3] ) const
+{
+	if( s_world.svVertPos == NULL || s_world.svNumVerts <= 0 )
+		return 1.0f;
+
+	const float kRadius2 = 64.0f * 64.0f;
+	float sum = 0.0f;
+	int count = 0;
+	float bestD2 = 1e30f;
+	float bestVis = 1.0f;
+
+	for( int v = 0; v < s_world.svNumVerts; v++ )
+	{
+		const float *p = &s_world.svVertPos[(size_t)v * 3];
+		float dx = p[0] - origin[0];
+		float dy = p[1] - origin[1];
+		float dz = p[2] - origin[2];
+		float d2 = dx * dx + dy * dy + dz * dz;
+
+		if( d2 < bestD2 )
+		{
+			bestD2 = d2;
+			bestVis = s_world.svVertVis[v];
+		}
+
+		if( d2 <= kRadius2 )
+		{
+			sum += s_world.svVertVis[v];
+			count++;
+		}
+	}
+
+	return ( count > 0 ) ? ( sum / (float)count ) : bestVis;
+}
+
 void WorldRenderer::MarkLightmapsDirty()
 {
 	s_world.lightmapsDirty = true;
@@ -612,11 +802,16 @@ void WorldRenderer::Destroy()
 	delete[] s_world.visible;
 	delete[] s_world.brushFaces;
 	delete[] s_world.brushForGlobal;
+	delete[] s_world.svVertPos;
+	delete[] s_world.svVertVis;
 	s_world.faces = NULL;
 	s_world.opaque = NULL;
 	s_world.visible = NULL;
 	s_world.brushFaces = NULL;
 	s_world.brushForGlobal = NULL;
+	s_world.svVertPos = NULL;
+	s_world.svVertVis = NULL;
+	s_world.svNumVerts = 0;
 	s_world.numFaces = s_world.numOpaque = 0;
 	s_world.numBrushFaces = 0;
 	s_world.model = NULL;
@@ -708,6 +903,11 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.numOpaque = 0;
 	s_world.numBrushFaces = 0;
 
+	// S1: geometric sky-visibility sidecar, keyed by GLOBAL surface index. Absent
+	// -> loaded=false -> EmitFaceVerts writes the 1.0 outdoor fail-safe.
+	SkyVisData skyvis;
+	LoadSkyVis( bsp->name, totalSurfaces, skyvis );
+
 	// --- World pass (submodel 0): local-indexed faces[], camera visible[]. ---
 	for( int i = 0; i < numFaces; i++ )
 	{
@@ -724,7 +924,7 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 			continue;
 		}
 
-		EmitFaceVerts( bsp, globalIndex, f, verts, vertCursor );
+		EmitFaceVerts( bsp, globalIndex, f, verts, vertCursor, skyvis );
 		vertCursor += surf.numedges;
 
 		sortKeys[s_world.numOpaque].faceIndex = i;
@@ -732,6 +932,10 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 		sortKeys[s_world.numOpaque].lmPage = f.lmPage;
 		s_world.numOpaque++;
 	}
+
+	// World-pass verts occupy verts[0, worldVertCount); they are world-space
+	// (submodel 0 origin is 0,0,0). The studio skyVis sampler reads only these.
+	int worldVertCount = vertCursor;
 
 	// Opaque list sorted by texture then lightmap page (bind-switch economy).
 	qsort( sortKeys, (size_t)s_world.numOpaque, sizeof( OpaqueSortKey ), CompareOpaque );
@@ -757,12 +961,49 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 		if( !BuildFaceRec( bsp, g, g, f, &badTexWarned, &atlasFullWarned, &maxPage ))
 			continue;	// sky/turb: emit nothing, leave brushForGlobal[g] = -1
 
-		EmitFaceVerts( bsp, g, f, verts, vertCursor );
+		EmitFaceVerts( bsp, g, f, verts, vertCursor, skyvis );
 		vertCursor += surf.numedges;
 
 		s_world.brushForGlobal[g] = s_world.numBrushFaces;
 		s_world.numBrushFaces++;
 	}
+
+	// S1: retain world-pass vertex positions + skyVis for per-entity studio
+	// sampling (SkyVisAtPoint). Built only when a sidecar actually loaded; else
+	// studio falls back to u_skyVis = 1.0 (outdoor). Brush submodels are excluded
+	// (their VBO positions are local, offset by u_model at draw time).
+	s_world.svVertPos = NULL;
+	s_world.svVertVis = NULL;
+	s_world.svNumVerts = 0;
+
+	if( skyvis.loaded && worldVertCount > 0 )
+	{
+		s_world.svVertPos = new( std::nothrow ) float[(size_t)worldVertCount * 3];
+		s_world.svVertVis = new( std::nothrow ) float[worldVertCount];
+
+		if( s_world.svVertPos != NULL && s_world.svVertVis != NULL )
+		{
+			for( int v = 0; v < worldVertCount; v++ )
+			{
+				const float *src = &verts[(size_t)v * kVertexFloats];
+				s_world.svVertPos[v * 3 + 0] = src[0];
+				s_world.svVertPos[v * 3 + 1] = src[1];
+				s_world.svVertPos[v * 3 + 2] = src[2];
+				s_world.svVertVis[v] = src[kSkyVisFloatOffset];
+			}
+
+			s_world.svNumVerts = worldVertCount;
+		}
+		else
+		{
+			delete[] s_world.svVertPos;
+			delete[] s_world.svVertVis;
+			s_world.svVertPos = NULL;
+			s_world.svVertVis = NULL;
+		}
+	}
+
+	FreeSkyVis( skyvis );
 
 	// GPU objects. Build happens outside the takeover window (slot 6), so
 	// leave VAO/VBO unbound for the engine afterwards.
@@ -780,6 +1021,9 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	glVertexAttribPointer( 2, 2, GL_FLOAT, GL_FALSE, kVertexStride, (const void *)( 5 * sizeof( float )));
 	glEnableVertexAttribArray( 3 );
 	glVertexAttribPointer( 3, 3, GL_FLOAT, GL_FALSE, kVertexStride, (const void *)( 7 * sizeof( float )));
+	glEnableVertexAttribArray( 4 );	// S1: a_skyVis (geometric sky visibility)
+	glVertexAttribPointer( 4, 1, GL_FLOAT, GL_FALSE, kVertexStride,
+		(const void *)( kSkyVisFloatOffset * sizeof( float )));
 
 	BindVao( 0 );
 	glBindBuffer( GL_ARRAY_BUFFER, 0 );
