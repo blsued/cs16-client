@@ -79,6 +79,7 @@ const float kConeHgG = 0.35f;   // gentle forward anisotropy (side view stays li
 // --- cvars (read live each frame) --------------------------------------------
 cvar_t *s_cvarTp;          // csz_flashlight_tp           default "1": world beam visible (0 = off, A/B)
 cvar_t *s_cvarTpIntensity; // csz_flashlight_tp_intensity default "1.5": beam brightness (dev tuning)
+cvar_t *s_cvarNlSurfFade;  // csz_flashlight_nl_surffade default "1.0": non-local surface-fade aggressiveness (>0; bigger = beam dies further from surfaces; 0 = legacy patch, for A/B)
 cvar_t *s_cvarRange;       // csz_flashlight_range (owned by FogVolume); caps beam length. Fetched lazily.
 bool    s_lookedRange;
 cvar_t *s_cvarV3;          // csz_flashlight_v3 (owned by light_pass); L5R master A/B. Fetched lazily.
@@ -256,8 +257,15 @@ void LightConeRegisterCvars()
 		// AGENT_OBSERVED in the L6a visual gate (1.5 read faint, 3.0 unmistakable;
 		// additive delta scales exactly 2x). Dev-tunable down for a subtler beam.
 		s_cvarTpIntensity = gEngfuncs.pfnRegisterVariable( "csz_flashlight_tp_intensity", "3.0", FCVAR_CLIENTDLL );
+	if( s_cvarNlSurfFade == NULL )
+		// Non-local (other players') beam surface-fade aggressiveness. Scales the
+		// shader's wide occlusion band so the air shaft dies well BEFORE any surface
+		// -> no deposited lit patch (圈), only the airborne 光柱 (operator T4 ask).
+		// 1.0 = tuned to fully kill the patch; larger fades even earlier; 0 = legacy
+		// non-local (tight band, surface patch returns) for A/B.
+		s_cvarNlSurfFade = gEngfuncs.pfnRegisterVariable( "csz_flashlight_nl_surffade", "1.0", FCVAR_CLIENTDLL );
 
-	CSZ_LogDev( "lightcone", "cvars registered (csz_flashlight_tp/csz_flashlight_tp_intensity)" );
+	CSZ_LogDev( "lightcone", "cvars registered (csz_flashlight_tp/csz_flashlight_tp_intensity/csz_flashlight_nl_surffade)" );
 }
 
 void LightConeRender( const ViewSetup &view )
@@ -292,6 +300,9 @@ void LightConeRender( const ViewSetup &view )
 	}
 	float range = ReadCvar( s_cvarRange, 1600.0f );
 	float intensity = ReadCvar( s_cvarTpIntensity, 3.0f );
+	// Non-local surface-fade aggressiveness (scales the shader's wide occlusion band).
+	float nlSurfFade = ReadCvar( s_cvarNlSurfFade, 1.0f );
+	if( nlSurfFade < 0.0f ) nlSurfFade = 0.0f;
 
 	// L5R master switch: when on, the local first-person beam's air volume is rendered by the
 	// L5 fog march (shadowed, view-aligned), so its redundant + dome-prone world cone is
@@ -363,9 +374,10 @@ void LightConeRender( const ViewSetup &view )
 		SpotLightParams spot;
 		g_lights.BuildSpotParams( *light, spot );
 		// Non-local beams (other players' flashlights) get the wide surface fade so they
-		// read as a pure airborne 光柱 with no surface patch (operator T4 ask). Local
-		// first-person cones (only drawn when v3 0) keep the tight legacy band.
-		float surfFade = ( v3 && !light->desc.isLocal ) ? 1.0f : 0.0f;
+		// read as a pure airborne 光柱 with no surface patch (operator T4 ask): u_surfFade
+		// carries the csz_flashlight_nl_surffade scale (>0 = non-local aggressiveness).
+		// Local first-person cones (only drawn when v3 0) pass 0 -> tight legacy band.
+		float surfFade = ( v3 && !light->desc.isLocal ) ? nlSurfFade : 0.0f;
 		DrawConeForSpot( view, spot, range, intensity, steps, surfFade );
 
 		if( light->budgetTier == kBudgetCheap ) drawnCheap++;

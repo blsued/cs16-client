@@ -159,14 +159,19 @@ void main()
 	if( tFar <= tNear )
 		discard;                                  // wholly behind a wall
 
-	float softBand = 0.06 * u_len + 8.0;          // soft intersection band (world units)
-	// Non-local beams (u_surfFade 1): widen the surface-proximity fade so the air shaft
-	// DISSOLVES before it reaches a surface -- no deposited "landing patch" (圈) on
-	// floors/walls, only the airborne 光柱. The contribution ramps smoothly to 0 over a
-	// large band, so the beam never looks detached/floating, it just thins out near
-	// geometry. Local first-person (u_surfFade 0) keeps the tight band: its crisp direct
-	// lit pool owns the near-surface look, so the cone stays unchanged there.
-	float occBand = mix( softBand, 0.25 * u_len + 48.0, clamp( u_surfFade, 0.0, 1.0 ) );
+	// Camera-side occlusion bands (world units). LOCAL first-person (u_surfFade 0)
+	// keeps the tight legacy band: its crisp direct lit pool owns the near-surface
+	// look, so the air cone is unchanged there. NON-LOCAL (u_surfFade > 0, carries the
+	// csz_flashlight_nl_surffade scale) uses a MUCH wider band + a smoothstep ramp so
+	// the in-scatter reaches ZERO well before a sample touches the surface -- another
+	// player's beam therefore deposits NO lit patch (圈) on floors/walls, leaving only
+	// the airborne 光柱. The smoothstep keeps the taper soft (no hard clip / detached
+	// look): the shaft thins out smoothly as it nears geometry, just far earlier and
+	// far more completely than the local band, so the beam fades to nothing before the
+	// wall instead of landing a (dimmer) circle on it.
+	float softBand = 0.06 * u_len + 8.0;
+	float nlBand   = max( ( 0.9 * u_len + 256.0 ) * u_surfFade, 1.0 );
+	bool  nonLocal = ( u_surfFade > 0.0 );
 	float dt = ( tFar - tNear ) / float( u_steps );
 	float jitter = ignDither( gl_FragCoord.xy );
 
@@ -189,9 +194,16 @@ void main()
 		float atten = clamp( 1.0 - s / u_len, 0.0, 1.0 );  // tip bright, far rim dim
 		atten *= atten;
 
-		// Soft camera-side occlusion: samples within occBand of the wall fade out
-		// (occBand widens for non-local so the shaft never deposits a surface patch).
-		float occ = ( tScene > 0.0 ) ? clamp( ( tScene - t ) / occBand, 0.0, 1.0 ) : 1.0;
+		// Soft camera-side occlusion: samples close to the scene surface fade out.
+		// Non-local uses the wide smoothstep band -> the shaft reaches ZERO well before
+		// the surface (no deposited patch); local keeps the tight linear legacy band.
+		float occ;
+		if( tScene <= 0.0 )
+			occ = 1.0;                            // sky behind this sample -> no clamp
+		else if( nonLocal )
+			occ = smoothstep( 0.0, nlBand, tScene - t );
+		else
+			occ = clamp( ( tScene - t ) / softBand, 0.0, 1.0 );
 
 		// Forward scatter: brighter looking into the beam, with a base term so the
 		// side view (the L6a acceptance shot) stays clearly visible.
