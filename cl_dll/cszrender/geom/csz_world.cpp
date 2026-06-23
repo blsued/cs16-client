@@ -125,6 +125,7 @@ struct WorldState
 	int uFog, uAmbTint;		// base pass only (M2a fog/night; lit/depth stay fog-free, pitfall 23)
 	int uSkyAmbScale;		// L3b sky-ambient cloud dimmer scalar (base pass only); 1.0 neutral
 	int uFogParams, uCamPos;	// analytic base fog (fog M1 Step 2): height b/sunGlow/maxOpacity + ray origin
+	int uFogParams2, uFogParams3, uFogLit;	// S3 fog rework: per-channel ext + noise + Start/Cutoff + toward-body lit color
 	int uSunDir, uSunColor;		// base pass only (sky 档1 directional N.L; lit/depth exempt, pitfall 23)
 	int uMoonInScatter, uShaftMask, uMoonShaft;	// fog M1 L4 moon Tyndall air-glow (base pass only; identity until fed)
 	int uNightModel, uNightness, uSunWarmColor;	// S2 physical night model (base pass only)
@@ -200,6 +201,22 @@ void FeedNightModel( const WorldState &w, const AmbienceParams &amb )
 	if( w.uNightFloor >= 0 )     glUniform3fv( w.uNightFloor, 1, amb.nightFloor[0] );
 	if( w.uNightK >= 0 )         glUniform1f( w.uNightK, amb.nightK[0] );
 	if( w.uNightMoon >= 0 )      glUniform1f( w.uNightMoon, amb.nightMoonGain );
+}
+
+// S3 fog feed (REWORK-SPEC §S3, finding 5: ONE inscatter owner). Single chokepoint shared
+// by all three base-pass feed sites (DrawOpaque / DrawBrushOpaque / DrawBrushTransparent),
+// replacing the inline CszFogUniformVecs + the RETIRED CszApplyFogAmbient achromatic gray.
+// CszFogUniformVecsEx builds the full extended uniform set (per-channel ext, HG g, Start/
+// Cutoff, 2D-noise params, toward-body lit color); fogTime = the ClientTime drift clock.
+void FeedFog( const WorldState &w, const AmbienceParams &amb )
+{
+	float fogVec[4], fogParams[4], fogParams2[4], fogParams3[4], fogLit[3];
+	CszFogUniformVecsEx( amb, ClientTime(), fogVec, fogParams, fogParams2, fogParams3, fogLit );
+	glUniform4fv( w.uFog, 1, fogVec );
+	glUniform4fv( w.uFogParams, 1, fogParams );
+	if( w.uFogParams2 >= 0 ) glUniform4fv( w.uFogParams2, 1, fogParams2 );
+	if( w.uFogParams3 >= 0 ) glUniform4fv( w.uFogParams3, 1, fogParams3 );
+	if( w.uFogLit >= 0 )     glUniform3fv( w.uFogLit, 1, fogLit );
 }
 
 // Conversion scratch for one lightmap block (engine standard maps: smax/tmax
@@ -1057,6 +1074,9 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.uModel = UniformLoc( s_world.program, "u_model" );
 	s_world.uFog = UniformLoc( s_world.program, "u_fog" );
 	s_world.uFogParams = UniformLoc( s_world.program, "u_fogParams" );
+	s_world.uFogParams2 = UniformLoc( s_world.program, "u_fogParams2" );	// S3
+	s_world.uFogParams3 = UniformLoc( s_world.program, "u_fogParams3" );	// S3
+	s_world.uFogLit = UniformLoc( s_world.program, "u_fogLit" );		// S3
 	s_world.uCamPos = UniformLoc( s_world.program, "u_camPos" );
 	s_world.uAmbTint = UniformLoc( s_world.program, "u_ambTint" );
 	s_world.uSkyAmbScale = UniformLoc( s_world.program, "u_skyAmbScale" );
@@ -1093,6 +1113,14 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 
 	glUniform4fv( s_world.uFog, 1, kFogOff );
 	glUniform4fv( s_world.uFogParams, 1, kFogParamsDefault );
+	// S3 fog defaults = legacy identity: extTint (1,1,1) achromatic, noiseAmp 0 (flat),
+	// noiseScale/wind/cutoff/time 0, fogLit (0,0,0). With fog off (extinction 0) the
+	// shader's a<=0 guard returns T=1 so these never engage until fed.
+	const float kFogParams2Default[4] = { 1.0f, 1.0f, 1.0f, 0.0f };
+	const float kFogParams3Default[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	if( s_world.uFogParams2 >= 0 ) glUniform4fv( s_world.uFogParams2, 1, kFogParams2Default );
+	if( s_world.uFogParams3 >= 0 ) glUniform4fv( s_world.uFogParams3, 1, kFogParams3Default );
+	if( s_world.uFogLit >= 0 )     glUniform3fv( s_world.uFogLit, 1, kCamPosZero );
 	glUniform3fv( s_world.uCamPos, 1, kCamPosZero );
 	glUniform3fv( s_world.uAmbTint, 1, kTintNeutral );
 	glUniform1f( s_world.uSkyAmbScale, 1.0f );	// L3b: neutral until fed (no sky-ambient dimming)
@@ -1209,12 +1237,7 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 	// Ambience feed (M2a A1): server-authoritative snapshot rides in on the
 	// view (plan 2.5 slot 7.2); base pass only, pitfall 23.
 	const AmbienceParams &amb = view.ambience;
-	float fogVec[4], fogParams[4];
-	CszFogUniformVecs( amb, fogVec, fogParams );	// analytic base fog (fog M1 Step 2): density->extinction + params
-	CszApplyFogAmbient( amb, fogVec );		// §5.1: add the achromatic ambient in-scatter (medium adds gray, not just darken)
-
-	glUniform4fv( s_world.uFog, 1, fogVec );
-	glUniform4fv( s_world.uFogParams, 1, fogParams );
+	FeedFog( s_world, amb );	// S3: per-channel ext + HG + Start/Cutoff + drifting noise + lit color (ONE inscatter owner)
 	glUniform3fv( s_world.uCamPos, 1, view.origin );		// ray origin for the height-fog integral
 	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
 	glUniform1f( s_world.uSkyAmbScale, amb.skyAmbientScale );	// L3b sky-ambient cloud dimmer (1.0 when clouds off; floored >=0.6 in L3a)
@@ -1404,12 +1427,7 @@ void WorldRenderer::DrawBrushOpaque( const ViewSetup &view, cl_entity_s *const *
 	glUniformMatrix4fv( s_world.uViewProj, 1, GL_FALSE, view.matViewProj.m );
 
 	const AmbienceParams &amb = view.ambience;
-	float fogVec[4], fogParams[4];
-	CszFogUniformVecs( amb, fogVec, fogParams );	// analytic base fog (fog M1 Step 2)
-	CszApplyFogAmbient( amb, fogVec );		// §5.1: ambient in-scatter (brush surfaces fog identically to the world)
-
-	glUniform4fv( s_world.uFog, 1, fogVec );
-	glUniform4fv( s_world.uFogParams, 1, fogParams );
+	FeedFog( s_world, amb );	// S3: brush surfaces fog identically to the world (ONE inscatter owner)
 	glUniform3fv( s_world.uCamPos, 1, view.origin );
 	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
 	glUniform1f( s_world.uSkyAmbScale, amb.skyAmbientScale );	// L3b sky-ambient cloud dimmer (1.0 when clouds off; floored >=0.6 in L3a)
@@ -1523,15 +1541,20 @@ void WorldRenderer::DrawBrushTransparent( const ViewSetup &view, cl_entity_s *co
 	glUniformMatrix4fv( s_world.uViewProj, 1, GL_FALSE, view.matViewProj.m );
 
 	const AmbienceParams &amb = view.ambience;
-	float fogVec[4], fogParams[4];
-	CszFogUniformVecs( amb, fogVec, fogParams );	// analytic base fog (fog M1 Step 2)
-	CszApplyFogAmbient( amb, fogVec );		// §5.1: ambient in-scatter (alpha-test/blended surfaces eat fog like the world; additive modes below force fogOff)
+	// S3: inlined (not FeedFog) because this path keeps fogVec locally for the per-mode
+	// fog on/off toggle below (additive modes force fog off, the rest restore "fog on").
+	// ONE inscatter owner -- the retired CszApplyFogAmbient gray is gone.
+	float fogVec[4], fogParams[4], fogParams2[4], fogParams3[4], fogLit[3];
+	CszFogUniformVecsEx( amb, ClientTime(), fogVec, fogParams, fogParams2, fogParams3, fogLit );
 	const float fogOff[4] = { 0.0f, 0.0f, 0.0f, 0.0f };	// additive fades to black, not fog color
 
 	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
 	glUniform1f( s_world.uSkyAmbScale, amb.skyAmbientScale );	// L3b sky-ambient cloud dimmer (1.0 when clouds off; floored >=0.6 in L3a)
 	glUniform4fv( s_world.uFog, 1, fogVec );	// fog on baseline (per-mode toggles off below)
-	glUniform4fv( s_world.uFogParams, 1, fogParams );	// height b / sunGlow / maxOpacity (constant per mode)
+	glUniform4fv( s_world.uFogParams, 1, fogParams );	// height b / HG g / maxOpacity / start (constant per mode)
+	if( s_world.uFogParams2 >= 0 ) glUniform4fv( s_world.uFogParams2, 1, fogParams2 );
+	if( s_world.uFogParams3 >= 0 ) glUniform4fv( s_world.uFogParams3, 1, fogParams3 );
+	if( s_world.uFogLit >= 0 )     glUniform3fv( s_world.uFogLit, 1, fogLit );
 	glUniform3fv( s_world.uCamPos, 1, view.origin );
 	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
 	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off

@@ -155,6 +155,28 @@ struct AmbienceParams
 	float nightSky[2][3];      // night sky-ambient color (premul); [0] = world, [1] = studio
 	float nightFloor[2][3];    // competitive readable ambient floor (premul); [0] world [1] studio
 	float nightMoonGain;       // gated moon directional gain (shared)
+	// --- S3 analytic fog rework (REWORK-SPEC §S3 + codex red-team findings 5,6,12).
+	// CLIENT-side per-frame transport slots derived in PublishLighting from phase +
+	// cvars + sky/moon colors (NOT server-authoritative; the server black-fog path still
+	// owns fogColor/extinctionA/preset). They upgrade the flat achromatic-gray in-scatter
+	// (the old CszApplyFogAmbient helper, now RETIRED -- finding 5: ONE inscatter owner)
+	// into a proper IQ-style participating medium: PER-CHANNEL extinction (blue scatters
+	// most -> distance cools), a fog color COUPLED to the sky/moon (base/back-light end +
+	// a brighter sun/moon "lit" end the HG lobe blends toward), an explicit Henyey-
+	// Greenstein directional in-scatter, Start/Cutoff distance fences (finding 12: the
+	// fog uniform had no slot -> ABI extended HERE first), and a procedural 2D value-noise
+	// density modulation that drifts with wind (finding 6: 2D only, NO glTexImage3D). ALL
+	// default to the legacy identity: fogExtTint (1,1,1) + fogLit = fogColor (achromatic),
+	// fogHgG 0 (isotropic), fogStart/fogCutoff 0 (no fence), fogNoiseAmp 0 (flat) -> with
+	// no fog density the shader's a<=0 guard returns T=1 and the frame is byte-identical.
+	float fogExtTint[3];   // per-channel extinction multiplier (r,g,b); b_ch = extinctionA * fogExtTint[ch]
+	float fogLit[3];       // toward-body (sun/moon) fog in-scatter color, premul linear (HG lobe blends here)
+	float fogHgG;          // Henyey-Greenstein asymmetry g for the directional in-scatter (0 = isotropic, ~0.7 = forward)
+	float fogStart;        // in-scatter start distance (units): integral lower bound; <=0 = from the camera (near clarity / weapon)
+	float fogCutoff;       // fog plateau distance (units): integral upper bound clamp so the far field/skybox stops at a stable fog; 0 = no clamp
+	float fogNoiseAmp;     // 2D value-noise density modulation amplitude [0..1] (0.3 -> 0.7..1.3x); 0 = flat
+	float fogNoiseScale;   // world-space noise frequency (1/units)
+	float fogWind;         // noise drift speed (units/sec) for slow animation
 };
 // (0,0,0,0)/(1,1,1)/disabled everything -- the vanilla daylight look.
 inline AmbienceParams AmbienceNeutral()
@@ -176,6 +198,17 @@ inline AmbienceParams AmbienceNeutral()
 	p.nightness      = 0.0f;	// neutral = full day -> approvedDay branch (identity)
 	p.nightK[0] = 0.7f;  p.nightK[1] = 0.7f;
 	p.nightMoonGain  = 1.0f;
+	// S3 fog defaults = legacy achromatic identity (no per-channel cooling, no directional
+	// lobe, no fence, no noise). PublishLighting overrides these for environmental/tinted
+	// fog; the server black-fog path keeps them at identity so a blackout stays faithful.
+	p.fogExtTint[0] = 1.0f;  p.fogExtTint[1] = 1.0f;  p.fogExtTint[2] = 1.0f;
+	p.fogLit[0] = 0.0f;  p.fogLit[1] = 0.0f;  p.fogLit[2] = 0.0f;	// 0 => shader falls back to fogColor (no lit end)
+	p.fogHgG = 0.0f;
+	p.fogStart = 0.0f;
+	p.fogCutoff = 0.0f;
+	p.fogNoiseAmp = 0.0f;
+	p.fogNoiseScale = 0.0f;
+	p.fogWind = 0.0f;
 	return p;
 }
 // Legacy exp2 fog rendered 2^(-density*d); the analytic base fog renders the
@@ -203,22 +236,41 @@ inline void CszFogUniformVecs( const AmbienceParams &amb, float fogVec[4], float
 	fogParams[2] = amb.maxOpacity > 0.0f ? amb.maxOpacity : 1.0f;	// 0 -> 1 (never clamp fog to fully transparent)
 	fogParams[3] = 0.0f;
 }
-// Fold the client achromatic ambient in-scatter (amb.fogAmbient, computed once per
-// frame by the renderer from cvars) into the fog in-scatter color the base shaders
-// read as u_fog.rgb. u_fog.rgb is ADDITIVE in-scatter only (shader: inscatter =
-// u_fog.rgb + ...), blended by (1-T), so adding a low neutral gray makes the medium
-// CONTRIBUTE faint radiance that thickens with distance instead of only multiplying
-// the scene toward black -- the core "darkness -> fog" fix (§5.1). It also softens the
-// maxOpacity plateau for free: where T floors low, (1-T) is large, so the beyond-range
-// region tends to the ambient gray (thickening haze) rather than a pure-black void.
-// Applied ONLY at the world + studio feed sites (geometry + players); sprites (emitters)
-// and the sky dome keep the server fog color untouched. fogAmbient=(0,0,0) -> no-op
-// (legacy byte-identical). Scattering albedo sigma_s/sigma_t ~ 1 for fog, so no scale.
-inline void CszApplyFogAmbient( const AmbienceParams &amb, float fogVec[4] )
+// S3 (REWORK-SPEC §S3, finding 5: ONE inscatter owner). Build the FULL extended fog
+// uniform set the world/studio base shaders consume, from a single chokepoint so every
+// feed site stays consistent. This RETIRES the old CszApplyFogAmbient achromatic-gray
+// helper: the in-scatter color is no longer a flat cvar gray folded into u_fog.rgb, it is
+// the sky/moon-coupled fogColor (base) + fogLit (toward-body) PublishLighting computed,
+// with per-channel extinction, an HG directional lobe, Start/Cutoff and noise. fogTime =
+// the animation clock (ClientTime) for the drifting density noise.
+//   u_fog        = (fogColor.rgb base/back-light in-scatter, extinctionA luma 1/units)
+//   u_fogParams  = (heightFalloff b, HG g, maxOpacity, fogStart)
+//   u_fogParams2 = (extTint.r, extTint.g, extTint.b, noiseAmp)
+//   u_fogParams3 = (noiseScale, wind, fogCutoff, fogTime)
+//   u_fogLit     = toward-body fog color (falls back to fogColor when (0,0,0))
+inline void CszFogUniformVecsEx( const AmbienceParams &amb, float fogTime,
+	float fogVec[4], float fogParams[4], float fogParams2[4], float fogParams3[4], float fogLit[3] )
 {
-	fogVec[0] += amb.fogAmbient[0];
-	fogVec[1] += amb.fogAmbient[1];
-	fogVec[2] += amb.fogAmbient[2];
+	CszFogUniformVecs( amb, fogVec, fogParams );	// fogVec(rgb,a) + fogParams(b, [y], maxOpacity, [w])
+	fogParams[1] = amb.fogHgG;			// y: HG asymmetry g (replaces the retired pow(cosT,8) sunGlow)
+	fogParams[3] = amb.fogStart;			// w: in-scatter start distance (near clarity / weapon)
+
+	fogParams2[0] = amb.fogExtTint[0];
+	fogParams2[1] = amb.fogExtTint[1];
+	fogParams2[2] = amb.fogExtTint[2];
+	fogParams2[3] = amb.fogNoiseAmp;
+
+	fogParams3[0] = amb.fogNoiseScale;
+	fogParams3[1] = amb.fogWind;
+	fogParams3[2] = amb.fogCutoff;
+	fogParams3[3] = fogTime;
+
+	// fogLit falls back to the base fog color when unset (0,0,0), so an HG lobe with no
+	// dedicated lit color degrades to plain (non-directional) fog instead of going black.
+	bool hasLit = ( amb.fogLit[0] > 0.0f || amb.fogLit[1] > 0.0f || amb.fogLit[2] > 0.0f );
+	fogLit[0] = hasLit ? amb.fogLit[0] : fogVec[0];
+	fogLit[1] = hasLit ? amb.fogLit[1] : fogVec[1];
+	fogLit[2] = hasLit ? amb.fogLit[2] : fogVec[2];
 }
 // L2 downstream accessor: the dedicated moon in-scatter feed for L4 (light-shafts /
 // fog in-scatter). One chokepoint so every future consumer reads the SAME channel

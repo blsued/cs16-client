@@ -94,8 +94,11 @@ uniform float u_alphaTest;        // 0 = off, else discard threshold (0.25)
 uniform vec3 u_ambient;
 uniform vec3 u_shadeColor;
 uniform vec3 u_shadeDir;
-uniform vec4 u_fog;               // rgb = fog color (linear), w = extinction a (1/units); w<=0 -> off
-uniform vec4 u_fogParams;         // x = height falloff b, y = sun glow, z = maxOpacity, w = reserved
+uniform vec4 u_fog;               // rgb = fog color (linear, BASE/back-light in-scatter), w = extinction a (1/units); w<=0 -> off
+uniform vec4 u_fogParams;         // S3: x = height falloff b, y = HG asymmetry g, z = maxOpacity, w = fogStart distance
+uniform vec4 u_fogParams2;        // S3: xyz = per-channel extinction tint (b_ch = a*tint), w = 2D noise amplitude
+uniform vec4 u_fogParams3;        // S3: x = noise world-scale, y = wind speed, z = fogCutoff distance, w = fog time (drift clock)
+uniform vec3 u_fogLit;            // S3: toward-body (sun/moon) fog in-scatter color; HG lobe blends fog color toward this
 uniform vec3 u_camPos;            // camera world position (ray origin)
 uniform vec3 u_ambTint;           // night tint; (1,1,1) neutral
 uniform float u_skyAmbScale;      // L3b sky-ambient cloud dimmer; 1.0 neutral (>=0.6 floor on CPU)
@@ -123,25 +126,58 @@ uniform vec3  u_nightFloor;       // studio competitive readable ambient floor (
 uniform float u_nightK;           // skyVis exponent k for studio (per-entity)
 uniform float u_nightMoon;        // gain on the skyVis-GATED moon directional (wallhack-fixed moonlight)
 out vec4 fragColor;
-// Analytic base-fog transmittance (fog M1 spec 4.3) -- closed-form exponential
-// height+distance with the |b|<eps and |rd.z|<eps guards; world up axis is Z.
-// (Identical to the world base pass so both surfaces eat fog the same way.)
-float cszFogT( vec3 worldPos, vec3 camPos, float a, float b, float maxOpacity )
+// S3 procedural 2D value noise (finding 6: 2D only, no glTexImage3D -> in-shader hash
+// noise, pure ALU). Identical to the world base pass so both surfaces eat fog the same way.
+float cszHash21( vec2 p )
 {
-	if( a <= 0.0 )
-		return 1.0;
+	p = fract( p * vec2( 0.1031, 0.1173 ));
+	p += dot( p, p.yx + 33.33 );
+	return fract(( p.x + p.y ) * p.x );
+}
+float cszVNoise( vec2 p )
+{
+	vec2 i = floor( p );
+	vec2 f = fract( p );
+	vec2 u = f * f * ( 3.0 - 2.0 * f );
+	float a = cszHash21( i );
+	float b = cszHash21( i + vec2( 1.0, 0.0 ));
+	float c = cszHash21( i + vec2( 0.0, 1.0 ));
+	float d = cszHash21( i + vec2( 1.0, 1.0 ));
+	return mix( mix( a, b, u.x ), mix( c, d, u.x ), u.y );
+}
+float cszFogNoise( vec2 worldXY, float scale, float wind, float t )
+{
+	vec2 drift = vec2( wind * t, wind * t * 0.6 );
+	vec2 q = worldXY * scale + drift * scale;
+	return 0.65 * cszVNoise( q ) + 0.35 * cszVNoise( q * 2.03 + 7.1 );
+}
+// S3 per-channel analytic transmittance (REWORK-SPEC §S3.1, IQ model) -- closed-form
+// exponential height+distance with the |b|<eps and |rd.z|<eps guards, a-independent path
+// factor G scaled by PER-CHANNEL extinction, Start/Cutoff bounds. World up axis is Z.
+// (Identical to the world base pass so both surfaces eat fog the same way.)
+vec3 cszFogT3( vec3 worldPos, vec3 camPos, vec3 aRGB, float b, float maxOpacity,
+	float startD, float cutoffD, float densMul )
+{
+	if( aRGB.g <= 0.0 )
+		return vec3( 1.0 );
 	vec3 d = worldPos - camPos;
 	float t = length( d );
 	float rdz = ( t > 1e-4 ) ? d.z / t : 0.0;
-	float F;
+	float t0 = clamp( startD, 0.0, t );
+	float t1 = ( cutoffD > 0.0 ) ? min( t, cutoffD ) : t;
+	if( t1 <= t0 )
+		return vec3( 1.0 );
+	float G;
 	if( abs( b ) < 1e-4 )
-		F = a * t;                                           // b->0 uniform density (divide-by-b guard)
+		G = ( t1 - t0 );                                     // uniform density (divide-by-b guard)
 	else if( abs( rdz ) < 1e-4 )
-		F = a * exp( -b * camPos.z ) * t;                    // near-horizontal ray (divide-by-rd.z guard)
+		G = exp( -b * camPos.z ) * ( t1 - t0 );              // near-horizontal ray (divide-by-rd.z guard)
 	else
-		F = ( a / b ) * exp( -b * camPos.z ) * ( 1.0 - exp( -b * t * rdz )) / rdz;
-	float T = exp( -max( F, 0.0 ));
-	return max( T, 1.0 - maxOpacity );
+		G = ( 1.0 / b ) * exp( -b * camPos.z ) * ( exp( -b * t0 * rdz ) - exp( -b * t1 * rdz )) / rdz;
+	G = max( G, 0.0 ) * densMul;
+	vec3 F = aRGB * G;
+	vec3 T = exp( -max( F, vec3( 0.0 )));
+	return max( T, vec3( 1.0 - maxOpacity ));
 }
 void main()
 {
@@ -206,24 +242,32 @@ void main()
 		float csz_moon = mix( 1.0, mix( CSZ_INDOOR_MOON, 1.0, csz_sky ), csz_night );
 		col += albedo * u_sunColor * max( dot( n, u_sunDir ), 0.0 ) * csz_moon;
 	}
-	// Analytic base fog (fog M1 Step 2): single extinction + directional in-scatter
-	// glow, composited in linear HDR (replaces the old exp2 mix). Viewmodel rides
-	// this program: at arm's reach t~0 -> T~1 -> visually fog-free, as before.
+	// S3 analytic fog (REWORK-SPEC §S3, findings 5/6/12): ONE in-scatter equation, mirrors
+	// the world base pass so players/models fog identically. Per-channel extinction + 2D
+	// noise density + HG directional lobe blending the cool base fog color toward the sun/
+	// moon lit color. fogStart keeps the viewmodel (arm's reach) crisp. Retires the old
+	// achromatic-gray fold and the pow(cosT,8) sunGlow (HG replaces it -- finding 5).
 	vec3 toFrag = v_worldPos - u_camPos;
 	float tLen = length( toFrag );
-	vec3 rd = ( tLen > 1e-4 ) ? toFrag / tLen : vec3( 0.0 );    // guard normalize-of-zero (NaN)
-	float T = cszFogT( v_worldPos, u_camPos, u_fog.w, u_fogParams.x, u_fogParams.z );
-	float cosT = max( dot( rd, u_sunDir ), 0.0 );                // toward the moon = +1
-	float glow = pow( cosT, 8.0 ) * u_fogParams.y;               // legacy cheap forward glow (unchanged)
-	vec3 inscatter = u_fog.rgb + u_sunColor * glow;
-	// fog M1 L4 -- moonlight Tyndall (Henyey-Greenstein g=0.8 forward single
-	// in-scatter of the dedicated u_moonInScatter channel), gated by the cloud-gap
-	// shaftMask and the csz_moonshaft toggle. Weighted by (1-T) so sigma_s<=sigma_t
-	// and the air-glow stays inside the fog's own opacity budget (no runaway).
+	vec3 rd = ( tLen > 1e-4 ) ? toFrag / tLen : vec3( 0.0 );      // guard normalize-of-zero (NaN)
+	float dens = 1.0;
+	if( u_fogParams2.w > 0.0 )
+		dens = mix( 1.0, 2.0 * cszFogNoise( v_worldPos.xy, u_fogParams3.x, u_fogParams3.y, u_fogParams3.w ), u_fogParams2.w );
+	vec3 aRGB = u_fog.w * u_fogParams2.xyz;                       // per-channel extinction (b_ch = a * tint)
+	vec3 T = cszFogT3( v_worldPos, u_camPos, aRGB, u_fogParams.x, u_fogParams.z,
+		u_fogParams.w, u_fogParams3.z, dens );
+	float cosT = dot( rd, u_sunDir );
+	float g = u_fogParams.y;
+	float hgDen = 1.0 + g * g - 2.0 * g * cosT;
+	float hg = ( 1.0 - g * g ) / pow( max( hgDen, 1e-4 ), 1.5 );  // unnormalized HG (isotropic == 1)
+	float sunAmount = clamp(( hg - 1.0 ) * 0.5, 0.0, 1.0 );
+	vec3 inscatter = mix( u_fog.rgb, u_fogLit, sunAmount );
+	// fog M1 L4 moonshaft Tyndall (independent enhancement, gated by u_moonShaft -- default
+	// 0 = no-op; finding 12). Weighted by (1-T) so sigma_s<=sigma_t (no air-glow runaway).
 	const float CSZ_HG_G = 0.8;
-	float hgDen = 1.0 + CSZ_HG_G * CSZ_HG_G - 2.0 * CSZ_HG_G * cosT;
-	float hg = ( 1.0 - CSZ_HG_G * CSZ_HG_G ) / ( 4.0 * 3.14159265 * pow( max( hgDen, 1e-4 ), 1.5 ) );
-	inscatter += ( u_moonShaft * u_shaftMask * hg ) * u_moonInScatter;
+	float hgD2 = 1.0 + CSZ_HG_G * CSZ_HG_G - 2.0 * CSZ_HG_G * max( cosT, 0.0 );
+	float hg2 = ( 1.0 - CSZ_HG_G * CSZ_HG_G ) / ( 4.0 * 3.14159265 * pow( max( hgD2, 1e-4 ), 1.5 ));
+	inscatter += ( u_moonShaft * u_shaftMask * hg2 ) * u_moonInScatter;
 	col = col * T + inscatter * ( 1.0 - T );
 	fragColor = vec4( col, 1.0 );
 }

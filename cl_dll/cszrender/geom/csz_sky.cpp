@@ -105,6 +105,22 @@ cvar_t *s_nightSkyStudioCvar;	// csz_night_sky_studio: STUDIO night sky-ambient 
 cvar_t *s_nightFloorWorldCvar;	// csz_night_floor_world: WORLD competitive ambient floor intensity (prevents pure-black indoors)
 cvar_t *s_nightFloorStudioCvar;	// csz_night_floor_studio: STUDIO ambient floor intensity (keeps enemy models readable)
 cvar_t *s_nightMoonCvar;	// csz_night_moon: gain on the skyVis-GATED moon directional in physical night (the wallhack-fixed moonlight)
+// --- S3 analytic fog knobs (REWORK-SPEC §S3, findings 5/6/12). Registered in
+// RegisterDevCvars; read once per frame in PublishLighting to fill the AmbienceParams
+// S3 fog slots. These are the USER "口味" knobs (spec: all on cvars for real-machine
+// tuning). Environmental fog is tied to nightness so the approved DAY look is unchanged
+// (envExt = csz_fog_env * nightness -> 0 by day); the server black-fog path degrades the
+// fancy features to a faithful blackout.
+cvar_t *s_fogEnvCvar;		// csz_fog_env: client environmental extinction a (1/units) at full night; 0 = no client fog
+cvar_t *s_fogHeightCvar;	// csz_fog_height: height falloff b (1/units) for client env fog (vertical gradient: thick low, thin high)
+cvar_t *s_fogHgCvar;		// csz_fog_hg: Henyey-Greenstein asymmetry g for the directional in-scatter lobe (~0.7 forward)
+cvar_t *s_fogStartCvar;		// csz_fog_start: in-scatter start distance (units) -- near field (weapon/skybox) stays crisp
+cvar_t *s_fogCutoffCvar;	// csz_fog_cutoff: fog plateau distance (units); 0 = no far clamp
+cvar_t *s_fogNoiseCvar;		// csz_fog_noise: 2D noise density modulation amplitude [0..1] (0 = flat slab)
+cvar_t *s_fogNoiseScaleCvar;	// csz_fog_noise_scale: noise world-space frequency (1/units)
+cvar_t *s_fogWindCvar;		// csz_fog_wind: noise drift speed (units/sec) = slow animation
+cvar_t *s_fogExtBlueCvar;	// csz_fog_ext_blue: blue-channel extinction multiplier (>1 -> distance reads cooler; red fixed lower)
+cvar_t *s_fogLitCvar;		// csz_fog_lit: toward-body (sun/moon) in-scatter glow brightness (the HG lobe color strength)
 
 #if defined( CSZ_DEV_TOOLS )
 cvar_t *s_fullscreenCvar;	// csz_sky_fullscreen: dev overlay, draw the sky over the whole frame
@@ -235,6 +251,31 @@ void SkyRenderer::RegisterDevCvars()
 		s_nightFloorStudioCvar = gEngfuncs.pfnRegisterVariable( "csz_night_floor_studio", "0.05", FCVAR_CLIENTDLL );
 	if( s_nightMoonCvar == NULL )
 		s_nightMoonCvar = gEngfuncs.pfnRegisterVariable( "csz_night_moon", "1", FCVAR_CLIENTDLL );
+
+	// S3 analytic fog knobs (REWORK-SPEC §S3). Defaults = a subtle cool night haze that
+	// stays clear up close, cools/eats the far field, and drifts slowly. csz_fog_env 0
+	// disables the client environmental fog (server fog still rendered through the new
+	// equation). All FCVAR_CLIENTDLL so the USER can tune them live on the real machine.
+	if( s_fogEnvCvar == NULL )
+		s_fogEnvCvar = gEngfuncs.pfnRegisterVariable( "csz_fog_env", "0.0011", FCVAR_CLIENTDLL );
+	if( s_fogHeightCvar == NULL )
+		s_fogHeightCvar = gEngfuncs.pfnRegisterVariable( "csz_fog_height", "0.0019", FCVAR_CLIENTDLL );
+	if( s_fogHgCvar == NULL )
+		s_fogHgCvar = gEngfuncs.pfnRegisterVariable( "csz_fog_hg", "0.72", FCVAR_CLIENTDLL );
+	if( s_fogStartCvar == NULL )
+		s_fogStartCvar = gEngfuncs.pfnRegisterVariable( "csz_fog_start", "80", FCVAR_CLIENTDLL );
+	if( s_fogCutoffCvar == NULL )
+		s_fogCutoffCvar = gEngfuncs.pfnRegisterVariable( "csz_fog_cutoff", "0", FCVAR_CLIENTDLL );
+	if( s_fogNoiseCvar == NULL )
+		s_fogNoiseCvar = gEngfuncs.pfnRegisterVariable( "csz_fog_noise", "0.32", FCVAR_CLIENTDLL );
+	if( s_fogNoiseScaleCvar == NULL )
+		s_fogNoiseScaleCvar = gEngfuncs.pfnRegisterVariable( "csz_fog_noise_scale", "0.0016", FCVAR_CLIENTDLL );
+	if( s_fogWindCvar == NULL )
+		s_fogWindCvar = gEngfuncs.pfnRegisterVariable( "csz_fog_wind", "14", FCVAR_CLIENTDLL );
+	if( s_fogExtBlueCvar == NULL )
+		s_fogExtBlueCvar = gEngfuncs.pfnRegisterVariable( "csz_fog_ext_blue", "1.7", FCVAR_CLIENTDLL );
+	if( s_fogLitCvar == NULL )
+		s_fogLitCvar = gEngfuncs.pfnRegisterVariable( "csz_fog_lit", "0.55", FCVAR_CLIENTDLL );
 
 #if defined( CSZ_DEV_TOOLS )
 	gEngfuncs.pfnAddCommand( "csz_devsun", DevSunCommand );	// mirror csz_devmoon (csz_fog.cpp)
@@ -650,6 +691,91 @@ void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 
 	amb.nightMoonGain = ( s_nightMoonCvar != NULL ) ? s_nightMoonCvar->value : 1.0f;
 	if( amb.nightMoonGain < 0.0f ) amb.nightMoonGain = 0.0f;
+
+	// --- S3 analytic fog (REWORK-SPEC §S3, findings 5/6/12). Replace the flat achromatic
+	// in-scatter gray (CszApplyFogAmbient, RETIRED) with a sky/moon-coupled participating
+	// medium. ONE owner (finding 5): the shader reads exactly the slots set here. moonRGB/
+	// sunRGB and moonLit/sunLit (computed above) drive the directional "lit" end; nightSky
+	// (above) is the cool dark back-light base. Environmental fog is gated on nightness so
+	// the approved DAY look is byte-identical (envExt -> 0, fogDensity stays 0). The server
+	// black-fog path keeps its authoritative color and degrades the fancy features. ---
+	float envA   = ( s_fogEnvCvar        != NULL ) ? s_fogEnvCvar->value        : 0.0011f;
+	float fogB   = ( s_fogHeightCvar     != NULL ) ? s_fogHeightCvar->value     : 0.0019f;
+	float hgG    = ( s_fogHgCvar         != NULL ) ? s_fogHgCvar->value         : 0.72f;
+	float fStart = ( s_fogStartCvar      != NULL ) ? s_fogStartCvar->value      : 80.0f;
+	float fCut   = ( s_fogCutoffCvar     != NULL ) ? s_fogCutoffCvar->value     : 0.0f;
+	float nAmp   = ( s_fogNoiseCvar      != NULL ) ? s_fogNoiseCvar->value      : 0.32f;
+	float nScale = ( s_fogNoiseScaleCvar != NULL ) ? s_fogNoiseScaleCvar->value : 0.0016f;
+	float fWind  = ( s_fogWindCvar       != NULL ) ? s_fogWindCvar->value       : 14.0f;
+	float extB   = ( s_fogExtBlueCvar    != NULL ) ? s_fogExtBlueCvar->value    : 1.7f;
+	float litI   = ( s_fogLitCvar        != NULL ) ? s_fogLitCvar->value        : 0.55f;
+	if( hgG < 0.0f ) hgG = 0.0f;  if( hgG > 0.95f ) hgG = 0.95f;	// keep HG denominator well-conditioned
+	if( fStart < 0.0f ) fStart = 0.0f;
+	if( fCut < 0.0f ) fCut = 0.0f;
+	if( nAmp < 0.0f ) nAmp = 0.0f;  if( nAmp > 1.0f ) nAmp = 1.0f;
+	if( extB < 0.0f ) extB = 0.0f;
+	if( litI < 0.0f ) litI = 0.0f;
+
+	float nn = amb.nightness;
+	bool serverFog = ( amb.fogDensity > 0.0f );	// server (or dev) supplied authoritative fog
+	bool blackFog  = amb.fogBypassTint;		// server black gameplay fog (silhouettes/blackout)
+
+	// Directional "lit" fog color: the body's light color, scaled by how high it is. Day =
+	// warm sun; night = cool moon (spec: 夜用月方向、低强度). moonLit/sunLit are 0 unless the
+	// body is meaningfully up, so the lobe only brightens toward a body that is actually there.
+	float moonUp = skymath::clampf01( moonLit * 3.0f );
+	float sunUp  = skymath::clampf01( sunLit  * 3.0f );
+	float litDay[3], litNight[3], litCol[3];
+	for( int c = 0; c < 3; c++ )
+	{
+		litDay[c]   = sunRGB[c]  * litI * sunUp;
+		litNight[c] = moonRGB[c] * litI * moonUp;
+		litCol[c]   = litDay[c] + ( litNight[c] - litDay[c] ) * nn;	// mix(day,night,nightness)
+	}
+
+	// Per-channel extinction tint (spec §S3.1: blue scatters most -> distance reads cooler).
+	// Green = 1.0 (luma reference); red lower, blue higher. Achromatic for a faithful blackout.
+	amb.fogExtTint[0] = blackFog ? 1.0f : 0.62f;
+	amb.fogExtTint[1] = 1.0f;
+	amb.fogExtTint[2] = blackFog ? 1.0f : extB;
+	amb.fogHgG       = blackFog ? 0.0f : hgG;
+	amb.fogStart     = blackFog ? 0.0f : fStart;
+	amb.fogCutoff    = blackFog ? 0.0f : fCut;
+	amb.fogNoiseAmp  = blackFog ? 0.0f : nAmp;
+	amb.fogNoiseScale = nScale;
+	amb.fogWind      = fWind;
+	// fogLit: the toward-body color (HG lobe blends fog toward it). A blackout keeps it equal
+	// to its near-black fog color (no directional brightening); else the body-light color above.
+	amb.fogLit[0] = blackFog ? amb.fogColor[0] : litCol[0];
+	amb.fogLit[1] = blackFog ? amb.fogColor[1] : litCol[1];
+	amb.fogLit[2] = blackFog ? amb.fogColor[2] : litCol[2];
+
+	// Base (back-light) fog color + density. When the server supplied fog, keep its color/
+	// density (already phase-tinted above) and only enrich it. Otherwise synthesize the
+	// client environmental haze: cool dark night sky color (nightSky, the same cool hue the
+	// world night ambient uses), warm dim by day -- but density ramps with nightness so the
+	// approved day is untouched. Height b gives the vertical gradient (thick low, thin high).
+	if( !serverFog )
+	{
+		float envExt = envA * nn;	// 0 by day -> no client fog -> day byte-identical
+		if( envExt > 0.0f )
+		{
+			float dayBase[3]   = { amb.tint[0] * 0.5f, amb.tint[1] * 0.5f, amb.tint[2] * 0.5f };
+			float nightBase[3] = { amb.nightSky[0][0], amb.nightSky[0][1], amb.nightSky[0][2] };
+			for( int c = 0; c < 3; c++ )
+				amb.fogColor[c] = dayBase[c] + ( nightBase[c] - dayBase[c] ) * nn;	// cool dark at night
+			amb.fogDensity = envExt / 0.6931471805599453f;	// shader extinction a = density*ln2 = envExt (FogExtinctionFromDensity inverse)
+			amb.heightFalloff = fogB;		// client env height gradient
+			// fogLit fell through above with the right night/day color; refresh against the
+			// freshly-synthesized base so a moonless deep night still degrades to plain fog.
+			if( !( amb.fogLit[0] > 0.0f || amb.fogLit[1] > 0.0f || amb.fogLit[2] > 0.0f ) )
+			{
+				amb.fogLit[0] = amb.fogColor[0];
+				amb.fogLit[1] = amb.fogColor[1];
+				amb.fogLit[2] = amb.fogColor[2];
+			}
+		}
+	}
 }
 
 }

@@ -97,8 +97,11 @@ in float v_skyVis;                // S1: geometric sky visibility [0,1], plumbed
 uniform sampler2D u_texDiffuse;   // unit 0
 uniform sampler2D u_texLightmap;  // unit 1
 uniform float u_alphaTest;        // 0 = off, else discard threshold (0.25)
-uniform vec4 u_fog;               // rgb = fog color (linear), w = extinction a (1/units); w<=0 -> off
-uniform vec4 u_fogParams;         // x = height falloff b, y = sun glow, z = maxOpacity, w = reserved
+uniform vec4 u_fog;               // rgb = fog color (linear, BASE/back-light in-scatter), w = extinction a (1/units); w<=0 -> off
+uniform vec4 u_fogParams;         // S3: x = height falloff b, y = HG asymmetry g, z = maxOpacity, w = fogStart distance
+uniform vec4 u_fogParams2;        // S3: xyz = per-channel extinction tint (b_ch = a*tint), w = 2D noise amplitude
+uniform vec4 u_fogParams3;        // S3: x = noise world-scale, y = wind speed, z = fogCutoff distance, w = fog time (drift clock)
+uniform vec3 u_fogLit;            // S3: toward-body (sun/moon) fog in-scatter color; HG lobe blends fog color toward this
 uniform vec3 u_camPos;            // camera world position (ray origin)
 uniform vec3 u_ambTint;           // night tint; (1,1,1) neutral
 uniform float u_skyAmbScale;      // L3b sky-ambient cloud dimmer; 1.0 neutral (>=0.6 floor on CPU)
@@ -124,27 +127,64 @@ uniform vec3  u_nightFloor;       // competitive readable ambient floor (premul)
 uniform float u_nightK;           // skyVis exponent k for the world night ambient
 uniform float u_nightMoon;        // gain on the skyVis-GATED moon directional (wallhack-fixed moonlight)
 out vec4 fragColor;
-// Analytic base-fog transmittance (fog M1 spec 4.3): closed-form integral of an
-// exponential-height density d(z)=a*e^(-b*z) along the camera->surface ray, with
-// BOTH mandatory guards -- |b|<eps (uniform density, divide-by-b blowup) and
-// |rd.z|<eps (near-horizontal ray, divide-by-rd.z blowup). World up axis is Z.
-// Returns T in [0,1]; the server maxOpacity floor clamps the fog amount.
-float cszFogT( vec3 worldPos, vec3 camPos, float a, float b, float maxOpacity )
+// S3 procedural 2D value noise (finding 6: 2D only -- the GL function table has no
+// glTexImage3D, so this is in-shader hash noise, pure ALU, NO texture binding). Two
+// octaves of smooth value noise over a drifting world-XY lattice = a cheap tiling-free
+// density field; modulates the fog extinction 0.7..1.3x so the medium is not a flat slab.
+float cszHash21( vec2 p )
 {
-	if( a <= 0.0 )
-		return 1.0;                                          // density<=0 -> fog off (legacy parity)
+	p = fract( p * vec2( 0.1031, 0.1173 ));
+	p += dot( p, p.yx + 33.33 );
+	return fract(( p.x + p.y ) * p.x );
+}
+float cszVNoise( vec2 p )
+{
+	vec2 i = floor( p );
+	vec2 f = fract( p );
+	vec2 u = f * f * ( 3.0 - 2.0 * f );                      // smootherstep weights
+	float a = cszHash21( i );
+	float b = cszHash21( i + vec2( 1.0, 0.0 ));
+	float c = cszHash21( i + vec2( 0.0, 1.0 ));
+	float d = cszHash21( i + vec2( 1.0, 1.0 ));
+	return mix( mix( a, b, u.x ), mix( c, d, u.x ), u.y );
+}
+float cszFogNoise( vec2 worldXY, float scale, float wind, float t )
+{
+	vec2 drift = vec2( wind * t, wind * t * 0.6 );           // slow wind translation (drift = animation)
+	vec2 q = worldXY * scale + drift * scale;
+	float n = 0.65 * cszVNoise( q ) + 0.35 * cszVNoise( q * 2.03 + 7.1 );
+	return n;                                                // ~[0,1]
+}
+// S3 per-channel analytic transmittance (REWORK-SPEC §S3.1, IQ model). Closed-form
+// integral of an exponential-height density d(z)=e^(-b*z) along the camera->surface ray,
+// with BOTH guards -- |b|<eps (uniform density) and |rd.z|<eps (near-horizontal ray) --
+// computed ONCE as an a-independent geometric path factor G, then scaled by the PER-CHANNEL
+// extinction aRGB (blue scatters most -> blue T lowest -> distance reads cool). Start/Cutoff
+// bound the integral to [t0,t1] so the near field (weapon/skybox) stays crisp and the far
+// field plateaus instead of crushing to black. World up axis is Z. Returns T in [0,1]^3.
+vec3 cszFogT3( vec3 worldPos, vec3 camPos, vec3 aRGB, float b, float maxOpacity,
+	float startD, float cutoffD, float densMul )
+{
+	if( aRGB.g <= 0.0 )
+		return vec3( 1.0 );                                  // luma extinction<=0 -> fog off (legacy parity)
 	vec3 d = worldPos - camPos;
 	float t = length( d );
 	float rdz = ( t > 1e-4 ) ? d.z / t : 0.0;
-	float F;
+	float t0 = clamp( startD, 0.0, t );                      // near fence (no fog within startD)
+	float t1 = ( cutoffD > 0.0 ) ? min( t, cutoffD ) : t;    // far plateau
+	if( t1 <= t0 )
+		return vec3( 1.0 );
+	float G;                                                 // a-independent path factor over [t0,t1]
 	if( abs( b ) < 1e-4 )
-		F = a * t;                                           // b->0 uniform density (divide-by-b guard)
+		G = ( t1 - t0 );                                     // uniform density (divide-by-b guard)
 	else if( abs( rdz ) < 1e-4 )
-		F = a * exp( -b * camPos.z ) * t;                    // near-horizontal ray (divide-by-rd.z guard)
+		G = exp( -b * camPos.z ) * ( t1 - t0 );              // near-horizontal ray (divide-by-rd.z guard)
 	else
-		F = ( a / b ) * exp( -b * camPos.z ) * ( 1.0 - exp( -b * t * rdz )) / rdz;
-	float T = exp( -max( F, 0.0 ));
-	return max( T, 1.0 - maxOpacity );                       // server reveal floor (silhouettes/blackout)
+		G = ( 1.0 / b ) * exp( -b * camPos.z ) * ( exp( -b * t0 * rdz ) - exp( -b * t1 * rdz )) / rdz;
+	G = max( G, 0.0 ) * densMul;                             // 2D-noise density modulation
+	vec3 F = aRGB * G;
+	vec3 T = exp( -max( F, vec3( 0.0 )));
+	return max( T, vec3( 1.0 - maxOpacity ));                // server reveal floor (silhouettes/blackout)
 }
 void main()
 {
@@ -227,29 +267,38 @@ void main()
 		vec3  csz_cool = vec3( csz_l ) * vec3( 0.75, 0.92, 1.25 );   // luminance pushed cool-blue
 		col = mix( col, csz_cool, csz_night * 0.70 );                // 0.70 = grade strength (tunable)
 	}
-	// Analytic base fog (fog M1 Step 2): single extinction T applied exactly once
-	// (replaces the old per-pixel exp2). In-scatter = fog color plus a forward
-	// directional sun/moon glow (cheap phase pow; sunGlow=0 -> plain fog mix, the
-	// legacy look). Composited in linear HDR so it is correct with ACES on or off.
+	// S3 analytic fog (REWORK-SPEC §S3, findings 5/6/12): ONE in-scatter equation,
+	// composited in linear HDR. Per-channel extinction (blue scatters most -> distance
+	// cools) + a drifting 2D-noise density field + an HG directional lobe that blends the
+	// cool sky-coupled base fog color (u_fog.rgb) toward the brighter sun/moon "lit" color
+	// (u_fogLit). The old achromatic-gray fold (CszApplyFogAmbient) is RETIRED upstream and
+	// the old pow(cosT,8) sunGlow is REPLACED by the HG lobe (not added on top -- finding 5).
 	vec3 toFrag = v_worldPos - u_camPos;
 	float tLen = length( toFrag );
-	vec3 rd = ( tLen > 1e-4 ) ? toFrag / tLen : vec3( 0.0 );    // guard normalize-of-zero (NaN)
-	float T = cszFogT( v_worldPos, u_camPos, u_fog.w, u_fogParams.x, u_fogParams.z );
-	float cosT = max( dot( rd, u_sunDir ), 0.0 );                // toward the moon = +1
-	float glow = pow( cosT, 8.0 ) * u_fogParams.y;               // legacy cheap forward glow (unchanged)
-	vec3 inscatter = u_fog.rgb + u_sunColor * glow;
-	// fog M1 L4 -- OBVIOUS moonlight Tyndall: Henyey-Greenstein forward single
-	// in-scatter (g=0.8) of the DEDICATED moon channel (u_moonInScatter, decoupled
-	// from the surface-coupled u_sunColor so brightening the air never lifts the
-	// ground). Looking toward the moon the fog visibly halos. Gated by the cloud-gap
-	// shaftMask (thick cloud suppresses) and the csz_moonshaft master toggle. Energy
-	// stays bounded: the whole in-scatter is weighted by (1-T), the out-scattered
-	// fraction the base-fog extinction already removed, so sigma_s <= sigma_t holds
-	// and brightness can never run past the fog's own opacity budget.
+	vec3 rd = ( tLen > 1e-4 ) ? toFrag / tLen : vec3( 0.0 );      // guard normalize-of-zero (NaN)
+	float dens = 1.0;
+	if( u_fogParams2.w > 0.0 )                                    // 2D noise density modulation (drifts with wind)
+		dens = mix( 1.0, 2.0 * cszFogNoise( v_worldPos.xy, u_fogParams3.x, u_fogParams3.y, u_fogParams3.w ), u_fogParams2.w );
+	vec3 aRGB = u_fog.w * u_fogParams2.xyz;                       // per-channel extinction (b_ch = a * tint)
+	vec3 T = cszFogT3( v_worldPos, u_camPos, aRGB, u_fogParams.x, u_fogParams.z,
+		u_fogParams.w, u_fogParams3.z, dens );
+	// Directional in-scatter: Henyey-Greenstein lobe toward the dominant body (u_sunDir =
+	// surface->sun/moon ~ camera->body). g (u_fogParams.y) ~0.7 -> a soft forward lobe; the
+	// fog color blends from the cool base toward the sun/moon color so looking toward the
+	// body the fog visibly brightens & warms/cools to the body's light.
+	float cosT = dot( rd, u_sunDir );
+	float g = u_fogParams.y;
+	float hgDen = 1.0 + g * g - 2.0 * g * cosT;
+	float hg = ( 1.0 - g * g ) / pow( max( hgDen, 1e-4 ), 1.5 );  // unnormalized HG (isotropic == 1)
+	float sunAmount = clamp(( hg - 1.0 ) * 0.5, 0.0, 1.0 );       // forward lobe -> toward lit color
+	vec3 inscatter = mix( u_fog.rgb, u_fogLit, sunAmount );
+	// fog M1 L4 moonshaft Tyndall (INDEPENDENT enhancement, gated by u_moonShaft -- default
+	// 0 = no-op; finding 12 keeps it out of the base equation). Weighted by (1-T) below so
+	// sigma_s <= sigma_t holds and the air-glow stays inside the fog's own opacity budget.
 	const float CSZ_HG_G = 0.8;
-	float hgDen = 1.0 + CSZ_HG_G * CSZ_HG_G - 2.0 * CSZ_HG_G * cosT;
-	float hg = ( 1.0 - CSZ_HG_G * CSZ_HG_G ) / ( 4.0 * 3.14159265 * pow( max( hgDen, 1e-4 ), 1.5 ) );
-	inscatter += ( u_moonShaft * u_shaftMask * hg ) * u_moonInScatter;
+	float hgD2 = 1.0 + CSZ_HG_G * CSZ_HG_G - 2.0 * CSZ_HG_G * max( cosT, 0.0 );
+	float hg2 = ( 1.0 - CSZ_HG_G * CSZ_HG_G ) / ( 4.0 * 3.14159265 * pow( max( hgD2, 1e-4 ), 1.5 ));
+	inscatter += ( u_moonShaft * u_shaftMask * hg2 ) * u_moonInScatter;
 	col = col * T + inscatter * ( 1.0 - T );
 	fragColor = vec4( col, base.a * u_brushAlpha );
 }

@@ -364,7 +364,11 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	StudioTexturePollDevCvars();					// slot 7: csz_dev_armskin change check
 
 	view.ambience = g_fog.Current();				// slot 7.2: ambience snapshot (A1)
-	CszFogComputeAmbient( view.ambience.fogAmbient );		// §5.1: client achromatic ambient in-scatter (world/studio fold it into base in-scatter)
+	// S3 (REWORK-SPEC §S3, finding 5): the §5.1 achromatic-gray ambient in-scatter is
+	// RETIRED. PublishLighting now computes the full sky/moon-coupled fog (per-channel
+	// extinction + HG + height + noise) as the SINGLE in-scatter owner, so the old flat
+	// CszFogComputeAmbient(view.ambience.fogAmbient) fold is gone (it was the "single flat
+	// gray wash" disease). fogAmbient/CszFogComputeAmbient remain defined but unconsumed.
 
 	// Phase drives both the cloud-state scalars and the published night tint /
 	// celestial light below, all BEFORE any pass uploads the snapshot (A3): the

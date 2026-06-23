@@ -70,6 +70,7 @@ struct PassLocs
 	int uFog, uAmbTint;						// base program only (M2a fog/night; lit/depth fog-free, pitfall 23)
 	int uSkyAmbScale;						// L3b sky-ambient cloud dimmer scalar (base program only); 1.0 neutral
 	int uFogParams, uCamPos;					// analytic base fog (fog M1 Step 2): height b/sunGlow/maxOpacity + ray origin
+	int uFogParams2, uFogParams3, uFogLit;				// S3 fog rework: per-channel ext + noise + Start/Cutoff + toward-body lit color
 	int uSunDir, uSunColor;						// base program only (sky 档1 directional N.L; lit/depth exempt, pitfall 23)
 	int uSkyVis;							// S1: per-entity geometric sky visibility (base program only); 1.0 default
 	int uMoonInScatter, uShaftMask, uMoonShaft;			// fog M1 L4 moon Tyndall air-glow (base program only; identity until fed)
@@ -115,6 +116,9 @@ void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 	out.uShadeColor = UniformLoc( prog, "u_shadeColor" );
 	out.uFog = UniformLoc( prog, "u_fog" );
 	out.uFogParams = UniformLoc( prog, "u_fogParams" );
+	out.uFogParams2 = UniformLoc( prog, "u_fogParams2" );	// S3
+	out.uFogParams3 = UniformLoc( prog, "u_fogParams3" );	// S3
+	out.uFogLit = UniformLoc( prog, "u_fogLit" );		// S3
 	out.uCamPos = UniformLoc( prog, "u_camPos" );
 	out.uAmbTint = UniformLoc( prog, "u_ambTint" );
 	out.uSkyAmbScale = UniformLoc( prog, "u_skyAmbScale" );
@@ -183,6 +187,12 @@ void EnsureShader()
 
 	glUniform4fv( s_studio.baseLocs.uFog, 1, kFogOff );
 	glUniform4fv( s_studio.baseLocs.uFogParams, 1, kFogParamsDefault );
+	// S3 fog defaults = legacy identity (extTint achromatic, noise off, fogLit 0).
+	const float kFogParams2Default[4] = { 1.0f, 1.0f, 1.0f, 0.0f };
+	const float kFogParams3Default[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	if( s_studio.baseLocs.uFogParams2 >= 0 ) glUniform4fv( s_studio.baseLocs.uFogParams2, 1, kFogParams2Default );
+	if( s_studio.baseLocs.uFogParams3 >= 0 ) glUniform4fv( s_studio.baseLocs.uFogParams3, 1, kFogParams3Default );
+	if( s_studio.baseLocs.uFogLit >= 0 )     glUniform3fv( s_studio.baseLocs.uFogLit, 1, kCamPosZero );
 	glUniform3fv( s_studio.baseLocs.uCamPos, 1, kCamPosZero );
 	glUniform3fv( s_studio.baseLocs.uAmbTint, 1, kTintNeutral );
 	glUniform1f( s_studio.baseLocs.uSkyAmbScale, 1.0f );	// L3b: neutral until fed (no sky-ambient dimming)
@@ -534,12 +544,16 @@ void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, cons
 	// Only the base program has these uniforms; lit/depth locations are -1
 	// (glUniform* no-op), keeping those passes fog-free (pitfall 23).
 	const AmbienceParams &amb = view.ambience;
-	float fogVec[4], fogParams[4];
-	CszFogUniformVecs( amb, fogVec, fogParams );	// analytic base fog (fog M1 Step 2): density->extinction + params
-	CszApplyFogAmbient( amb, fogVec );		// §5.1: players/models fog with the SAME achromatic ambient as the world (consistency)
-
+	// S3 fog (REWORK-SPEC §S3, finding 5: ONE inscatter owner). Players/models fog with
+	// the SAME extended equation as the world (consistency); the retired CszApplyFogAmbient
+	// achromatic gray is gone. s_studio.time = the noise drift clock (latched at BeginFrame).
+	float fogVec[4], fogParams[4], fogParams2[4], fogParams3[4], fogLit[3];
+	CszFogUniformVecsEx( amb, s_studio.time, fogVec, fogParams, fogParams2, fogParams3, fogLit );
 	glUniform4fv( locs.uFog, 1, fogVec );
 	glUniform4fv( locs.uFogParams, 1, fogParams );
+	if( locs.uFogParams2 >= 0 ) glUniform4fv( locs.uFogParams2, 1, fogParams2 );
+	if( locs.uFogParams3 >= 0 ) glUniform4fv( locs.uFogParams3, 1, fogParams3 );
+	if( locs.uFogLit >= 0 )     glUniform3fv( locs.uFogLit, 1, fogLit );
 	glUniform3fv( locs.uCamPos, 1, view.origin );	// ray origin for the height-fog integral
 	glUniform3fv( locs.uAmbTint, 1, amb.tint );
 	glUniform1f( locs.uSkyAmbScale, amb.skyAmbientScale );	// L3b sky-ambient cloud dimmer (1.0 when clouds off; floored >=0.6 in L3a)
