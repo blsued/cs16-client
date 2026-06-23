@@ -61,6 +61,17 @@ cvar_t *s_cvarHlRolloff;  // csz_highlight_rolloff default "1": identity-path ov
 cvar_t *s_cvarHlKnee;     // csz_highlight_knee   default "0.95": shoulder onset (maxRGB <= knee unchanged per-pixel)
 cvar_t *s_cvarTiming;     // csz_hdr_timing default "0"; 1 = log the GPU timer ms (Dev level)
 cvar_t *s_cvarPerfDump;   // csz_perf_dump  default "0" (L0 observability); 1 = orchestrator emits the [csz_perf] line AND forces the in-scene GPU timer query (passive: no draw change)
+// S4 night grade (REWORK-SPEC §S4). All read live each frame; the whole grade is gated by
+// the published nightness so DAY is bit-identical (nightness 0 -> shader skips the block).
+cvar_t *s_cvarNightExposure;  // csz_night_exposure   default "1.0" (no darkening; <1 = darker night mood)
+cvar_t *s_cvarNightToe;       // csz_night_toe        default "0.35" (shadow-lift strength for readability)
+cvar_t *s_cvarToeGamma;       // csz_night_toe_gamma  default "1.5" (>1 lifts shadows/midtones)
+cvar_t *s_cvarPurkinje;       // csz_purkinje         default "1.0" (scotopic desaturation + cool shift)
+cvar_t *s_cvarPurkinjeKnee;   // csz_purkinje_knee    default "0.35" (luma above which chroma is preserved)
+
+// S4: nightness published by the renderer each frame (after PublishLighting), consumed by the
+// resolve so the night grade engages on the phase curve. 0 (day) -> the shader block is skipped.
+float s_publishedNightness = 0.0f;
 
 // --- HDR scene target (red-team fix #9: real color draw buffer; fix #10: depth
 //     renderbuffer, no stencil in the CSZ takeover scene target) ---------------
@@ -87,6 +98,7 @@ struct ResolveGpu
 
 	int uHdr, uViewOrigin, uExposure, uTonemap, uEncode, uDither;
 	int uHlRolloff, uHlKnee;
+	int uNightness, uNightExposure, uNightToe, uToeGamma, uPurkinje, uPurkinjeKnee;	// S4 night grade
 };
 
 ResolveGpu s_resolve;
@@ -270,6 +282,12 @@ void BuildResolveProgram()
 	s_resolve.uDither     = UniformLoc( s_resolve.program, "u_dither" );
 	s_resolve.uHlRolloff  = UniformLoc( s_resolve.program, "u_hlRolloff" );
 	s_resolve.uHlKnee     = UniformLoc( s_resolve.program, "u_hlKnee" );
+	s_resolve.uNightness    = UniformLoc( s_resolve.program, "u_nightness" );		// S4
+	s_resolve.uNightExposure= UniformLoc( s_resolve.program, "u_nightExposure" );	// S4
+	s_resolve.uNightToe     = UniformLoc( s_resolve.program, "u_nightToe" );		// S4
+	s_resolve.uToeGamma     = UniformLoc( s_resolve.program, "u_toeGamma" );		// S4
+	s_resolve.uPurkinje     = UniformLoc( s_resolve.program, "u_purkinje" );		// S4
+	s_resolve.uPurkinjeKnee = UniformLoc( s_resolve.program, "u_purkinjeKnee" );	// S4
 
 	s_resolve.built = true;
 	CSZ_LogDev( "compose", "HDR resolve program built (gpu gen %d)", s_resolve.gpuGeneration );
@@ -531,8 +549,32 @@ void SkyComposeRegisterCvars()
 		s_cvarTiming = gEngfuncs.pfnRegisterVariable( "csz_hdr_timing", "0", FCVAR_CLIENTDLL );
 	if( s_cvarPerfDump == NULL )
 		s_cvarPerfDump = gEngfuncs.pfnRegisterVariable( "csz_perf_dump", "0", FCVAR_CLIENTDLL );
+	// S4 night grade knobs (REWORK-SPEC §S4). USER real-machine "口味" knobs; all no-op by day
+	// (gated on nightness). csz_night_exposure default 1.0 = no darkening (USER dials down for a
+	// darker mood); the readability/cool defaults (toe + purkinje) are ON.
+	if( s_cvarNightExposure == NULL )
+		s_cvarNightExposure = gEngfuncs.pfnRegisterVariable( "csz_night_exposure", "1.0", FCVAR_CLIENTDLL );
+	if( s_cvarNightToe == NULL )
+		s_cvarNightToe = gEngfuncs.pfnRegisterVariable( "csz_night_toe", "0.35", FCVAR_CLIENTDLL );
+	if( s_cvarToeGamma == NULL )
+		s_cvarToeGamma = gEngfuncs.pfnRegisterVariable( "csz_night_toe_gamma", "1.5", FCVAR_CLIENTDLL );
+	if( s_cvarPurkinje == NULL )
+		s_cvarPurkinje = gEngfuncs.pfnRegisterVariable( "csz_purkinje", "1.0", FCVAR_CLIENTDLL );
+	if( s_cvarPurkinjeKnee == NULL )
+		s_cvarPurkinjeKnee = gEngfuncs.pfnRegisterVariable( "csz_purkinje_knee", "0.35", FCVAR_CLIENTDLL );
 
-	CSZ_LogDev( "compose", "HDR cvars registered (csz_hdr/exposure/tonemap/encode/dither/hdr_timing/perf_dump)" );
+	CSZ_LogDev( "compose", "HDR cvars registered (csz_hdr/exposure/tonemap/encode/dither/hdr_timing/perf_dump; "
+		"S4 night_exposure/night_toe/night_toe_gamma/purkinje/purkinje_knee)" );
+}
+
+// S4: the renderer pushes the live phase nightness here once per frame (after PublishLighting,
+// before the resolve) so the resolve's night grade follows the phase curve. Day (nightness 0)
+// -> the shader skips the entire grade -> bit-identical resolve.
+void SkyComposePublishNight( float nightness )
+{
+	if( nightness < 0.0f ) nightness = 0.0f;
+	if( nightness > 1.0f ) nightness = 1.0f;
+	s_publishedNightness = nightness;
 }
 
 bool SkyComposeActive()
@@ -713,6 +755,46 @@ void SkyComposeResolve( const struct ref_viewpass_s *rvp, const float clearRgba[
 		if( knee < 0.0f ) knee = 0.0f;
 		if( knee > 0.999f ) knee = 0.999f;
 		glUniform1f( s_resolve.uHlKnee, knee );
+	}
+	// S4 night grade (REWORK-SPEC §S4). Feed the live phase nightness (published by the renderer)
+	// + the USER tuning cvars, all CPU-clamped to sane bands so a stray value cannot break the
+	// resolve. At nightness 0 (day) the shader skips the whole block -> bit-identical.
+	if( s_resolve.uNightness >= 0 )
+		glUniform1f( s_resolve.uNightness, s_publishedNightness );
+	if( s_resolve.uNightExposure >= 0 )
+	{
+		float e = ReadCvar( s_cvarNightExposure, 1.0f );
+		if( e < 0.0f ) e = 0.0f;
+		if( e > 4.0f ) e = 4.0f;
+		glUniform1f( s_resolve.uNightExposure, e );
+	}
+	if( s_resolve.uNightToe >= 0 )
+	{
+		float toe = ReadCvar( s_cvarNightToe, 0.35f );
+		if( toe < 0.0f ) toe = 0.0f;
+		if( toe > 1.0f ) toe = 1.0f;
+		glUniform1f( s_resolve.uNightToe, toe );
+	}
+	if( s_resolve.uToeGamma >= 0 )
+	{
+		float g = ReadCvar( s_cvarToeGamma, 1.5f );
+		if( g < 0.1f ) g = 0.1f;
+		if( g > 4.0f ) g = 4.0f;
+		glUniform1f( s_resolve.uToeGamma, g );
+	}
+	if( s_resolve.uPurkinje >= 0 )
+	{
+		float p = ReadCvar( s_cvarPurkinje, 1.0f );
+		if( p < 0.0f ) p = 0.0f;
+		if( p > 2.0f ) p = 2.0f;
+		glUniform1f( s_resolve.uPurkinje, p );
+	}
+	if( s_resolve.uPurkinjeKnee >= 0 )
+	{
+		float k = ReadCvar( s_cvarPurkinjeKnee, 0.35f );
+		if( k < 0.01f ) k = 0.01f;
+		if( k > 1.0f ) k = 1.0f;
+		glUniform1f( s_resolve.uPurkinjeKnee, k );
 	}
 
 	glDrawArrays( GL_TRIANGLES, 0, 3 );

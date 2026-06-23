@@ -226,9 +226,12 @@ void main()
 		float csz_amb = mix( 1.0, mix( CSZ_INDOOR_AMB, 1.0, csz_sky ), csz_night );
 		approvedDay *= u_ambTint * csz_amb * u_skyAmbScale;
 		approvedDay += sunWarm + moonTerm;                  // P2b split directional (was blended u_sunColor * csz_moon)
-		float csz_l = dot( approvedDay, vec3( 0.2126, 0.7152, 0.0722 ));
-		vec3  csz_cool = vec3( csz_l ) * vec3( 0.75, 0.92, 1.25 );    // luminance pushed cool-blue
-		approvedDay = mix( approvedDay, csz_cool, csz_night * 0.70 ); // day-for-night grade (active path, codex P1b)
+		// S4 / codex finding8: the world-only day-for-night COOL GRADE that used to live HERE
+		// (luma -> vec3(0.75,0.92,1.25), mix by csz_night*0.70) is RETIRED. Studio had no
+		// equivalent, so world and studio cooled inconsistently at night. The cool desaturation
+		// now lives in the UNIFIED compose post (scotopicShift, csz_purkinje) which applies to
+		// world + studio + everything by local luminance -> one consistent night cool grade.
+		// (No effect on day: this grade was already gated by csz_night, == 0 at day/sunset.)
 		// (2) PHYSICAL NIGHT -- spatialized by the S1 geometric skyVis (finding 7
 		// replaces the old lightmap-luma sky proxy; finding 9: world-specific k + floor).
 		// Indoor (skyVis~0) collapses to the cool readable ambFloor (competitive: silhouettes

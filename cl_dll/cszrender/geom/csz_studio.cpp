@@ -77,6 +77,7 @@ struct PassLocs
 	int uNightModel, uNightness, uSunWarmColor;			// S2 physical night model (base program only)
 	int uMoonDir, uMoonColor;					// S2 gated night moon directional (base program only)
 	int uNightSky, uNightFloor, uNightK, uNightMoon;		// S2 studio night ambient calibration (base program only)
+	int uRimStrength, uRimPower;					// S4 competitive rim light (base program only)
 	int uLightOrigin, uLightDir, uLightColor;			// lit program only
 	int uLightRadius, uCosInner, uCosOuter, uMatShadow, uHasShadow;	// lit program only
 	int uV3, uEdgeExp, uHotspotGain, uHotspotSharp, uDirectGain;	// L5R crisp profile (lit program only)
@@ -138,6 +139,8 @@ void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 	out.uNightFloor = UniformLoc( prog, "u_nightFloor" );		// S2
 	out.uNightK = UniformLoc( prog, "u_nightK" );			// S2
 	out.uNightMoon = UniformLoc( prog, "u_nightMoon" );		// S2
+	out.uRimStrength = UniformLoc( prog, "u_rimStrength" );		// S4
+	out.uRimPower = UniformLoc( prog, "u_rimPower" );		// S4
 	out.uLightOrigin = UniformLoc( prog, "u_lightOrigin" );
 	out.uLightDir = UniformLoc( prog, "u_lightDir" );
 	out.uLightColor = UniformLoc( prog, "u_lightColor" );
@@ -213,6 +216,9 @@ void EnsureShader()
 	if( s_studio.baseLocs.uNightFloor >= 0 )     glUniform3fv( s_studio.baseLocs.uNightFloor, 1, kNightZero3 );
 	if( s_studio.baseLocs.uNightK >= 0 )         glUniform1f( s_studio.baseLocs.uNightK, 0.7f );
 	if( s_studio.baseLocs.uNightMoon >= 0 )      glUniform1f( s_studio.baseLocs.uNightMoon, 1.0f );
+	// S4 rim defaults: off until the per-frame feed (rim is gated by nightness anyway).
+	if( s_studio.baseLocs.uRimStrength >= 0 )    glUniform1f( s_studio.baseLocs.uRimStrength, 0.0f );
+	if( s_studio.baseLocs.uRimPower >= 0 )       glUniform1f( s_studio.baseLocs.uRimPower, 3.0f );
 
 	BuildProgram( "csz_studio_lit", kStudioLitVs, kStudioLitFs, true, s_studio.litProgram );
 	QueryPassLocs( s_studio.litProgram, s_studio.litLocs );
@@ -585,6 +591,23 @@ void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, cons
 	if( locs.uNightFloor >= 0 )     glUniform3fv( locs.uNightFloor, 1, amb.nightFloor[1] );
 	if( locs.uNightK >= 0 )         glUniform1f( locs.uNightK, amb.nightK[1] );
 	if( locs.uNightMoon >= 0 )      glUniform1f( locs.uNightMoon, amb.nightMoonGain );
+	// S4 §7 competitive rim light feed. USER "口味" knobs (csz_rim strength, csz_rim_power
+	// Fresnel exponent), registered lazily here (studio has no other cvar-register seam) and
+	// read live. The shader gates the rim on u_nightness so DAY is byte-identical regardless.
+	{
+		static cvar_t *s_rimCvar;
+		static cvar_t *s_rimPowerCvar;
+		if( s_rimCvar == NULL )
+			s_rimCvar = gEngfuncs.pfnRegisterVariable( "csz_rim", "0.30", FCVAR_CLIENTDLL );
+		if( s_rimPowerCvar == NULL )
+			s_rimPowerCvar = gEngfuncs.pfnRegisterVariable( "csz_rim_power", "3.0", FCVAR_CLIENTDLL );
+		float rim = ( s_rimCvar != NULL ) ? s_rimCvar->value : 0.30f;
+		float rimP = ( s_rimPowerCvar != NULL ) ? s_rimPowerCvar->value : 3.0f;
+		if( rim < 0.0f ) rim = 0.0f;  if( rim > 2.0f ) rim = 2.0f;	// sane band
+		if( rimP < 0.1f ) rimP = 0.1f;  if( rimP > 16.0f ) rimP = 16.0f;
+		if( locs.uRimStrength >= 0 )    glUniform1f( locs.uRimStrength, rim );
+		if( locs.uRimPower >= 0 )       glUniform1f( locs.uRimPower, rimP );
+	}
 
 	float fwd[3], right[3], up[3];
 

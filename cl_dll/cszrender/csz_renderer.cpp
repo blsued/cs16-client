@@ -390,6 +390,11 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	// above) to dim the moon-direct term under cloud cover.
 	g_sky.PublishLighting( view.ambience, ph );
 
+	// S4 (REWORK-SPEC §S4): hand the freshly-published phase nightness to the HDR resolve so its
+	// night grade (exposure / shadow-toe / Purkinje) follows the same curve as the world/studio
+	// passes. nightness 0 (day) -> the resolve skips the whole grade -> bit-identical day frame.
+	SkyComposePublishNight( view.ambience.nightness );
+
 	// L0 black-fog decouple seam (CONVENTIONS.md). SINGLE chokepoint: every fog
 	// consumer -- world/studio/sprite analytic-fog uniforms (CszFogUniformVecs),
 	// the sky fog band (csz_sky.cpp), the volumetric flashlight march

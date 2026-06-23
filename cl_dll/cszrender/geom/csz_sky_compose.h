@@ -294,6 +294,11 @@ void AtmosShutdown();
 // -----------------------------------------------------------------------------
 void SkyComposeRegisterCvars();
 bool SkyComposeActive();   // csz_hdr != 0 (read live each call)
+// S4 (REWORK-SPEC §S4): the renderer publishes the live phase nightness [0,1] each frame
+// (after PublishLighting, before the resolve) so the resolve's night grade (exposure / shadow
+// toe / Purkinje) follows the phase curve. Day (nightness 0) -> the resolve skips the whole
+// grade -> bit-identical to the pre-S4 resolve. Clamped to [0,1] internally.
+void SkyComposePublishNight( float nightness );
 // Raw GL name of the sampleable scene depth texture (GL_DEPTH_COMPONENT24,
 // compare-mode NONE) backing the HDR FBO's GL_DEPTH_ATTACHMENT; 0 when the HDR
 // target is not valid. Bind ONLY via SkyComposeBindTex. (fog Step 1 prerequisite)

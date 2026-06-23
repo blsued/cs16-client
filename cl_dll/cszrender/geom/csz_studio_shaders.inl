@@ -125,6 +125,11 @@ uniform vec3  u_nightSky;         // studio night sky-ambient color (premul), mo
 uniform vec3  u_nightFloor;       // studio competitive readable ambient floor (premul)
 uniform float u_nightK;           // skyVis exponent k for studio (per-entity)
 uniform float u_nightMoon;        // gain on the skyVis-GATED moon directional (wallhack-fixed moonlight)
+// S4 §7 competitive rim light (REWORK-SPEC §S4): a cool Fresnel edge so enemy silhouettes stay
+// readable against a dark night background (the Hunt "too-black = pay-to-win" anti-pattern).
+// Gated by u_nightness so DAY is byte-identical (rim == 0 at nightness 0).
+uniform float u_rimStrength;      // csz_rim: rim-light strength (0 = off)
+uniform float u_rimPower;         // csz_rim_power: Fresnel exponent (higher = tighter edge)
 out vec4 fragColor;
 // S3 procedural 2D value noise (finding 6: 2D only, no glTexImage3D -> in-shader hash
 // noise, pure ALU). Identical to the world base pass so both surfaces eat fog the same way.
@@ -241,6 +246,18 @@ void main()
 		const float CSZ_INDOOR_MOON = 0.08;                 // night indoor directional floor (DARK end)
 		float csz_moon = mix( 1.0, mix( CSZ_INDOOR_MOON, 1.0, csz_sky ), csz_night );
 		col += albedo * u_sunColor * max( dot( n, u_sunDir ), 0.0 ) * csz_moon;
+	}
+	// S4 §7 competitive rim light (REWORK-SPEC §S4): a cool Fresnel edge added to the lit color
+	// so models keep a readable silhouette in dark night backgrounds. GATED by u_nightness (== 0
+	// at day -> rim is exactly 0 -> day byte-identical) and by csz_rim strength. V = fragment->eye.
+	// Independent of the night-model A/B (csz_rim 0 disables it). Added BEFORE fog so distant rims
+	// are attenuated by the medium (near-readable, far fades) -- competitive near-field priority.
+	if( u_nightness > 0.0 && u_rimStrength > 0.0 )
+	{
+		vec3  V = normalize( u_camPos - v_worldPos );
+		float fres = pow( 1.0 - max( dot( n, V ), 0.0 ), max( u_rimPower, 0.1 ));
+		const vec3 kRimColor = vec3( 0.55, 0.70, 1.00 );    // cool moonlit edge (readability, not realism)
+		col += kRimColor * ( fres * u_rimStrength * clamp( u_nightness, 0.0, 1.0 ));
 	}
 	// S3 analytic fog (REWORK-SPEC §S3, findings 5/6/12): ONE in-scatter equation, mirrors
 	// the world base pass so players/models fog identically. Per-channel extinction + 2D

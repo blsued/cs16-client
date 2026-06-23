@@ -105,6 +105,7 @@ cvar_t *s_nightSkyStudioCvar;	// csz_night_sky_studio: STUDIO night sky-ambient 
 cvar_t *s_nightFloorWorldCvar;	// csz_night_floor_world: WORLD competitive ambient floor intensity (prevents pure-black indoors)
 cvar_t *s_nightFloorStudioCvar;	// csz_night_floor_studio: STUDIO ambient floor intensity (keeps enemy models readable)
 cvar_t *s_nightMoonCvar;	// csz_night_moon: gain on the skyVis-GATED moon directional in physical night (the wallhack-fixed moonlight)
+cvar_t *s_sunsetBrightCvar;	// csz_sunset_bright (S4): multiplier on the SUNSET keyframe RGB only (de-crush USER "夕阳整个地图很黑"). Scales luma, preserves warm hue. day/dawn/midnight keyframes untouched. Default 2.2 -> sunset luma ~0.20*2.2 ~= 0.43 ("暖黄昏 not 死黑"); USER tunes final.
 // --- S3 analytic fog knobs (REWORK-SPEC §S3, findings 5/6/12). Registered in
 // RegisterDevCvars; read once per frame in PublishLighting to fill the AmbienceParams
 // S3 fog slots. These are the USER "口味" knobs (spec: all on cvars for real-machine
@@ -251,6 +252,8 @@ void SkyRenderer::RegisterDevCvars()
 		s_nightFloorStudioCvar = gEngfuncs.pfnRegisterVariable( "csz_night_floor_studio", "0.05", FCVAR_CLIENTDLL );
 	if( s_nightMoonCvar == NULL )
 		s_nightMoonCvar = gEngfuncs.pfnRegisterVariable( "csz_night_moon", "1", FCVAR_CLIENTDLL );
+	if( s_sunsetBrightCvar == NULL )
+		s_sunsetBrightCvar = gEngfuncs.pfnRegisterVariable( "csz_sunset_bright", "2.2", FCVAR_CLIENTDLL );	// S4 sunset de-crush (USER tunes final)
 
 	// S3 analytic fog knobs (REWORK-SPEC §S3). Defaults = a subtle cool night haze that
 	// stays clear up close, cools/eats the far field, and drifts slowly. csz_fog_env 0
@@ -449,6 +452,17 @@ void SkyRenderer::PublishLighting( AmbienceParams &amb, float phase )
 	// the 0.10 floor; full daylight is reached only in the final ramp.
 	float sunsetR = 0.241f, sunsetG = 0.189f, sunsetB = 0.149f;	// sunset @0.00: luma 0.20, warm amber dusk (R>G>B)
 	float midR = 0.120f, midG = 0.165f, midB = 0.300f;		// midnight @0.50: lifted readability floor, cold moonlit blue (B>G>R)
+	// S4 sunset de-crush (REWORK-SPEC §S4; USER complaint "夕阳的时候就整个地图很黑"). Scale the
+	// SUNSET keyframe RGB uniformly by csz_sunset_bright -> luma rises (~0.20 -> ~0.43 at default
+	// 2.2) while the warm R>G>B hue is preserved (uniform scale = pure brightness lift). ONLY the
+	// sunset anchor is touched: the midnight/dawn/day keyframes and the whole phase>=0.5 path are
+	// byte-identical, so this is a deliberate USER-requested change, NOT a regression. USER tunes
+	// the final value on the real machine.
+	{
+		float sb = ( s_sunsetBrightCvar != NULL ) ? s_sunsetBrightCvar->value : 2.2f;
+		if( sb < 0.5f ) sb = 0.5f;  if( sb > 6.0f ) sb = 6.0f;	// sane band (can dim below default too)
+		sunsetR *= sb;  sunsetG *= sb;  sunsetB *= sb;
+	}
 	float dawnR = 0.172f, dawnG = 0.202f, dawnB = 0.264f;		// dawn @0.86: luma 0.20 (== sunset), cool pinkish-blue (B>G>R)
 	float dayR = 1.00f, dayG = 0.82f, dayB = 0.62f;			// round-end @1.00: warm golden daylight to MATCH the golden-hour sky (R>G>B amber, luma ~0.84, reached only in the last 5s)
 	if( phase < 0.5f )		// sunset -> midnight (DIM dusk, darkening to deep night)

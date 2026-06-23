@@ -76,18 +76,40 @@ uniform int u_encode;           // csz_encode: 0 = no OETF (display passthrough)
 uniform int u_dither;           // csz_dither: 0 = off (byte-clean), 1 = TPDF dither
 uniform float u_hlRolloff;      // csz_highlight_rolloff: identity-path overbright shoulder strength (0 = off/legacy, 1 = full)
 uniform float u_hlKnee;         // csz_highlight_knee: shoulder onset; maxRGB <= knee returned bit-identical
+// S4 night grade (REWORK-SPEC §S4 §4/§5 + codex finding8). The whole grade is GATED by
+// u_nightness so the DAY image is bit-identical (u_nightness 0 -> the block is skipped).
+uniform float u_nightness;      // phase night gate [0,1] (PublishLighting); 0 = day -> night grade skipped
+uniform float u_nightExposure;  // csz_night_exposure: exposure mult at full night (1.0 = none; <1 darker mood)
+uniform float u_nightToe;       // csz_night_toe: shadow-lift strength at full night (readability; 0 = off)
+uniform float u_toeGamma;       // csz_night_toe_gamma: gamma for the shadow lift (>1 lifts shadows/midtones)
+uniform float u_purkinje;       // csz_purkinje: scotopic desaturation + cool-shift strength (0 = off)
+uniform float u_purkinjeKnee;   // csz_purkinje_knee: luma above which chroma is preserved (moon/sky/star anchor)
 out vec4 fragColor;
 
-// Purkinje shift hook -- RESERVED SEAM (kept by decision, DEAD-4 infra pass 2
-// 2026-06-18): a deliberate identity placeholder for the planned scotopic blue
-// shift / rod-vision desaturation at low luminance (C4). Kept rather than removed
-// because it is a zero-cost extension point -- the compiler inlines `return c`,
-// so there is no uniform, no branch, and no GL state; removing it would only
-// force a future re-edit of the resolve main() to reintroduce the call site. No
-// effect on the image at default.
-vec3 purkinje( vec3 c )
+// S4 §5 Purkinje / scotopic shift (REWORK-SPEC §S4 + codex finding8 = the SINGLE unified
+// cool grade for world+studio+all, retiring the per-shader world-only cool grade). At low
+// luminance human rod vision desaturates and shifts cool-blue. Desaturate toward luma and
+// apply a cool scotopic tint, WEIGHTED by a mesopic mask so bright anchors (moon disc, stars,
+// Milky Way, moonlit highlights) keep their color and only the dark scene cools -- i.e. the
+// cool atmosphere comes from DESATURATION, not from lowering brightness (§7 ③). strength 0 ->
+// EXACT identity (so the engage is continuous as nightness->0 and the day branch is skipped).
+vec3 scotopicShift( vec3 c, float strength, float knee )
 {
-	return c;
+	const vec3 kScotopicTint = vec3( 0.85, 0.95, 1.15 );   // REWORK-SPEC §S4 cool rod tint (kept modest -- moonlight is already lightly cool)
+	float lum = dot( c, vec3( 0.2126, 0.7152, 0.0722 ));
+	float meso = ( 1.0 - smoothstep( 0.0, max( knee, 1e-4 ), lum )) * clamp( strength, 0.0, 1.0 );
+	vec3 desat = mix( c, vec3( lum ), meso * 0.6 );          // partial desaturation toward luma
+	return desat * mix( vec3( 1.0 ), kScotopicTint, meso );  // cool-blue shift, strongest in the dark end
+}
+
+// S4 §4 night shadow-lift (TOE). The display-space scene crushes dark detail at night
+// ("整个地图很黑"); a gentle gamma lift raises shadows/midtones so silhouettes stay readable
+// (competitive: dark must not become pay-to-win). amt 0 -> identity. The moon-highlight
+// SHOULDER is the existing highlightShoulder() below (no separate night shoulder needed).
+vec3 nightToe( vec3 c, float amt, float gamma )
+{
+	vec3 lifted = pow( max( c, vec3( 0.0 )), vec3( 1.0 / max( gamma, 1e-3 )));
+	return mix( c, lifted, clamp( amt, 0.0, 1.0 ));
 }
 
 // ACES filmic tonemap, Narkowicz fitted rational approximation; numeric
@@ -143,8 +165,18 @@ void main()
 	// 2. Exposure.
 	c *= u_exposure;
 
-	// 3. Purkinje (identity until C4).
-	c = purkinje( c );
+	// 3. S4 night grade (REWORK-SPEC §S4 §4/§5 + finding8). ENTIRELY gated by u_nightness:
+	//    at day (u_nightness == 0) the block is skipped -> the resolve is BIT-IDENTICAL to the
+	//    pre-S4 pipeline (zero daytime regression). Each sub-op is ALSO identity as nightness->0
+	//    so the engage is continuous across the branch. Order: night exposure -> shadow-lift toe
+	//    -> unified Purkinje (world+studio+all). The moon-highlight shoulder is step 4 below.
+	if( u_nightness > 0.0 )
+	{
+		float nn = clamp( u_nightness, 0.0, 1.0 );
+		c *= mix( 1.0, u_nightExposure, nn );                       // §4 night exposure (mood; 1.0 = none)
+		c = nightToe( c, nn * u_nightToe, u_toeGamma );             // §4 shadow lift (readability)
+		c = scotopicShift( c, nn * u_purkinje, u_purkinjeKnee );    // §5 + finding8 unified Purkinje
+	}
 
 	// 4. Tonemap.
 	if( u_tonemap == 1 )
