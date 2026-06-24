@@ -36,14 +36,18 @@
 // additive world+studio lighting + the re-enabled non-local ground pool, slot 13)
 // and BEFORE the Step-3 first-person fog march (slot 13.5).
 //
-// DESIGN-SPEC §V2 rebuild (post-red-team): the third-person (NON-LOCAL) air cone is a
-// TWO-PASS half-res path. Pass 1 accumulates every visible non-local cone (the
-// budgeter selects <=12) into a SEPARATE half-res RGBA16F buffer with an
-// energy-conserving Beer-Lambert single-scatter march. Pass 2 upsamples that buffer to
-// full-res with a depth-aware bilateral filter (ported from the first-person fog
-// volume), applies an order-independent soft-knee compression ON THE VOLUME BUFFER
-// ONLY, and ADDS the result into the HDR scene. The LOCAL first-person beam is excluded
-// here (slot 13.5 owns it) so there is no double-draw / double-energy.
+// DESIGN-SPEC §V2.1 rebuild v2 (real-machine NO-GO fix): the third-person (NON-LOCAL)
+// air cone is a TWO-PASS half-res path. Pass 1 accumulates every visible non-local cone
+// (the budgeter selects <=12) into a SEPARATE half-res RGBA16F buffer with an
+// energy-conserving Beer-Lambert single-scatter march, storing summed in-scatter in rgb
+// (Lacc) and summed optical depth in alpha (Tau). Pass 2 upsamples that buffer with a
+// depth-aware bilateral filter (ported from the first-person fog volume), then collapses
+// the N summed cones into ONE homogeneous-slab in-scatter glow = Lacc*(1-exp(-Tau))/Tau
+// -- bounded by the medium's intensive equilibrium radiance regardless of cone count --
+// and composites it OVER the HDR scene (scene*T + glow). This replaces the v1
+// additive-sum + soft-knee-to-flat-white that collapsed dense overlap into a cream blob
+// on the real 31-bot machine. The LOCAL first-person beam is excluded here (slot 13.5
+// owns it) so there is no double-draw / double-energy.
 #include "csz_light_cone.h"
 #include "csz_light_budget.h"
 #include "csz_light_registry.h"
@@ -108,7 +112,7 @@ bool    s_lookedV3;
 struct VolTarget
 {
 	GLuint fbo;
-	GLuint colorTex;        // RGBA16F: rgb = accumulated in-scatter (a unused)
+	GLuint colorTex;        // RGBA16F: rgb = accumulated in-scatter (Lacc), a = accumulated optical depth (Tau)
 	int    width, height;
 	int    gpuGeneration;
 	bool   valid;
@@ -429,9 +433,10 @@ void LightConeRegisterCvars()
 		// handled separately by the volume-buffer soft-knee.
 		s_cvarTpCap = gEngfuncs.pfnRegisterVariable( "csz_flashlight_tp_cap", "2.5", FCVAR_CLIENTDLL );
 	if( s_cvarTpKnee == NULL )
-		// Volume-buffer soft-knee compression knee (0..1). Applied to the upsampled
-		// VOLUME radiance ONLY (never the HDR scene) to roll off N-cone overlap before
-		// composite. Lower = compresses sooner. Artistic, not physical.
+		// Mild safety shoulder (0..1) on the ALREADY-bounded slab `glow` (never the HDR
+		// scene). The N-cone energy bound is now the slab combination glow=Lacc*(1-exp(
+		// -Tau))/Tau in Pass 2; this knee only trims the rare bright head-on core so it
+		// cannot pure-white. Lower = trims sooner. Artistic, not the primary bound.
 		s_cvarTpKnee = gEngfuncs.pfnRegisterVariable( "csz_flashlight_tp_knee", "0.8", FCVAR_CLIENTDLL );
 	if( s_cvarTpHalo == NULL )
 		// Two-lobe phase halo weight w1 (0..1): forward lobe gets w0 = 1-w1, halo lobe
@@ -565,9 +570,11 @@ void LightConeRender( const ViewSetup &view )
 	float fHalfSize[2] = { (float)halfW, (float)halfH };
 
 	// ===================== Pass 1: half-res cone accumulation =================
-	// Each non-local cone mesh adds its energy-conserving in-scatter into the separate
-	// half-res buffer (kBlendAddPremul = ONE,ONE on rgb). Depth test/write OFF (no
-	// depth attachment); occlusion is the in-shader scene-depth far clamp.
+	// Each non-local cone mesh adds its energy-conserving in-scatter (rgb = Lacc) AND its
+	// lit optical depth (a = Tau) into the separate half-res buffer (kBlendAddPremul =
+	// ONE,ONE sums BOTH rgb and alpha). Depth test/write OFF (no depth attachment);
+	// occlusion is the in-shader scene-depth far clamp. Pass 2 collapses (Lacc,Tau) into
+	// one bounded slab -- that combination is the post-accumulation N-cone energy bound.
 	BindFbo( s_vol.fbo );
 	glViewport( 0, 0, halfW, halfH );
 	SetDepthTest( false );
@@ -622,12 +629,18 @@ void LightConeRender( const ViewSetup &view )
 	BindVao( 0 );
 	SkyComposeRestoreTmus();
 
-	// =============== Pass 2: bilateral upsample + soft-knee + composite =======
+	// =============== Pass 2: bilateral upsample + slab combine + composite ====
+	// kBlendPremulOver (ONE, ONE_MINUS_SRC_ALPHA): the shader outputs the bounded slab
+	// in-scatter `glow` (premultiplied) in rgb and the slab coverage `opacity` in alpha,
+	// so dst = glow + scene*(1-opacity) = scene*T + glow. Dense overlapping cones replace
+	// the scene with the energy-bounded warm glow instead of ADDING white on top (the v1
+	// additive-into-HDR was the cream/white-wash failure mode); Tau==0 pixels (opacity 0)
+	// are left byte-identical, so sky / non-beam pixels are untouched.
 	BindFbo( hdrFbo );
 	glViewport( view.viewport[0], view.viewport[1], view.viewport[2], view.viewport[3] );
 	SetDepthTest( false );
 	SetDepthWrite( false );
-	SetBlend( kBlendAddPremul );
+	SetBlend( kBlendPremulOver );
 	SetCull( false );
 
 	UseProgram( s_gpu.up.program );

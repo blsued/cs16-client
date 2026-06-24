@@ -38,26 +38,40 @@
 // time -- see EnsureBuilt(): the final FS = "#version 330 core\n" + reconstruct +
 // body. GLES3/WebGL2 intersection only (code-standards section 7).
 //
-// === DESIGN-SPEC §V2 third-person air-cone rebuild (post-red-team, CANONICAL) ===
-// The third-person (NON-LOCAL) flashlight air cone is now a TWO-PASS half-res path,
-// replacing the old full-res-into-HDR mesh march:
+// === DESIGN-SPEC §V2.1 third-person air-cone rebuild v2 (real-machine NO-GO fix) ===
+// REAL-MACHINE FAILURE (2026-06-24, 31-bot dense overlap): the v1 path summed each
+// cone's emergent in-scatter ADDITIVELY and then clamped the sum with a soft-knee that
+// asymptotes to a flat WHITE ceiling (1.0). The energy bound WAS post-accumulation, but
+// it was the wrong bound: N overlapping cones drove the sum past the knee, so wide
+// regions collapsed to a flat detail-less ~1.0 plateau, and the purely ADDITIVE
+// composite could only wash the scene + sky brighter -> the cream/white blob, no cone
+// separability, no scene/sky readability (PROBLEM-RECORD-2026-06-24).
+//
+// v2 ROOT FIX -- combine N cones as ONE participating medium, not a sum of N media:
 //   Pass 1 (kConeFsBody, half-res accumulation buffer): every visible non-local cone
 //     mesh proxy is drawn ADDITIVELY into a separate half-res RGBA16F buffer. Each
 //     covered fragment runs an ENERGY-CONSERVING Beer-Lambert single-scatter march
-//     (inScatter += T*(sigmaS/sigmaE)*(1-exp(-sigmaE*dt))*phase*spotAtten; T*=exp(-sigmaE*dt)),
-//     a TWO-LOBE Henyey-Greenstein phase (forward g + dim halo g*0.5, weights w0+w1<=1),
-//     a Frostbite squared angular falloff, a per-light radiance cap, and a STATIC
-//     interleaved-gradient jitter (no temporal animation -> no boiling without TAA).
-//     The march is bounded at BOTH ends (near plane .. min(cone far extent, opaque
-//     scene depth)); against sky it still marches only the finite cone extent, so the
-//     energy-conserving integral keeps it faint instead of a full-bright sky blowout.
-//   Pass 2 (kConeUpFsBody, full-res composite): the half-res buffer is upsampled with
-//     a depth-aware BILATERAL filter (ported from the first-person fog volume:
-//     5x5 gaussian spatial x depth-agreement weights + a sharp nearest-depth fallback
-//     at discontinuities -> no leak across silhouettes onto walls/sky), an
-//     order-independent per-pixel soft-knee compression is applied ON THE VOLUME
-//     BUFFER VALUE ONLY (bounds N-cone overlap wash; artistic clamp, NOT physical),
-//     and the result is ADDED into the HDR scene.
+//     (inScatter += T*(sigmaS/sigmaE)*(1-exp(-sigmaE*dt))*phase*spotAtten; T*=exp(-sigmaE*dt))
+//     and ALSO accumulates this cone's LIT scattering optical depth tau += sigmaE*vis*dt.
+//     rgb = sum of per-cone in-scatter (Lacc); .a = sum of per-cone optical depth (Tau)
+//     -- both summed for free by the ONE,ONE blend. Two-lobe HG phase, Frostbite squared
+//     angular falloff, per-light cap, STATIC jitter as before. March bounded at BOTH
+//     ends (near .. min(cone far, opaque scene depth)); sky keeps the finite cone extent.
+//   Pass 2 (kConeUpFsBody, full-res composite): the rgba buffer is upsampled with a
+//     depth-aware BILATERAL filter (ported from the first-person fog volume: 5x5 gaussian
+//     spatial x depth-agreement weights + sharp nearest-depth fallback -> no leak across
+//     silhouettes). The N summed cones are then collapsed into a SINGLE homogeneous-slab
+//     in-scatter using the analytic closed form:
+//         glow    = Lacc * (1 - exp(-Tau)) / Tau        // emergent in-scatter
+//         opacity = 1 - exp(-Tau)                       // slab coverage (1 - transmittance)
+//     glow is BOUNDED by the medium's intensive equilibrium radiance Lbar = Lacc/Tau
+//     REGARDLESS of cone count: both Lacc and Tau scale ~N, so glow -> Lbar as N->inf
+//     (dense overlap can never exceed a single cone's equilibrium -> NO white runaway).
+//     The result is composited with premultiplied OVER (kBlendPremulOver): scene*T + glow
+//     -- so dense beams REPLACE the scene with a bounded warm glow instead of ADDING white
+//     on top, and faint beams (small Tau) leave the scene/sky essentially untouched. A
+//     final mild soft-knee on `glow` only trims the rare head-on core; it no longer drives
+//     wide regions to a flat plateau because glow is already cone-shaped and bounded.
 // The LOCAL first-person beam is never drawn here (slot 13.5 owns it).
 
 // -----------------------------------------------------------------------------
@@ -96,10 +110,14 @@ void main()
 )GLSL";
 
 // -----------------------------------------------------------------------------
-// Pass 1 FS -- half-res energy-conserving single-scatter beam. Output = IN-SCATTER
-// ONLY (linear-HDR radiance to ADD), accumulated additively (kBlendAddPremul) across
-// every visible non-local cone into the half-res buffer. .a is unused (the upsample
-// re-derives each tap's surface depth from the full-res depth texture).
+// Pass 1 FS -- half-res energy-conserving single-scatter beam. Output rgb = IN-SCATTER
+// (linear-HDR radiance), .a = this cone's LIT scattering optical depth (tau). Both are
+// accumulated additively (kBlendAddPremul = ONE,ONE on rgb AND alpha) across every
+// visible non-local cone into the half-res buffer, so the buffer holds (Lacc, Tau) =
+// (sum of in-scatter, sum of optical depth). Pass 2 collapses (Lacc,Tau) into one
+// bounded slab in-scatter -- THIS is the post-accumulation N-cone energy bound. The
+// upsample re-derives each tap's surface depth from the full-res depth texture, so no
+// view-depth needs to be stored here.
 //   * gl_FrontFacing discard => exactly ONE fragment per covered pixel (winding-
 //     independent single coverage; no double-add, no rim seam).
 //   * march extent = view-ray x cone bounding sphere, clamped near (u_zNear) and FAR
@@ -109,8 +127,9 @@ void main()
 //   * per sample: exact point-in-cone (axial s in [0,len] + angle), Frostbite squared
 //     angular falloff (tight band), axial tip-bright falloff with a feathered base,
 //     soft camera-side occlusion band, TWO-LOBE HG phase, and the Beer-Lambert slice.
-//   * per-light radiance cap clamps a single cone's contribution; cross-cone overlap
-//     is compressed by the soft-knee in Pass 2 (on the half-res buffer only).
+//   * per-light radiance cap clamps a single cone's in-scatter; cross-cone overlap is
+//     bounded by the analytic homogeneous-slab combination in Pass 2 (glow=Lacc*(1-
+//     exp(-Tau))/Tau), NOT by per-cone clamping -- the bound is on the accumulated sum.
 // -----------------------------------------------------------------------------
 static const char kConeFsBody[] = R"GLSL(
 uniform sampler2D u_depthTex;   // FULL-RES scene depth (raw, compare-mode NONE); sky unit
@@ -222,6 +241,7 @@ void main()
 	float angOffset = -u_cosOuter * angScale;
 
 	vec3 acc = vec3( 0.0 );
+	float tau = 0.0;                              // this cone's LIT scattering optical depth
 	for( int i = 0; i < u_steps; i++ )
 	{
 		float t = tNear + ( float( i ) + jitter ) * dt;
@@ -263,6 +283,11 @@ void main()
 		// Energy-conserving Beer-Lambert slice: bounded by construction, so neither a
 		// long cone nor many overlapping cones can grow unbounded.
 		acc += Tcur * phase * u_color * vis * slice;
+		// Accumulate this cone's LIT scattering optical depth (geometric, brightness-
+		// independent). Summed across cones in .a, it drives the Pass-2 slab combination
+		// glow = Lacc*(1-exp(-Tau))/Tau, which bounds the N-cone in-scatter to the medium
+		// equilibrium radiance Lbar = Lacc/Tau regardless of how many cones overlap.
+		tau += u_sigmaE * vis * dt;
 	}
 
 	acc *= u_intensity;
@@ -273,7 +298,9 @@ void main()
 	if( m > u_cap )
 		acc *= u_cap / max( m, 1e-4 );
 
-	fragColor = vec4( acc, 0.0 );
+	// rgb = in-scatter (Lacc term), .a = optical depth (Tau term). The per-light cap
+	// scales only the radiance, never tau, so it cannot distort the cross-cone bound.
+	fragColor = vec4( acc, tau );
 }
 )GLSL";
 
@@ -291,21 +318,33 @@ void main()
 )GLSL";
 
 // -----------------------------------------------------------------------------
-// Pass 2 FS -- depth-aware (bilateral) upsample of the half-res in-scatter, ADDED
-// into the full-res HDR buffer (kBlendAddPremul). PORTED from the first-person fog
-// volume upsample (csz_fog_volume_shaders.inl): 5x5 gaussian spatial weights x a
-// depth-agreement weight, with a SHARP nearest-depth fallback at large depth
-// discontinuities so the soft volume never leaks across geometry silhouettes onto
+// Pass 2 FS -- depth-aware (bilateral) upsample of the half-res (Lacc, Tau) buffer,
+// then collapse the N summed cones into ONE homogeneous-slab in-scatter and composite
+// with premultiplied OVER (kBlendPremulOver: dst = scene*T + glow). PORTED from the
+// first-person fog volume upsample (csz_fog_volume_shaders.inl): 5x5 gaussian spatial
+// weights x a depth-agreement weight, with a SHARP nearest-depth fallback at large
+// depth discontinuities so the soft volume never leaks across geometry silhouettes onto
 // walls / sky (pitfall #6: soft depth-weight-only rejection still bleeds -> add the
-// nearest pick). Each tap's surface depth is re-derived from the FULL-RES depth
-// texture at the tap's uv (the same depth the half-res march bounded against), so no
-// linViewZ needs to be stored in the half-res buffer.
+// nearest pick). The bilateral filter carries rgb AND alpha (Tau) so the optical depth
+// also respects silhouettes. Each tap's surface depth is re-derived from the FULL-RES
+// depth texture at the tap's uv, so no view-depth needs to be stored in the buffer.
 //
-// Before compositing, a per-pixel soft-knee compresses the upsampled VOLUME radiance
-// ONLY (never the HDR scene): order-independent, it bounds the N-cone overlap peak so
-// crowded beams roll off smoothly instead of clipping to a flat white plateau. This
-// compression is an ARTISTIC clamp, not physical energy conservation -- the physical
-// bound is the Beer-Lambert slice + per-light cap in Pass 1; this only tames the sum.
+// THE N-CONE ENERGY BOUND (real-machine NO-GO fix): rather than adding the summed
+// in-scatter Lacc directly (v1: unbounded sum -> soft-knee clamp to a flat white 1.0
+// plateau -> cream blob), treat the summed cones as a single participating medium of
+// combined optical depth Tau with average source Lacc/Tau, and apply the analytic
+// homogeneous-slab solution:
+//     f       = (1 - exp(-Tau)) / Tau        (=1 at Tau->0, ->1/Tau at Tau->inf)
+//     glow    = Lacc * f                     (emergent in-scatter; premultiplied)
+//     opacity = 1 - exp(-Tau)                (slab coverage = 1 - transmittance)
+// glow -> Lacc/Tau = the medium's INTENSIVE equilibrium radiance as Tau grows, so no
+// number of overlapping cones can push it past a single cone's equilibrium -> the white
+// runaway is mathematically impossible. Faint beams (small Tau) give f~=1 -> glow~=Lacc
+// (the v1 single-cone look is preserved). Compositing OVER (scene*T + glow) makes dense
+// beams REPLACE the scene with the bounded warm glow instead of ADDING white on top, and
+// leaves untouched pixels (Tau==0 -> opacity 0) exactly identical. The final soft-knee on
+// `glow` is now only a mild safety shoulder on the rare head-on core (glow is already
+// bounded + cone-shaped, so it no longer flattens wide regions).
 // -----------------------------------------------------------------------------
 static const char kConeUpFsBody[] = R"GLSL(
 uniform sampler2D u_inscatter;   // half-res march output (rgb = in-scatter); sky unit
@@ -318,7 +357,8 @@ out vec4 fragColor;
 
 // Soft-knee: compress the channel max above `knee` toward 1.0 (hue-preserving). Any
 // value with maxRGB <= knee is returned unchanged. Mirrors highlightShoulder() but is
-// applied here to the VOLUME buffer only, pre-composite -- the HDR scene is untouched.
+// applied here only to the already-bounded `glow` as a mild head-on safety shoulder --
+// the HDR scene is untouched (the N-cone bound is the slab combination, not this knee).
 vec3 softKnee( vec3 c, float knee )
 {
 	float m = max( max( c.r, c.g ), c.b );
@@ -339,10 +379,10 @@ void main()
 	vec2 ctr = floor( t + 0.5 );
 	float inv2s2 = 1.0 / ( 2.0 * u_smoothSigma * u_smoothSigma );
 
-	vec3 sum = vec3( 0.0 );
+	vec4 sum = vec4( 0.0 );           // rgb = Lacc (in-scatter), a = Tau (optical depth)
 	float wsum = 0.0;
 	float bestDz = 1e30;
-	vec3  bestRgb = vec3( 0.0 );
+	vec4  bestTap = vec4( 0.0 );
 
 	for( int j = -2; j <= 2; j++ )
 	{
@@ -350,7 +390,7 @@ void main()
 		{
 			vec2 idx = ctr + vec2( float( i ), float( j ) );
 			vec2 tap = ( idx + 0.5 ) / u_halfSize;
-			vec3 rgb = texture( u_inscatter, tap ).rgb;
+			vec4 rgba = texture( u_inscatter, tap );           // .rgb = Lacc, .a = Tau
 			float dTap = linViewZ( texture( u_depthTex, tap ).r );
 
 			vec2 off = idx - t;                                // offset from the continuous sample pos
@@ -360,29 +400,48 @@ void main()
 			// would over-blur near and over-sharpen far). 5% + 1 unit.
 			float dw = exp( -dz / ( 0.05 * dC + 1.0 ) );
 			float w = sw * dw + 1e-5;
-			sum += rgb * w;
+			sum += rgba * w;
 			wsum += w;
 
 			if( dz < bestDz )                                  // track the nearest-depth tap
 			{
 				bestDz = dz;
-				bestRgb = rgb;
+				bestTap = rgba;
 			}
 		}
 	}
 
-	vec3 result = sum / max( wsum, 1e-4 );
+	vec4 result = sum / max( wsum, 1e-4 );
 
 	// Sharp nearest-depth fallback: when even the closest tap disagrees in depth by
 	// more than ~ (10% + 4u) of the center distance, ALL taps straddle a silhouette ->
 	// lerp toward the single nearest-depth tap instead of the leaked bilinear blend.
+	// rgb AND Tau follow the same pick so the optical depth never leaks across edges.
 	float thresh = 0.1 * dC + 4.0;
 	float discFall = clamp( ( bestDz - thresh ) / thresh, 0.0, 1.0 );
-	result = mix( result, bestRgb, discFall );
+	result = mix( result, bestTap, discFall );
 
-	// Soft-knee compress the VOLUME radiance only (artistic overlap clamp), then ADD.
-	result = softKnee( result, u_knee );
+	// ---- N-cone energy bound: collapse the summed cones into ONE homogeneous slab ----
+	// Lacc = sum of per-cone in-scatter, Tau = sum of per-cone optical depth. Treat them
+	// as a single medium of optical depth Tau with average source Lacc/Tau and take the
+	// analytic slab emergent radiance glow = Lacc*(1-exp(-Tau))/Tau. This is bounded by
+	// the INTENSIVE equilibrium radiance Lbar = Lacc/Tau no matter how many cones overlap
+	// (both Lacc and Tau scale ~N, so glow -> Lbar, never a white runaway). f -> 1 as
+	// Tau -> 0 so faint single cones keep their v1 linear-additive look.
+	vec3  Lacc = result.rgb;
+	float Tau  = max( result.a, 0.0 );
+	float T    = exp( -Tau );                       // combined transmittance
+	float f    = ( Tau > 1e-3 ) ? ( 1.0 - T ) / Tau : 1.0;
+	vec3  glow = Lacc * f;                           // bounded emergent in-scatter
 
-	fragColor = vec4( result, 0.0 );
+	// Mild safety shoulder ONLY on the (already bounded, cone-shaped) glow: trims the
+	// rare bright head-on core without flattening wide regions into a plateau.
+	glow = softKnee( glow, u_knee );
+
+	// Premultiplied OVER: caller sets kBlendPremulOver -> dst = glow + scene*(1-opacity)
+	// = scene*T + glow. Dense beams replace the scene with the bounded warm glow; faint
+	// beams (Tau~0 -> opacity~0) leave the scene/sky untouched (no additive white wash).
+	float opacity = 1.0 - T;                         // slab coverage = 1 - transmittance
+	fragColor = vec4( glow, opacity );
 }
 )GLSL";
