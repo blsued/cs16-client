@@ -317,18 +317,20 @@ void main()
 	// cone -- or with no flashlight (u_spotRange<=0) -- clearFactor=0 and the extinction byte
 	// is UNCHANGED from the server value (gameplay blackout preserved; cszFogT3 itself unchanged).
 	float fogA = u_fog.w;
-	float clearFactor = 0.0;
 	// LOCAL first-person cone: camera == apex, so the cheap view-ray angle test IS the cone
-	// membership (unchanged from the approved first-person defog).
+	// membership (unchanged from the approved first-person defog). Keeps the floorK (u_spotDefog)
+	// medium so the viewer's own beam still reads as a lit shaft through thin fog.
+	float localClear = 0.0;
 	if( u_spotRange > 0.0 )
 	{
 		float ang      = smoothstep( u_spotCosOuter, u_spotCosInner, dot( rd, u_spotDir ) );
 		float distFall = 1.0 - smoothstep( u_spotRange * 0.6, u_spotRange, tLen );
-		clearFactor    = ang * distFall;                         // 1 = cone core in range, 0 = rim/outside/no-light
+		localClear     = ang * distFall;                         // 1 = cone core in range, 0 = rim/outside/no-light
 	}
 	// NON-LOCAL cones (v3): camera != apex, so use a true point-in-cone test on the fragment
 	// world pos. axial s in (0,len], angle off-axis -> cosAx vs the rim cos band, plus the same
 	// far distance falloff. MAX over all cones -> overlap can never over-clear (no brightening).
+	float nlClear = 0.0;
 	for( int i = 0; i < u_nlDefogCount; i++ )
 	{
 		vec3  ap = v_worldPos - u_nlDefogApex[i];
@@ -338,9 +340,19 @@ void main()
 		float cosAx    = s / max( length( ap ), 1e-4 );
 		float ang      = smoothstep( u_nlDefogCosOuter[i], u_nlDefogCosInner[i], cosAx );
 		float distFall = 1.0 - smoothstep( u_nlDefogLen[i] * 0.6, u_nlDefogLen[i], s );
-		clearFactor    = max( clearFactor, ang * distFall );
+		nlClear        = max( nlClear, ang * distFall );
 	}
-	fogA *= mix( 1.0, u_spotDefog, clearFactor );                // core -> floorK*a (see-through); outside -> a unchanged
+	// FIX v3.2 (air-halo): third-person (non-local) cones clear the fog to ZERO so the medium
+	// fully DISAPPEARS inside the cone (USER: "照到雾雾应直接消失" -- no residual lit haze),
+	// instead of leaving the floorK (~5%) fog the first-person beam keeps. multLocal floors at
+	// u_spotDefog; multNl floors at 0. Take min() (the MORE-clearing of the two extinction
+	// multipliers) -> most fog removed. nlClear is MAX-combined over cones, so N overlapping
+	// non-local cones clear no more than one (overlap never brightens; GL_MAX-equivalent here).
+	// First-person-only pixels (nlClear==0 -> multNl==1) reduce to mix(1,u_spotDefog,localClear)
+	// -- byte-identical to the previous single-mix path, so first-person is untouched.
+	float multLocal = mix( 1.0, u_spotDefog, localClear );       // [floorK, 1]
+	float multNl    = 1.0 - nlClear;                             // mix(1.0, 0.0, nlClear): [0, 1]
+	fogA *= min( multLocal, multNl );                            // core -> fog gone (NL) / floorK (local); outside -> unchanged
 	vec3 aRGB = fogA * u_fogParams2.xyz;                          // per-channel extinction (b_ch = a * tint)
 	vec3 T = cszFogT3( v_worldPos, u_camPos, aRGB, u_fogParams.x, u_fogParams.z,
 		u_fogParams.w, u_fogParams3.z, dens );

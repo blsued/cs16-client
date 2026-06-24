@@ -284,7 +284,7 @@ void main()
 		dens = mix( 1.0, 2.0 * cszFogNoise( v_worldPos.xy, u_fogParams3.x, u_fogParams3.y, u_fogParams3.w ), u_fogParams2.w );
 	// v3 NON-LOCAL flashlight defog: lower this model's fog extinction when it sits inside any
 	// other player's flashlight cone (so enemies in a beam are visible through the fog). MAX over
-	// cones -> overlap never over-clears. count==0 -> clearFactor 0 -> mix == identity (no-op).
+	// cones -> overlap never over-clears. count==0 -> clearFactor 0 -> identity (no-op).
 	float fogA = u_fog.w;
 	float clearFactor = 0.0;
 	for( int i = 0; i < u_nlDefogCount; i++ )
@@ -298,7 +298,13 @@ void main()
 		float distFall = 1.0 - smoothstep( u_nlDefogLen[i] * 0.6, u_nlDefogLen[i], s );
 		clearFactor    = max( clearFactor, ang * distFall );
 	}
-	fogA *= mix( 1.0, u_spotDefog, clearFactor );
+	// FIX v3.2 (air-halo): non-local cones clear the model's fog to ZERO (full disappear),
+	// matching the world surface so an enemy inside a third-person cone reads at the same
+	// fog-free clarity as the ground under them (USER: fog must vanish in the cone, no haze).
+	// Was mix(1.0, u_spotDefog, clearFactor) (floorK ~5% residual). MAX-combined clearFactor
+	// keeps overlap bounded. u_spotDefog is now unused here (world FS still drives first-person
+	// floorK); the C++ glUniform is location-guarded so the dropped reference is harmless.
+	fogA *= ( 1.0 - clearFactor );                               // mix( 1.0, 0.0, clearFactor )
 	vec3 aRGB = fogA * u_fogParams2.xyz;                          // per-channel extinction (b_ch = a * tint)
 	vec3 T = cszFogT3( v_worldPos, u_camPos, aRGB, u_fogParams.x, u_fogParams.z,
 		u_fogParams.w, u_fogParams3.z, dens );

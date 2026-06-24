@@ -132,12 +132,28 @@ void main()
 	// view dir gives |facing|: ~1 where the shell faces the viewer (DISCARD -> no fill, no
 	// plume/cloud), ~0 at the silhouette (the cone's outline). A narrow smoothstep turns the
 	// silhouette into a thin CRISP line. MAX blend bounds overlap to a single cone.
-	vec3  n       = normalize( cross( dFdx( vWorld ), dFdy( vWorld )));
+	// NaN guard (acctB code-review nit): cross(dFdx,dFdy) is the ZERO vector on a triangle
+	// with no screen-space area (sub-pixel sliver / exactly edge-on). normalize(0) is NaN on
+	// some drivers (Intel/AMD/Mesa) and would paint a garbage fragment. Test the geometric
+	// normal's length BEFORE normalizing; degenerate -> no facing basis -> treat as face-on
+	// (facing 1 -> discarded just below), so a degenerate face never paints.
+	vec3  ng      = cross( dFdx( vWorld ), dFdy( vWorld ));
+	float ngLen   = length( ng );
+	vec3  n       = ( ngLen > 1e-12 ) ? ( ng / ngLen ) : vec3( 0.0 );   // safe normalize (no NaN)
 	vec3  viewDir = normalize( u_camPos - vWorld );
-	float facing  = abs( dot( n, viewDir ));      // 1 = face-on, 0 = edge-on (silhouette)
-	float rim     = smoothstep( 0.32, 0.10, facing );   // thin hard rim only near the silhouette
+	float facing  = ( ngLen > 1e-12 ) ? abs( dot( n, viewDir )) : 1.0;  // 1 = face-on, 0 = edge-on (silhouette)
+	// FIX v3.2 (air-halo): TIGHTEN the silhouette band so the rim is a thin HARD outline, not
+	// a wide soft glow. The shell is flat-faceted, so `facing` is per-FACE constant (the face
+	// normal) -> the rim is the set of near-edge-on FACES; the old smoothstep(0.32,0.10) lit
+	// every face with facing<0.32 (~2-3 faces each side), a broad band that over the dark night
+	// sky read as airborne HAZE / a fog cloud above the pool (the forbidden air glow, codex #3
+	// FAIL). Narrowing to (0.16,0.0) keeps only the SINGLE most edge-on face each side -> a thin
+	// crisp cone outline; the air off that one-face line draws NOTHING and returns to the night
+	// baseline. u_edge (live cvar csz_flashlight_tp_edge) stays the faintness knob; MAX blend
+	// still bounds overlap to a single cone.
+	float rim     = smoothstep( 0.16, 0.0, facing );    // thin hard silhouette line only
 	if( rim <= 0.0 )
-		discard;                                  // shell interior: draw nothing (kills the fog-cloud fill)
+		discard;                                  // off the silhouette: draw nothing (no haze/cloud fill)
 	fragColor = vec4( u_color * u_edge * rim, 1.0 );
 }
 )GLSL";
