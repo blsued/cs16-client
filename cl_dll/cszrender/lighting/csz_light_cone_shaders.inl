@@ -130,6 +130,7 @@ uniform float u_sigmaE;         // extinction coefficient (csz_flashlight_tp_sig
 uniform float u_cap;            // per-light radiance cap (csz_flashlight_tp_cap)
 uniform int   u_steps;          // bounded march sample count
 uniform float u_surfFade;       // non-local surface-fade band scale (>0); shaft tapers into the pool
+in vec3  vWorld;                // world-space cone-surface position (matches kConeVs `out vec3 vWorld`)
 out vec4 fragColor;
 
 // STATIC interleaved-gradient-noise dither (Jimenez). DESIGN-SPEC §V2/pitfall #7:
