@@ -88,6 +88,8 @@ cvar_t *s_cvarShadow;		// csz_light_shadow (B-class quality seam, default 1)
 cvar_t *s_cvarFlashlightReal;	// csz_flashlight_real (default 1: feed the table from live player flashlights)
 cvar_t *s_cvarV3;		// csz_flashlight_v3 (owned by RegisterLightingCommands); the local/non-local
 bool   s_lookedV3;		// split master. Fetched lazily (mirrors the cone + fog-volume v3 latch).
+cvar_t *s_cvarNlPool;		// csz_flashlight_nl_pool (§V2 #4): non-local ground-pool intensity scale
+bool   s_lookedNlPool;		// (0 = beam-only legacy v3; >0 = re-enabled SOFT projected-spot pool). Lazy.
 
 // L6c dev-override latch. The csz_flashlight_test fixture and the real per-player
 // feed both write the SAME state table with owner keys that overlap (test uses
@@ -670,6 +672,19 @@ void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, 
 	}
 	bool v3 = ( s_cvarV3 == NULL ) ? true : ( s_cvarV3->value >= 0.5f );
 
+	// §V2 #4: re-enable a SOFT non-local ground pool. csz_flashlight_nl_pool scales the
+	// direct-pool brightness for other players' beams; the v3 split below used to drop
+	// the non-local pool wholesale (a naive full-strength pool floated a hard "ring" on
+	// the ground). With the §V2 air cone now drawing the connecting shaft (光柱), a soft
+	// reduced pool reads as "where the beam lands" (光打到哪). 0 = beam-only (legacy v3).
+	if( !s_lookedNlPool )
+	{
+		s_lookedNlPool = true;
+		s_cvarNlPool = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_nl_pool" );
+	}
+	float nlPool = ( s_cvarNlPool != NULL ) ? s_cvarNlPool->value : 0.5f;
+	if( nlPool < 0.0f ) nlPool = 0.0f;
+
 	float now = ClientTime();
 	int active = 0;
 	int drawn = 0;
@@ -699,15 +714,28 @@ void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, 
 		if( light->budgetTier == kBudgetCull )
 			continue;
 
-		// Local/non-local split: under v3, only the local first-person beam paints a
-		// direct lit pool (圈). Non-local beams are beam-only (光柱 via the world cone),
-		// so skip their direct surface pool here -- it is the stray third-person circle.
-		if( v3 && !light->desc.isLocal )
+		// Local/non-local split: under v3, the local first-person beam paints its crisp
+		// direct lit pool (圈). Non-local beams (§V2 #4) get a SOFT, reduced ground pool
+		// (csz_flashlight_nl_pool) that connects visually to the §V2 air shaft -- or are
+		// beam-only when nl_pool == 0 (legacy v3 = no stray third-person circle).
+		bool nonLocal = ( v3 && !light->desc.isLocal );
+		if( nonLocal && nlPool <= 0.0f )
 			continue;
 
 		SpotLightParams params;
 
 		g_lights.BuildSpotParams( *light, params );
+		if( nonLocal )
+		{
+			// Soft non-local pool: scale the brightness down and soften the cone edge +
+			// kill the central hotspot so the pool is a gentle radial falloff rather than
+			// a hard floating ring. The shader already bounds it to the cone frustum +
+			// range (atten^2) + ndotl + (cheap-tier) shadowless occlusion. Artistic shape;
+			// the local first-person profile is left exactly as BuildSpotParams set it.
+			params.directGain *= nlPool;
+			params.edgeExp = 1.2f;        // softer boundary than the crisp local 2.5
+			params.hotspotGain = 0.0f;    // even pool, no central hot core
+		}
 		g_world.DrawLitAdditive( mainView, params );
 		// Brush submodels (func_ boxes) are a separate VBO structure the world lit
 		// pass never touches; without this the flashlight's direct pool skips them
@@ -746,6 +774,11 @@ void RegisterLightingCommands()
 	gEngfuncs.pfnRegisterVariable( "csz_flashlight_hotspot", "1.4", FCVAR_CLIENTDLL );        // central hotspot gain
 	gEngfuncs.pfnRegisterVariable( "csz_flashlight_hotspot_sharp", "8.0", FCVAR_CLIENTDLL );  // hotspot tightness
 	gEngfuncs.pfnRegisterVariable( "csz_flashlight_direct_gain", "1.8", FCVAR_CLIENTDLL );    // direct-pool brightness
+
+	// §V2 #4: non-local (third-person) ground-pool intensity scale. Default 0.5 = a soft,
+	// reduced projected-spot pool re-enabled for other players' beams (connects to the
+	// §V2 air shaft); 0 = beam-only (legacy v3, no non-local pool). Live-tunable.
+	gEngfuncs.pfnRegisterVariable( "csz_flashlight_nl_pool", "0.5", FCVAR_CLIENTDLL );
 
 	if( s_cvarTestLight == NULL )
 		s_cvarTestLight = gEngfuncs.pfnRegisterVariable( "csz_testlight", "0", FCVAR_CLIENTDLL );
