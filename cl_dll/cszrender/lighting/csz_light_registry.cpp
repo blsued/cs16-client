@@ -52,7 +52,7 @@ const float kDegToRadHalf = 3.14159265358979323846f / 360.0f;	// degrees -> radi
 
 // L5R direct-profile cvars (registered at init by RegisterLightingCommands). Looked up
 // lazily by name and re-fetched until non-NULL so registration order never latches a miss.
-cvar_t *s_v3, *s_edge, *s_hot, *s_hotSharp, *s_dgain;
+cvar_t *s_v3, *s_edge, *s_hot, *s_hotSharp, *s_dgain, *s_atten;
 
 float ReadCvar( cvar_t *cv, float fallback )
 {
@@ -208,10 +208,11 @@ void LightRegistry::BuildSpotParams( const ActiveLight &light, SpotLightParams &
 	// shaders get the crisp analytic pool + central hotspot + direct gain; v3 0 -> the
 	// shaders fall back to the legacy linear cone for A/B (defaults match the cvar reg).
 	out.v3           = ( ReadCvar( GetCvarCached( &s_v3, "csz_flashlight_v3" ), 1.0f ) >= 0.5f ) ? 1.0f : 0.0f;
-	out.edgeExp      = ReadCvar( GetCvarCached( &s_edge,     "csz_flashlight_edge" ),          2.5f );
-	out.hotspotGain  = ReadCvar( GetCvarCached( &s_hot,      "csz_flashlight_hotspot" ),       1.4f );
-	out.hotspotSharp = ReadCvar( GetCvarCached( &s_hotSharp, "csz_flashlight_hotspot_sharp" ), 8.0f );
-	out.directGain   = ReadCvar( GetCvarCached( &s_dgain,    "csz_flashlight_direct_gain" ),   1.8f );
+	out.edgeExp      = ReadCvar( GetCvarCached( &s_edge,     "csz_flashlight_edge" ),          1.5f );  // v4 defaults mirror RegisterLightingCommands
+	out.hotspotGain  = ReadCvar( GetCvarCached( &s_hot,      "csz_flashlight_hotspot" ),       9.0f );
+	out.hotspotSharp = ReadCvar( GetCvarCached( &s_hotSharp, "csz_flashlight_hotspot_sharp" ), 5.0f );
+	out.directGain   = ReadCvar( GetCvarCached( &s_dgain,    "csz_flashlight_direct_gain" ),   3.2f );
+	out.attenExp     = ReadCvar( GetCvarCached( &s_atten,    "csz_flashlight_atten" ),         1.2f );  // v4 throw falloff
 	out.maxBlend     = false;   // FIX-1: default additive (local); RunLightPasses sets it for non-local pools
 }
 

@@ -83,7 +83,7 @@ struct PassLocs
 	int uRimStrength, uRimPower;					// S4 competitive rim light (base program only)
 	int uLightOrigin, uLightDir, uLightColor;			// lit program only
 	int uLightRadius, uCosInner, uCosOuter, uMatShadow, uHasShadow;	// lit program only
-	int uV3, uEdgeExp, uHotspotGain, uHotspotSharp, uDirectGain;	// L5R crisp profile (lit program only)
+	int uV3, uEdgeExp, uHotspotGain, uHotspotSharp, uDirectGain, uAttenExp;	// L5R crisp profile (lit program only) + v4 throw
 };
 
 struct StudioState
@@ -164,6 +164,7 @@ void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 	out.uHotspotGain = UniformLoc( prog, "u_hotspotGain" );
 	out.uHotspotSharp = UniformLoc( prog, "u_hotspotSharp" );
 	out.uDirectGain = UniformLoc( prog, "u_directGain" );
+	out.uAttenExp = UniformLoc( prog, "u_attenExp" );	// v4 throw falloff exponent
 }
 
 void EnsureShader()
@@ -700,6 +701,7 @@ void BeginStudioLitPass( const ViewSetup &view, const SpotLightParams &light )
 	glUniform1f( locs.uHotspotGain, light.hotspotGain );
 	glUniform1f( locs.uHotspotSharp, light.hotspotSharp );
 	glUniform1f( locs.uDirectGain, light.directGain );
+	glUniform1f( locs.uAttenExp, light.attenExp );
 
 	if( light.shadowTexSlot != 0 )
 		BindTextureSlot( 2, light.shadowTexSlot );	// T7 depth map (T6: never taken)

@@ -737,15 +737,17 @@ void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, 
 			g_lights.BuildSpotParams( *light, params );
 			if( nonLocal )
 			{
-				// Non-local pool: scale brightness down + kill the central hotspot so the
-				// pool is an even radial fill, and (FIX-2) CRISPEN the cone edge (edgeExp
-				// 1.2 -> 3.0) so there is no soft white falloff halo. (FIX-1) MAX-composite:
-				// overlapping other-player pools clamp to a single cone's brightness instead
-				// of summing. The local first-person profile is left exactly as BuildSpotParams
-				// set it (additive, full crisp profile -> first-person byte-unchanged).
-				params.directGain *= nlPool;
-				params.edgeExp = 3.0f;        // FIX-2: crisp boundary, no soft white halo (was 1.2 soft)
-				params.hotspotGain = 0.0f;    // even pool, no central hot core
+				// v4 (surface-brightness, FIX-SPEC v4): the third-person pool now uses the
+				// SAME 3-tier surface profile as first-person (bright hotspot -> smooth corona
+				// -> dim spill) so other players' beams read like real flashlights instead of
+				// the dim flat blob v3.x produced (it zeroed the hotspot + over-crispened the
+				// edge). Only the BRIGHTNESS is scaled down (nl_pool, default 0.5); edgeExp +
+				// hotspotGain + hotspotSharp are now INHERITED from the cvars so the radial
+				// shape matches the first-person beam. (FIX-1) MAX-composite still bounds
+				// overlap: N other-player pools clamp to a SINGLE cone's brightness (hotspot
+				// included -- GL_MAX takes the brighter, never the sum) so overlap never
+				// brightens past one beam.
+				params.directGain *= nlPool;  // reduced TP surface brightness (hotspot RESTORED)
 				params.maxBlend = true;       // FIX-1: GL_MAX -> overlap never brightens
 			}
 			g_world.DrawLitAdditive( mainView, params );
@@ -783,10 +785,23 @@ void RegisterLightingCommands()
 	// the registry (BuildSpotParams) + the volume modules read it by name. The direct
 	// profile knobs feed kWorldLitFs/kStudioLitFs via SpotLightParams.
 	gEngfuncs.pfnRegisterVariable( "csz_flashlight_v3", "1", FCVAR_CLIENTDLL );
-	gEngfuncs.pfnRegisterVariable( "csz_flashlight_edge", "2.5", FCVAR_CLIENTDLL );           // cone-edge exponent
-	gEngfuncs.pfnRegisterVariable( "csz_flashlight_hotspot", "1.4", FCVAR_CLIENTDLL );        // central hotspot gain
-	gEngfuncs.pfnRegisterVariable( "csz_flashlight_hotspot_sharp", "8.0", FCVAR_CLIENTDLL );  // hotspot tightness
-	gEngfuncs.pfnRegisterVariable( "csz_flashlight_direct_gain", "1.8", FCVAR_CLIENTDLL );    // direct-pool brightness
+	// v4 surface-brightness profile (FIX-SPEC v4, 2026-06-24). The flashlight's brightness +
+	// structure live on SURFACES, never in the air (fpmarch stays 0 -- no air-glow). 3-tier
+	// radial profile: a bright central HOTSPOT (~10x the cone rim) -> smooth CORONA -> dim
+	// SPILL -> soft fade to the night floor. edge 2.5->1.5 = lower exponent FILLS the cone
+	// with a SMOOTH (not hard-cut) boundary -- the crisp look comes from hotspot CONTRAST, not
+	// a hard edge. hotspot 1.4->9.0 = the real ~10x bright core (was only +1.4 = a ~2.4x bump
+	// = the flat blob the USER rejected). hotspot_sharp 8.0->5.0 = a slightly wider, smoother
+	// corona around the core. direct_gain 1.8->3.2 = surface brightness restored (v3.x stripped
+	// it -> too dim). All live-tunable for USER real-machine tuning.
+	gEngfuncs.pfnRegisterVariable( "csz_flashlight_edge", "1.5", FCVAR_CLIENTDLL );           // cone-edge exponent (smooth fill)
+	gEngfuncs.pfnRegisterVariable( "csz_flashlight_hotspot", "9.0", FCVAR_CLIENTDLL );        // central hotspot gain (~10x core)
+	gEngfuncs.pfnRegisterVariable( "csz_flashlight_hotspot_sharp", "5.0", FCVAR_CLIENTDLL );  // hotspot tightness / corona width
+	gEngfuncs.pfnRegisterVariable( "csz_flashlight_direct_gain", "3.2", FCVAR_CLIENTDLL );    // direct-pool surface brightness
+	// v4 throw: distance-attenuation exponent applied to (1 - d/radius). 2.0 = the old quadratic
+	// (bright only up close -> "cleared but dark / short throw"); 1.2 ~= near-linear so the beam
+	// stays bright across the cone's effective length out to the (now 1600) lit-pool radius.
+	gEngfuncs.pfnRegisterVariable( "csz_flashlight_atten", "1.2", FCVAR_CLIENTDLL );          // throw falloff exponent
 
 	// §V2 #4: non-local (third-person) ground-pool intensity scale. Default 0.5 = a soft,
 	// reduced projected-spot pool re-enabled for other players' beams (connects to the

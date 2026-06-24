@@ -55,6 +55,7 @@ struct SpotLightParams
 	float hotspotGain;      // central hotspot peak gain (axis brightness boost)
 	float hotspotSharp;     // hotspot tightness (higher = smaller bright core)
 	float directGain;       // direct light-pool brightness multiplier
+	float attenExp;         // v4 throw: distance falloff exponent on (1-d/radius); 2=quadratic, ~1.2=softer/longer
 	// FIX-1 (v3.1): NON-LOCAL ground-pool overlap must not brighten. When true the
 	// lit-additive draw composites with glBlendEquation(GL_MAX) (dst = max(src,dst))
 	// instead of additive, so N overlapping other-player pools clamp to a SINGLE

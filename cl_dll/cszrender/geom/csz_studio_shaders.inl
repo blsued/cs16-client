@@ -386,6 +386,7 @@ uniform float u_edgeExp;
 uniform float u_hotspotGain;
 uniform float u_hotspotSharp;
 uniform float u_directGain;
+uniform float u_attenExp;        // v4 throw: distance falloff exponent on (1-d/radius)
 out vec4 fragColor;
 void main()
 {
@@ -396,7 +397,7 @@ void main()
 	float d = length( L );
 	L /= max( d, 1e-4 );
 	float atten = clamp( 1.0 - d / u_lightRadius, 0.0, 1.0 );
-	atten *= atten;
+	atten = pow( atten, u_attenExp );    // v4 throw: softer-than-quadratic (~1.2) falloff -> longer reach to radius
 	float cosAx = dot( -L, u_lightDir );                 // 1 on the spot axis, falling outward
 	float coneLegacy = clamp(( cosAx - u_cosOuter ) / max( u_cosInner - u_cosOuter, 1e-4 ), 0.0, 1.0 );
 	// Crisp pool (sharpened cone band) + central hotspot measured from the axis (see world FS note).
@@ -405,7 +406,9 @@ void main()
 	float hotspot = 1.0 + u_hotspotGain * pow( axial, u_hotspotSharp );
 	float shaped = mix( coneLegacy, edge * hotspot, u_v3 );
 	float gain   = mix( 1.0, u_directGain, u_v3 );
-	float ndotl = max( dot( normalize( v_worldNormal ), L ), 0.0 );
+	// v4 half-Lambert wrap (mirrors world FS): grazing / angled-away studio faces still read.
+	float ndotl = dot( normalize( v_worldNormal ), L ) * 0.5 + 0.5;
+	ndotl *= ndotl;
 	float shadow = 1.0;
 	if( u_hasShadow != 0 )
 		shadow = textureProj( u_shadowMap, u_matShadow * vec4( v_worldPos, 1.0 ));

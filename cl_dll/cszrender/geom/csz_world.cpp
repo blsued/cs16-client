@@ -140,7 +140,7 @@ struct WorldState
 	int litULightOrigin, litULightDir, litULightColor;
 	int litULightRadius, litUCosInner, litUCosOuter;
 	int litUMatShadow, litUHasShadow;
-	int litUV3, litUEdgeExp, litUHotspotGain, litUHotspotSharp, litUDirectGain;	// L5R crisp profile
+	int litUV3, litUEdgeExp, litUHotspotGain, litUHotspotSharp, litUDirectGain, litUAttenExp;	// L5R crisp profile + v4 throw
 	ShaderProgram depthProgram;	// shadow map depth pass (T7)
 	int depthUViewProj;
 
@@ -1250,6 +1250,7 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.litUHotspotGain = UniformLoc( s_world.litProgram, "u_hotspotGain" );
 	s_world.litUHotspotSharp = UniformLoc( s_world.litProgram, "u_hotspotSharp" );
 	s_world.litUDirectGain = UniformLoc( s_world.litProgram, "u_directGain" );
+	s_world.litUAttenExp = UniformLoc( s_world.litProgram, "u_attenExp" );	// v4 throw falloff exponent
 
 	UseProgram( s_world.litProgram.program );
 	glUniform1i( UniformLoc( s_world.litProgram, "u_texDiffuse" ), 0 );
@@ -1867,6 +1868,7 @@ void WorldRenderer::DrawLitAdditive( const ViewSetup &view, const SpotLightParam
 	glUniform1f( s_world.litUHotspotGain, light.hotspotGain );
 	glUniform1f( s_world.litUHotspotSharp, light.hotspotSharp );
 	glUniform1f( s_world.litUDirectGain, light.directGain );
+	glUniform1f( s_world.litUAttenExp, light.attenExp );
 
 	if( light.shadowTexSlot != 0 )
 		BindTextureSlot( 2, light.shadowTexSlot );	// T7 depth map (T6: never taken)
@@ -1981,6 +1983,7 @@ void WorldRenderer::DrawBrushLitAdditive( const ViewSetup &view, const SpotLight
 	glUniform1f( s_world.litUHotspotGain, light.hotspotGain );
 	glUniform1f( s_world.litUHotspotSharp, light.hotspotSharp );
 	glUniform1f( s_world.litUDirectGain, light.directGain );
+	glUniform1f( s_world.litUAttenExp, light.attenExp );
 
 	if( light.shadowTexSlot != 0 )
 		BindTextureSlot( 2, light.shadowTexSlot );

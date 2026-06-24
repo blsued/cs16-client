@@ -247,9 +247,9 @@ void SkyRenderer::RegisterDevCvars()
 	if( s_nightSkyStudioCvar == NULL )
 		s_nightSkyStudioCvar = gEngfuncs.pfnRegisterVariable( "csz_night_sky_studio", "0.20", FCVAR_CLIENTDLL );
 	if( s_nightFloorWorldCvar == NULL )
-		s_nightFloorWorldCvar = gEngfuncs.pfnRegisterVariable( "csz_night_floor_world", "0.03", FCVAR_CLIENTDLL );
+		s_nightFloorWorldCvar = gEngfuncs.pfnRegisterVariable( "csz_night_floor_world", "0.045", FCVAR_CLIENTDLL );	// v4: small readable-floor lift (unlit silhouette)
 	if( s_nightFloorStudioCvar == NULL )
-		s_nightFloorStudioCvar = gEngfuncs.pfnRegisterVariable( "csz_night_floor_studio", "0.05", FCVAR_CLIENTDLL );
+		s_nightFloorStudioCvar = gEngfuncs.pfnRegisterVariable( "csz_night_floor_studio", "0.06", FCVAR_CLIENTDLL );	// v4: unlit enemies keep a silhouette
 	if( s_nightMoonCvar == NULL )
 		s_nightMoonCvar = gEngfuncs.pfnRegisterVariable( "csz_night_moon", "1", FCVAR_CLIENTDLL );
 	if( s_sunsetBrightCvar == NULL )
