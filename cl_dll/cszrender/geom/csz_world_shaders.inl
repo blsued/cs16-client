@@ -318,8 +318,9 @@ void main()
 	// is UNCHANGED from the server value (gameplay blackout preserved; cszFogT3 itself unchanged).
 	float fogA = u_fog.w;
 	// LOCAL first-person cone: camera == apex, so the cheap view-ray angle test IS the cone
-	// membership (unchanged from the approved first-person defog). Keeps the floorK (u_spotDefog)
-	// medium so the viewer's own beam still reads as a lit shaft through thin fog.
+	// membership (unchanged from the approved first-person defog). v3.3: this clear now goes to
+	// ZERO (no floorK) -- the viewer's beam no longer keeps a thin lit shaft (the air ray-march
+	// that lit it is OFF), so residual fog only hazed the first-person view.
 	float localClear = 0.0;
 	if( u_spotRange > 0.0 )
 	{
@@ -342,17 +343,19 @@ void main()
 		float distFall = 1.0 - smoothstep( u_nlDefogLen[i] * 0.6, u_nlDefogLen[i], s );
 		nlClear        = max( nlClear, ang * distFall );
 	}
-	// FIX v3.2 (air-halo): third-person (non-local) cones clear the fog to ZERO so the medium
-	// fully DISAPPEARS inside the cone (USER: "照到雾雾应直接消失" -- no residual lit haze),
-	// instead of leaving the floorK (~5%) fog the first-person beam keeps. multLocal floors at
-	// u_spotDefog; multNl floors at 0. Take min() (the MORE-clearing of the two extinction
-	// multipliers) -> most fog removed. nlClear is MAX-combined over cones, so N overlapping
-	// non-local cones clear no more than one (overlap never brightens; GL_MAX-equivalent here).
-	// First-person-only pixels (nlClear==0 -> multNl==1) reduce to mix(1,u_spotDefog,localClear)
-	// -- byte-identical to the previous single-mix path, so first-person is untouched.
-	float multLocal = mix( 1.0, u_spotDefog, localClear );       // [floorK, 1]
-	float multNl    = 1.0 - nlClear;                             // mix(1.0, 0.0, nlClear): [0, 1]
-	fogA *= min( multLocal, multNl );                            // core -> fog gone (NL) / floorK (local); outside -> unchanged
+	// FIX v3.3 (USER 2026-06-24 拍板, first-person de-fog): the FIRST-PERSON cone now clears the
+	// fog to ZERO too, exactly like the non-local cones (and like the studio base FS). The USER
+	// ruled the first-person beam should no longer leave the floorK (~5%) "lit shaft" medium --
+	// looking through it was 朦朦胧胧 and tiring; with the air ray-march removed (slot 13.5 OFF)
+	// there is no lit shaft to support anyway, so the residual fog only hazed the view. Both the
+	// local and the (MAX-combined) non-local clear factors now drive a single clear-to-0:
+	//   min(1-localClear, 1-nlClear) == 1 - max(localClear, nlClear).
+	// nlClear is already MAX-combined over cones, so overlap never over-clears (GL_MAX-equiv).
+	// u_spotDefog (floorK) is no longer read here -- the first-person path stopped flooring at it
+	// (kept as a harmless inactive uniform, same as the studio FS note). Outside any cone both
+	// factors are 0 -> fogA unchanged (gameplay blackout preserved).
+	float clearFactor = max( localClear, nlClear );              // [0,1] MAX over local + all non-local cones
+	fogA *= ( 1.0 - clearFactor );                               // core -> fog gone (both); outside -> unchanged
 	vec3 aRGB = fogA * u_fogParams2.xyz;                          // per-channel extinction (b_ch = a * tint)
 	vec3 T = cszFogT3( v_worldPos, u_camPos, aRGB, u_fogParams.x, u_fogParams.z,
 		u_fogParams.w, u_fogParams3.z, dens );
