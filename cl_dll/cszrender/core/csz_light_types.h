@@ -55,5 +55,11 @@ struct SpotLightParams
 	float hotspotGain;      // central hotspot peak gain (axis brightness boost)
 	float hotspotSharp;     // hotspot tightness (higher = smaller bright core)
 	float directGain;       // direct light-pool brightness multiplier
+	// FIX-1 (v3.1): NON-LOCAL ground-pool overlap must not brighten. When true the
+	// lit-additive draw composites with glBlendEquation(GL_MAX) (dst = max(src,dst))
+	// instead of additive, so N overlapping other-player pools clamp to a SINGLE
+	// cone's brightness (structural, not tuned). false (default) = the local first-
+	// person pool stays purely additive -> first-person look byte-unchanged.
+	bool  maxBlend;
 };
 }

@@ -383,9 +383,10 @@ void DustRender( const ViewSetup &view )
 	float camFwd[3], camRight[3], camUp[3];
 	AngleVectors( view.angles, camFwd, camRight, camUp );
 
-	// --- pre-resolve the cone gates from the spot registry (INCLUDING the local first-
-	// person beam -- unlike the L6a cone-mesh, dust is a distinct phenomenon the fog
-	// march does NOT draw, so the first-person beam must light dust: the USER's main ask).
+	// --- pre-resolve the cone gates from the spot registry. v3.1 (FIX-4): LOCAL first-person
+	// beam ONLY -- the fog march does NOT draw dust, so the viewer's own beam must light it
+	// (the USER's main ask, "MORE dust"); but non-local third-person cones are clean clear-fog
+	// cones whose dust glint would re-introduce the removed haze/Tyndall (gated out below).
 	ConeGate cones[LightRegistry::kMaxLights];
 	int numCones = 0;
 	for( int i = 0; i < LightRegistry::kMaxLights; i++ )
@@ -397,6 +398,13 @@ void DustRender( const ViewSetup &view )
 			continue;
 		if( light->budgetTier == kBudgetCull )
 			continue;   // off-screen / over budget: its dust is not visible anyway
+		// FIX-4 (v3.1): glint dust ONLY in the LOCAL first-person beam. Non-local (other
+		// players') cones are v3.1 "clear-fog" cones with no volumetric tell -- letting their
+		// dust glint re-introduces exactly the haze/Tyndall the USER asked to remove, and the
+		// per-mote premul-over add is non-MAX (overlap brightens). Skipping them keeps the
+		// approved first-person beam dust ("MORE dust") while the third-person cones stay clean.
+		if( !light->desc.isLocal )
+			continue;
 
 		SpotLightParams sp;
 		g_lights.BuildSpotParams( *light, sp );

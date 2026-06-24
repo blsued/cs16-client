@@ -1875,8 +1875,9 @@ void WorldRenderer::DrawLitAdditive( const ViewSetup &view, const SpotLightParam
 	SetCull( false );
 	// Equal-depth additive on top of the opaque pass: depth func stays
 	// LEQUAL (EnterTakeover baseline), writes off so later passes are
-	// unaffected by this one.
-	SetBlend( kBlendAdditive );
+	// unaffected by this one. FIX-1 (v3.1): non-local pools use GL_MAX so
+	// overlapping other-player cones clamp to a single cone's brightness.
+	SetBlend( light.maxBlend ? kBlendMax : kBlendAdditive );
 	SetDepthWrite( false );
 
 	glUniform1f( s_world.litUAlphaTest, 0.0f );
@@ -1986,7 +1987,7 @@ void WorldRenderer::DrawBrushLitAdditive( const ViewSetup &view, const SpotLight
 
 	BindVao( s_world.vao );
 	SetCull( false );
-	SetBlend( kBlendAdditive );
+	SetBlend( light.maxBlend ? kBlendMax : kBlendAdditive );   // FIX-1: non-local pools MAX-composite
 	SetDepthWrite( false );
 	glUniform1f( s_world.litUAlphaTest, 0.0f );
 

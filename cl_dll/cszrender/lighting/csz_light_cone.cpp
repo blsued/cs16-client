@@ -97,7 +97,7 @@ struct ConeGpu
 	bool   failedThisGen;
 
 	int uMatViewProj, uApex, uAxis, uRight, uUp, uSegments;   // VS
-	int uDepthTex, uFullSize, uColor, uEdge;                  // FS
+	int uDepthTex, uFullSize, uColor, uEdge, uCamPos;         // FS
 };
 ConeGpu s_gpu;
 
@@ -156,6 +156,7 @@ bool EnsureBuilt()
 	s_gpu.uFullSize    = UniformLoc( s_gpu.prog, "u_fullSize" );
 	s_gpu.uColor       = UniformLoc( s_gpu.prog, "u_color" );
 	s_gpu.uEdge        = UniformLoc( s_gpu.prog, "u_edge" );
+	s_gpu.uCamPos      = UniformLoc( s_gpu.prog, "u_camPos" );   // FIX-3: silhouette-rim view dir
 
 	s_gpu.built = true;
 	CSZ_LogDev( "lightcone", "cone indicator program built (gpu gen %d)", s_gpu.gpuGeneration );
@@ -315,6 +316,7 @@ void LightConeRender( const ViewSetup &view )
 	if( s_gpu.uFullSize >= 0 ) glUniform2fv( s_gpu.uFullSize, 1, fFullSize );
 	if( s_gpu.uColor >= 0 )    glUniform3fv( s_gpu.uColor, 1, kWarmWhite );
 	if( s_gpu.uEdge >= 0 )     glUniform1f( s_gpu.uEdge, edge );
+	if( s_gpu.uCamPos >= 0 )   glUniform3fv( s_gpu.uCamPos, 1, view.origin );   // FIX-3: silhouette rim view dir (frame-constant)
 
 	int drawn = 0;
 	for( int i = 0; i < LightRegistry::kMaxLights; i++ )

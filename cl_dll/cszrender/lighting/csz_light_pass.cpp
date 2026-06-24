@@ -689,61 +689,74 @@ void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, 
 	int active = 0;
 	int drawn = 0;
 
-	for( int i = 0; i < LightRegistry::kMaxLights; i++ )
+	// FIX-1 (v3.1): two ordered passes so the local first-person additive pool is ALWAYS
+	// composited AFTER the non-local MAX pools. pass 0 = non-local (GL_MAX, overlap clamps
+	// to a single cone); pass 1 = local/legacy (additive, drawn on top so a non-local
+	// MAX pool can never max-swallow the viewer's own pool -> first-person look unchanged).
+	// When v3 is off every light is "local/legacy" -> all drawn in pass 1 additively,
+	// byte-identical to the pre-v3.1 single-loop order.
+	for( int pass = 0; pass < 2; pass++ )
 	{
-		ActiveLight *light = g_lights.Slot( i );
-
-		if( !light->used )
-			continue;
-
-		if( light->desc.die > 0.0f && light->desc.die < now )
-			continue;	// expires this frame; DecayFrame reaps it next ClearScene
-
-		active++;
-
-		if( light->desc.type != kLightSpot )
-			continue;	// M1 implements spot only (plan 2.2 LightType note)
-
-		// L6b hard cap (LightBudgetCompute, run earlier this frame): skip culled
-		// beams -- both off-screen (the budgeter ran the same cone-bbox vs main
-		// frustum test) and the lowest-priority ones beyond the full+cheap cap.
-		// This bounds the per-light world+studio direct add the same way the cone
-		// volume is bounded. Full + cheap both light the holder + struck surfaces;
-		// cheap is shadowless automatically (the shadow pass skipped it, so
-		// shadowTexSlot stays 0 and BuildSpotParams yields a shadowless light).
-		if( light->budgetTier == kBudgetCull )
-			continue;
-
-		// Local/non-local split: under v3, the local first-person beam paints its crisp
-		// direct lit pool (圈). Non-local beams (§V2 #4) get a SOFT, reduced ground pool
-		// (csz_flashlight_nl_pool) that connects visually to the §V2 air shaft -- or are
-		// beam-only when nl_pool == 0 (legacy v3 = no stray third-person circle).
-		bool nonLocal = ( v3 && !light->desc.isLocal );
-		if( nonLocal && nlPool <= 0.0f )
-			continue;
-
-		SpotLightParams params;
-
-		g_lights.BuildSpotParams( *light, params );
-		if( nonLocal )
+		for( int i = 0; i < LightRegistry::kMaxLights; i++ )
 		{
-			// Soft non-local pool: scale the brightness down and soften the cone edge +
-			// kill the central hotspot so the pool is a gentle radial falloff rather than
-			// a hard floating ring. The shader already bounds it to the cone frustum +
-			// range (atten^2) + ndotl + (cheap-tier) shadowless occlusion. Artistic shape;
-			// the local first-person profile is left exactly as BuildSpotParams set it.
-			params.directGain *= nlPool;
-			params.edgeExp = 1.2f;        // softer boundary than the crisp local 2.5
-			params.hotspotGain = 0.0f;    // even pool, no central hot core
+			ActiveLight *light = g_lights.Slot( i );
+
+			if( !light->used )
+				continue;
+
+			if( light->desc.die > 0.0f && light->desc.die < now )
+				continue;	// expires this frame; DecayFrame reaps it next ClearScene
+
+			if( pass == 0 )
+				active++;	// count once (over the full used set, before the spot/cull filters)
+
+			if( light->desc.type != kLightSpot )
+				continue;	// M1 implements spot only (plan 2.2 LightType note)
+
+			// L6b hard cap (LightBudgetCompute, run earlier this frame): skip culled
+			// beams -- both off-screen (the budgeter ran the same cone-bbox vs main
+			// frustum test) and the lowest-priority ones beyond the full+cheap cap.
+			// This bounds the per-light world+studio direct add the same way the cone
+			// volume is bounded. Full + cheap both light the holder + struck surfaces;
+			// cheap is shadowless automatically (the shadow pass skipped it, so
+			// shadowTexSlot stays 0 and BuildSpotParams yields a shadowless light).
+			if( light->budgetTier == kBudgetCull )
+				continue;
+
+			// Local/non-local split: under v3, the local first-person beam paints its crisp
+			// direct lit pool (圈). Non-local beams (§V2 #4) get a reduced ground pool
+			// (csz_flashlight_nl_pool) -- or are beam-only when nl_pool == 0 (legacy v3).
+			bool nonLocal = ( v3 && !light->desc.isLocal );
+			if(( pass == 0 ) != nonLocal )
+				continue;	// pass 0 draws non-local only; pass 1 draws local/legacy only
+			if( nonLocal && nlPool <= 0.0f )
+				continue;
+
+			SpotLightParams params;
+
+			g_lights.BuildSpotParams( *light, params );
+			if( nonLocal )
+			{
+				// Non-local pool: scale brightness down + kill the central hotspot so the
+				// pool is an even radial fill, and (FIX-2) CRISPEN the cone edge (edgeExp
+				// 1.2 -> 3.0) so there is no soft white falloff halo. (FIX-1) MAX-composite:
+				// overlapping other-player pools clamp to a single cone's brightness instead
+				// of summing. The local first-person profile is left exactly as BuildSpotParams
+				// set it (additive, full crisp profile -> first-person byte-unchanged).
+				params.directGain *= nlPool;
+				params.edgeExp = 3.0f;        // FIX-2: crisp boundary, no soft white halo (was 1.2 soft)
+				params.hotspotGain = 0.0f;    // even pool, no central hot core
+				params.maxBlend = true;       // FIX-1: GL_MAX -> overlap never brightens
+			}
+			g_world.DrawLitAdditive( mainView, params );
+			// Brush submodels (func_ boxes) are a separate VBO structure the world lit
+			// pass never touches; without this the flashlight's direct pool skips them
+			// and they read dark under the physical-night base. Same spot params,
+			// per-entity u_model inside.
+			g_world.DrawBrushLitAdditive( mainView, params, brushEnts, brushCount );
+			g_studio.DrawLitAdditive( mainView, params, studioEnts, studioCount );
+			drawn++;
 		}
-		g_world.DrawLitAdditive( mainView, params );
-		// Brush submodels (func_ boxes) are a separate VBO structure the world lit
-		// pass never touches; without this the flashlight's direct pool skips them
-		// and they read dark under the physical-night base. Same spot params,
-		// per-entity u_model inside.
-		g_world.DrawBrushLitAdditive( mainView, params, brushEnts, brushCount );
-		g_studio.DrawLitAdditive( mainView, params, studioEnts, studioCount );
-		drawn++;
 	}
 
 	// Per-frame stats at Dev level with 1s self-throttle (R8).

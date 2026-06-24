@@ -89,14 +89,20 @@ void main()
 )GLSL";
 
 // -----------------------------------------------------------------------------
-// FS -- VERY FAINT, SHARP cone-shape INDICATOR (v3). Outputs a flat low-brightness warm
-// color over the cone's lateral shell, depth-occluded by the scene. NO volumetric integral,
-// NO soft falloff: the crisp edge is the cone mesh silhouette itself. Drawn with GL_MAX
-// (caller = kBlendMax) so overlapping cones never sum -> overlap brightness <= one cone.
+// FS -- VERY FAINT, HARD-EDGED cone-shape INDICATOR (v3.1). v3 filled the whole near shell
+// with a flat faint color -> it read as a TRANSLUCENT FOG VOLUME / debug geometry (a fog
+// cloud against the sky; codex v3 FAIL). v3.1 draws ONLY the cone's SILHOUETTE RIM: a thin,
+// crisp outline that traces where the shell turns edge-on to the viewer, so the tell reads as
+// a sharp cone OUTLINE -- never a filled translucent cloud. Still GL_MAX (caller = kBlendMax)
+// so overlapping cones never sum -> overlap brightness <= one cone.
 //   * gl_FrontFacing discard => exactly the NEAR shell (one faint layer, no double-cover).
 //   * depth occlusion compares this fragment's window-space depth to the stored scene depth
 //     (same projection) -> the shell is hidden behind nearer geometry. Sky (depth==1) keeps
-//     the faint shell, but MAX blend means it can only ever read as a faint tell, never a wash.
+//     only the thin RIM (a faint sharp outline over the sky; MAX blend bounds it).
+//   * RIM = the shell's geometric normal (face derivatives of the world pos) vs the view dir:
+//     edge-on (silhouette) shows, face-on is DISCARDED -> the shell INTERIOR draws nothing,
+//     so there is no plume/cloud fill. A narrow smoothstep band makes the rim a CRISP thin
+//     line, not a soft volumetric falloff.
 //   * NO Step-1 reconstruct helpers needed (raw depth compare only), so this FS is self-
 //     contained -- EnsureBuilt() compiles it as-is (no kFogDepthReconstructGlsl prepend).
 // -----------------------------------------------------------------------------
@@ -105,6 +111,7 @@ uniform sampler2D u_depthTex;   // FULL-RES scene depth (raw, compare-mode NONE)
 uniform vec2  u_fullSize;       // full-res target size in pixels (gl_FragCoord basis)
 uniform vec3  u_color;          // warm-white indicator tint (not premultiplied)
 uniform float u_edge;           // indicator brightness (linear HDR); kept VERY faint
+uniform vec3  u_camPos;         // v3.1: camera world pos -> view dir for the silhouette rim
 in vec3  vWorld;                // world-space cone-surface position (matches kConeVs `out vec3 vWorld`)
 out vec4 fragColor;
 void main()
@@ -114,15 +121,23 @@ void main()
 
 	// Depth occlusion: hide the shell where it is BEHIND opaque scene geometry. Both depths
 	// are window-space z from the SAME view-proj, so a raw compare is valid. Sky pixels store
-	// depth 1.0 -> the shell survives there (a faint cone over the dark sky; MAX blend keeps
-	// it from ever washing the sky brighter than this faint level).
+	// depth 1.0 -> the rim survives there (a faint sharp outline over the dark sky).
 	vec2  uv = gl_FragCoord.xy / u_fullSize;
 	float dscene = texture( u_depthTex, uv ).r;
 	if( gl_FragCoord.z > dscene )
 		discard;                                  // behind a wall
 
-	// Flat, hard-edged, faint cone shell. The sharp edge IS the cone mesh boundary; there is
-	// NO soft volumetric falloff (the v2 in-scatter is gone). MAX blend bounds overlap.
-	fragColor = vec4( u_color * u_edge, 1.0 );
+	// FIX-3: faint HARD-EDGED outline (not a filled translucent shell). The shell's flat-
+	// triangle normal (screen-space derivatives of the world pos) vs the camera->fragment
+	// view dir gives |facing|: ~1 where the shell faces the viewer (DISCARD -> no fill, no
+	// plume/cloud), ~0 at the silhouette (the cone's outline). A narrow smoothstep turns the
+	// silhouette into a thin CRISP line. MAX blend bounds overlap to a single cone.
+	vec3  n       = normalize( cross( dFdx( vWorld ), dFdy( vWorld )));
+	vec3  viewDir = normalize( u_camPos - vWorld );
+	float facing  = abs( dot( n, viewDir ));      // 1 = face-on, 0 = edge-on (silhouette)
+	float rim     = smoothstep( 0.32, 0.10, facing );   // thin hard rim only near the silhouette
+	if( rim <= 0.0 )
+		discard;                                  // shell interior: draw nothing (kills the fog-cloud fill)
+	fragColor = vec4( u_color * u_edge * rim, 1.0 );
 }
 )GLSL";

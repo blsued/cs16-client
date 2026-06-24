@@ -212,6 +212,7 @@ void LightRegistry::BuildSpotParams( const ActiveLight &light, SpotLightParams &
 	out.hotspotGain  = ReadCvar( GetCvarCached( &s_hot,      "csz_flashlight_hotspot" ),       1.4f );
 	out.hotspotSharp = ReadCvar( GetCvarCached( &s_hotSharp, "csz_flashlight_hotspot_sharp" ), 8.0f );
 	out.directGain   = ReadCvar( GetCvarCached( &s_dgain,    "csz_flashlight_direct_gain" ),   1.8f );
+	out.maxBlend     = false;   // FIX-1: default additive (local); RunLightPasses sets it for non-local pools
 }
 
 }

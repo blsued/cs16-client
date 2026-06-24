@@ -704,7 +704,7 @@ void BeginStudioLitPass( const ViewSetup &view, const SpotLightParams &light )
 	if( light.shadowTexSlot != 0 )
 		BindTextureSlot( 2, light.shadowTexSlot );	// T7 depth map (T6: never taken)
 
-	SetBlend( kBlendAdditive );
+	SetBlend( light.maxBlend ? kBlendMax : kBlendAdditive );   // FIX-1: non-local pools MAX-composite (overlap <= single cone)
 	SetDepthWrite( false );
 }
 
