@@ -45,6 +45,7 @@
 #include "../core/csz_ambience_types.h"
 #include "../geom/csz_sky_compose.h"
 #include "../lighting/csz_light_registry.h"
+#include "../lighting/csz_light_budget.h"   // kBudgetCull (non-local defog enumerator)
 
 #include <string>
 
@@ -285,6 +286,56 @@ bool FindShadowedSpot( SpotLightParams &out )
 bool FogVolumeLocalSpot( SpotLightParams &out )
 {
 	return FindShadowedSpot( out );
+}
+
+// v3 third-person defog enumerator (see header). Mirrors the slot-13.4 eligibility set
+// (used spot, not expired, budget-visible) MINUS the local cone, so the world/studio base
+// pass clears the black fog inside exactly the cones the indicator draws. csz_flashlight_range
+// caps each cone's clear length (shared with the first-person defog -> one reach value).
+int FogVolumeNonLocalDefogCones( int maxN, float *apex3, float *dir3,
+                                 float *len, float *cosInner, float *cosOuter )
+{
+	if( maxN <= 0 )
+		return 0;
+
+	static cvar_t *s_cvarRange = NULL;
+	static bool    s_looked = false;
+	if( !s_looked )
+	{
+		s_looked = true;
+		s_cvarRange = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_range" );	// owned by FogVolume
+	}
+	float range = ( s_cvarRange != NULL ) ? s_cvarRange->value : 1600.0f;
+	float now = ClientTime();
+
+	int n = 0;
+	for( int i = 0; i < LightRegistry::kMaxLights && n < maxN; i++ )
+	{
+		ActiveLight *light = g_lights.Slot( i );
+		if( !light->used || light->desc.type != kLightSpot )
+			continue;
+		if( light->desc.die > 0.0f && light->desc.die < now )
+			continue;
+		if( light->budgetTier == kBudgetCull )
+			continue;                          // off-screen / beyond the visible-cone cap
+		if( light->desc.isLocal )
+			continue;                          // local cone -> FogVolumeLocalSpot view-ray defog
+
+		SpotLightParams sp;
+		g_lights.BuildSpotParams( *light, sp );
+		float l = sp.radius;
+		if( range > 0.0f && range < l ) l = range;	// cap the clear distance (matches first-person)
+		if( l < 1.0f )
+			continue;
+
+		apex3[n * 3 + 0] = sp.origin[0]; apex3[n * 3 + 1] = sp.origin[1]; apex3[n * 3 + 2] = sp.origin[2];
+		dir3[n * 3 + 0]  = sp.dir[0];    dir3[n * 3 + 1]  = sp.dir[1];    dir3[n * 3 + 2]  = sp.dir[2];
+		len[n]      = l;
+		cosInner[n] = sp.cosInner;
+		cosOuter[n] = sp.cosOuter;
+		n++;
+	}
+	return n;
 }
 
 void FogVolumeRegisterCvars()

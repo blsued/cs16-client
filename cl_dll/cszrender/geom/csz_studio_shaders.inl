@@ -99,6 +99,18 @@ uniform vec4 u_fogParams;         // S3: x = height falloff b, y = HG asymmetry 
 uniform vec4 u_fogParams2;        // S3: xyz = per-channel extinction tint (b_ch = a*tint), w = 2D noise amplitude
 uniform vec4 u_fogParams3;        // S3: x = noise world-scale, y = wind speed, z = fogCutoff distance, w = fog time (drift clock)
 uniform vec3 u_fogLit;            // S3: toward-body (sun/moon) fog in-scatter color; HG lobe blends fog color toward this
+// v3 NON-LOCAL flashlight defog (other players' beams). Enemies standing inside another
+// player's cone get the black fog cleared on them too (so they are visible through the fog).
+// Point-in-cone test on the fragment world pos; MAX over cones (overlap never over-clears).
+// NO local term here -> first-person studio look is byte-identical (count==0 -> identity).
+uniform float u_spotDefog;        // floorK: fog extinction multiplier at the cone core (1 = identity; shared with the world defog)
+const int CSZ_MAX_DEFOG_CONES = 12;   // matches kCszMaxDefogCones (csz_fog_volume.h) + the world FS
+uniform int   u_nlDefogCount;                          // active non-local cones [0..12]; 0 -> identity
+uniform vec3  u_nlDefogApex[CSZ_MAX_DEFOG_CONES];
+uniform vec3  u_nlDefogDir[CSZ_MAX_DEFOG_CONES];
+uniform float u_nlDefogLen[CSZ_MAX_DEFOG_CONES];
+uniform float u_nlDefogCosInner[CSZ_MAX_DEFOG_CONES];
+uniform float u_nlDefogCosOuter[CSZ_MAX_DEFOG_CONES];
 uniform vec3 u_camPos;            // camera world position (ray origin)
 uniform vec3 u_ambTint;           // night tint; (1,1,1) neutral
 uniform float u_skyAmbScale;      // L3b sky-ambient cloud dimmer; 1.0 neutral (>=0.6 floor on CPU)
@@ -270,7 +282,24 @@ void main()
 	float dens = 1.0;
 	if( u_fogParams2.w > 0.0 )
 		dens = mix( 1.0, 2.0 * cszFogNoise( v_worldPos.xy, u_fogParams3.x, u_fogParams3.y, u_fogParams3.w ), u_fogParams2.w );
-	vec3 aRGB = u_fog.w * u_fogParams2.xyz;                       // per-channel extinction (b_ch = a * tint)
+	// v3 NON-LOCAL flashlight defog: lower this model's fog extinction when it sits inside any
+	// other player's flashlight cone (so enemies in a beam are visible through the fog). MAX over
+	// cones -> overlap never over-clears. count==0 -> clearFactor 0 -> mix == identity (no-op).
+	float fogA = u_fog.w;
+	float clearFactor = 0.0;
+	for( int i = 0; i < u_nlDefogCount; i++ )
+	{
+		vec3  ap = v_worldPos - u_nlDefogApex[i];
+		float s  = dot( ap, u_nlDefogDir[i] );
+		if( s <= 0.0 || s > u_nlDefogLen[i] )
+			continue;
+		float cosAx    = s / max( length( ap ), 1e-4 );
+		float ang      = smoothstep( u_nlDefogCosOuter[i], u_nlDefogCosInner[i], cosAx );
+		float distFall = 1.0 - smoothstep( u_nlDefogLen[i] * 0.6, u_nlDefogLen[i], s );
+		clearFactor    = max( clearFactor, ang * distFall );
+	}
+	fogA *= mix( 1.0, u_spotDefog, clearFactor );
+	vec3 aRGB = fogA * u_fogParams2.xyz;                          // per-channel extinction (b_ch = a * tint)
 	vec3 T = cszFogT3( v_worldPos, u_camPos, aRGB, u_fogParams.x, u_fogParams.z,
 		u_fogParams.w, u_fogParams3.z, dens );
 	float cosT = dot( rd, u_sunDir );

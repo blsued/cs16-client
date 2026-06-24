@@ -136,6 +136,18 @@ uniform float u_spotRange;        // beam length (world units); <=0 => no flashl
 uniform float u_spotCosInner;     // soft cone rim start (cos half-angle, inner)
 uniform float u_spotCosOuter;     // cone cutoff       (cos half-angle, outer)
 uniform float u_spotDefog;        // floorK: extinction multiplier at the cone core (1 = off/identity; lower = clears more; non-0 keeps thin fog)
+// v3 NON-LOCAL flashlight defog cones (other players' beams). The same floorK (u_spotDefog)
+// see-through strength is applied to fragments INSIDE any of these cones, using a true
+// point-in-cone test on the fragment world position (camera != apex for non-local). The
+// clearFactor across all cones (local + non-local) is MAX-combined so N overlapping cones can
+// never clear MORE than a single cone -> overlap never brightens (structural, not tuned).
+const int CSZ_MAX_DEFOG_CONES = 12;   // matches kCszMaxDefogCones (csz_fog_volume.h) + the budgeter cap
+uniform int   u_nlDefogCount;                          // active non-local cones [0..12]; 0 -> identity
+uniform vec3  u_nlDefogApex[CSZ_MAX_DEFOG_CONES];      // cone apex (world)
+uniform vec3  u_nlDefogDir[CSZ_MAX_DEFOG_CONES];       // normalized cone forward
+uniform float u_nlDefogLen[CSZ_MAX_DEFOG_CONES];       // beam length (world units, range-capped)
+uniform float u_nlDefogCosInner[CSZ_MAX_DEFOG_CONES];  // soft rim start (cos half-angle)
+uniform float u_nlDefogCosOuter[CSZ_MAX_DEFOG_CONES];  // cone cutoff   (cos half-angle)
 out vec4 fragColor;
 // S3 procedural 2D value noise (finding 6: 2D only -- the GL function table has no
 // glTexImage3D, so this is in-shader hash noise, pure ALU, NO texture binding). Two
@@ -305,13 +317,30 @@ void main()
 	// cone -- or with no flashlight (u_spotRange<=0) -- clearFactor=0 and the extinction byte
 	// is UNCHANGED from the server value (gameplay blackout preserved; cszFogT3 itself unchanged).
 	float fogA = u_fog.w;
+	float clearFactor = 0.0;
+	// LOCAL first-person cone: camera == apex, so the cheap view-ray angle test IS the cone
+	// membership (unchanged from the approved first-person defog).
 	if( u_spotRange > 0.0 )
 	{
 		float ang      = smoothstep( u_spotCosOuter, u_spotCosInner, dot( rd, u_spotDir ) );
 		float distFall = 1.0 - smoothstep( u_spotRange * 0.6, u_spotRange, tLen );
-		float clearFactor = ang * distFall;                      // 1 = cone core in range, 0 = rim/outside/no-light
-		fogA *= mix( 1.0, u_spotDefog, clearFactor );            // core -> floorK*a (see-through); rim/outside -> a unchanged
+		clearFactor    = ang * distFall;                         // 1 = cone core in range, 0 = rim/outside/no-light
 	}
+	// NON-LOCAL cones (v3): camera != apex, so use a true point-in-cone test on the fragment
+	// world pos. axial s in (0,len], angle off-axis -> cosAx vs the rim cos band, plus the same
+	// far distance falloff. MAX over all cones -> overlap can never over-clear (no brightening).
+	for( int i = 0; i < u_nlDefogCount; i++ )
+	{
+		vec3  ap = v_worldPos - u_nlDefogApex[i];
+		float s  = dot( ap, u_nlDefogDir[i] );
+		if( s <= 0.0 || s > u_nlDefogLen[i] )
+			continue;
+		float cosAx    = s / max( length( ap ), 1e-4 );
+		float ang      = smoothstep( u_nlDefogCosOuter[i], u_nlDefogCosInner[i], cosAx );
+		float distFall = 1.0 - smoothstep( u_nlDefogLen[i] * 0.6, u_nlDefogLen[i], s );
+		clearFactor    = max( clearFactor, ang * distFall );
+	}
+	fogA *= mix( 1.0, u_spotDefog, clearFactor );                // core -> floorK*a (see-through); outside -> a unchanged
 	vec3 aRGB = fogA * u_fogParams2.xyz;                          // per-channel extinction (b_ch = a * tint)
 	vec3 T = cszFogT3( v_worldPos, u_camPos, aRGB, u_fogParams.x, u_fogParams.z,
 		u_fogParams.w, u_fogParams3.z, dens );

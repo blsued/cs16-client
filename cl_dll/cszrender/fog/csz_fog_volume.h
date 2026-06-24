@@ -56,4 +56,18 @@ void FogVolumeShutdown();                        // generation-safe GL teardown 
 // so the world base pass can locally clear the black fog inside that same cone. Returns false
 // when no shadowed flashlight is active this frame (caller must feed an "off" range then).
 bool FogVolumeLocalSpot( SpotLightParams &out );
+
+// v3 third-person defog: gather up to maxN active NON-LOCAL flashlight cones (every other
+// player's beam -- the same set slot 13.4 indicates) so the world/studio base pass can lower
+// the black-fog extinction for fragments INSIDE those cones (see-through to lit surfaces +
+// enemies). The LOCAL first-person cone is excluded here (FogVolumeLocalSpot owns its defog).
+// Fills the flat uniform arrays: apex3/dir3 = 3*maxN floats, len/cosInner/cosOuter = maxN
+// floats. csz_flashlight_range caps each cone's clear length (one source of truth on reach).
+// Returns the cone count in [0,maxN].
+int FogVolumeNonLocalDefogCones( int maxN, float *apex3, float *dir3,
+                                 float *len, float *cosInner, float *cosOuter );
+
+// Compile-time cap on the non-local defog cone array (matches CSZ_MAX_DEFOG_CONES in the
+// world/studio fragment shaders AND the slot-13.4 budgeter's visible-cone ceiling).
+enum { kCszMaxDefogCones = 12 };
 }

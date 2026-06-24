@@ -232,7 +232,20 @@ void SetBlend( BlendMode mode )
 		glEnable( GL_BLEND );
 		glBlendFunc( GL_ONE, GL_ONE_MINUS_SRC_ALPHA );
 		break;
+	case kBlendMax:
+		// Per-channel MAX (glBlendEquation(GL_MAX) below): dst = max(src,dst), factors
+		// ignored. The third-person cone indicator draws every cone with this so dense
+		// overlap stays at a SINGLE cone's brightness (no additive white-up). The func is
+		// set for completeness; GL_MAX ignores it.
+		glEnable( GL_BLEND );
+		glBlendFunc( GL_ONE, GL_ONE );
+		break;
 	}
+
+	// Blend EQUATION coherence: only kBlendMax uses GL_MAX; every other mode relies on the
+	// GL default GL_FUNC_ADD. Reset on each transition so a prior kBlendMax pass can never
+	// leak GL_MAX into the next additive / over pass (the table assumed equation == ADD).
+	glBlendEquation( mode == kBlendMax ? GL_MAX : GL_FUNC_ADD );
 
 	s_state.blend = (int)mode;
 }

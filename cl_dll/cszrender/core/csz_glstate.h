@@ -43,7 +43,11 @@ namespace csz
 // Source RGB is premultiplied radiance ADDED on top while the source ALPHA acts as
 // an occlusion/coverage that ATTENUATES the destination behind it -- one mote both
 // adds a faint speck AND slightly dims the light it floats in (L7 dust extinction).
-enum BlendMode { kBlendNone, kBlendAlpha, kBlendAdditive, kBlendAddPremul, kBlendPremulOver };
+// kBlendMax: per-channel MAX compositing (glBlendEquation(GL_MAX)) -> dst = max(src,dst),
+// blend factors ignored. Used by the third-person flashlight cone INDICATOR so N
+// overlapping faint cones never sum -> overlap brightness <= a single cone (structural,
+// not tuned). SetBlend resets the equation to GL_FUNC_ADD for every other mode.
+enum BlendMode { kBlendNone, kBlendAlpha, kBlendAdditive, kBlendAddPremul, kBlendPremulOver, kBlendMax };
 void EnterTakeover();   // baseline for CSZ passes: depth test LEQUAL + write on, blend/scissor/cull off
 void ApplyMainViewport( const struct ref_viewpass_s *rvp, const float clearRgba[4] ); // bind FBO 0, glViewport(rvp->viewport), clear color+depth
 void LeaveTakeover();   // restore-for-engine whitelist (calibrated in T1); ALWAYS the last call of a taken-over frame

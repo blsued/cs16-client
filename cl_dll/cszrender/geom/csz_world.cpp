@@ -134,6 +134,7 @@ struct WorldState
 	int uNightSky, uNightFloor, uNightK, uNightMoon;	// S2 world night ambient calibration (base pass only)
 	int uBrushAlpha;		// per-entity translucency for blended brush modes (renderamt); 1.0 = opaque/world
 	int uSpotOrigin, uSpotDir, uSpotRange, uSpotCosInner, uSpotCosOuter, uSpotDefog;	// flashlight defog cone (base pass only; local clear of black fog)
+	int uNlDefogCount, uNlDefogApex, uNlDefogDir, uNlDefogLen, uNlDefogCosInner, uNlDefogCosOuter;	// v3 non-local defog cones (base pass only)
 	ShaderProgram litProgram;	// additive per-light pass (T6)
 	int litUViewProj, litUModel, litUAlphaTest;
 	int litULightOrigin, litULightDir, litULightColor;
@@ -238,9 +239,11 @@ void FeedSpotDefog( const WorldState &w )
 	if( !s_looked )
 	{
 		s_looked = true;
-		// floorK: extinction multiplier at the cone core. 0.2 = clearly see-through but a thin
-		// fog remains (锥内不全干); 1.0 = off/identity; lower = clears more. Live-tunable.
-		s_cvarDefog = gEngfuncs.pfnRegisterVariable( "csz_flashlight_defog", "0.2", FCVAR_CLIENTDLL );
+		// floorK: fog extinction multiplier at the cone core. SHARED by the LOCAL first-person
+		// defog AND the v3 NON-LOCAL cone defog. 1.0 = off/identity; lower = clears more. 0.05 =
+		// near-fully see-through inside the cone (v3 ask "雾应直接消失/看穿"; the old 0.2 left a
+		// hazy thin fog that read as "朦朦胧胧"). Live-tunable.
+		s_cvarDefog = gEngfuncs.pfnRegisterVariable( "csz_flashlight_defog", "0.05", FCVAR_CLIENTDLL );
 		s_cvarRange = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_range" );	// owned by FogVolume
 	}
 	float floorK = ( s_cvarDefog != NULL ) ? s_cvarDefog->value : 0.2f;
@@ -248,6 +251,11 @@ void FeedSpotDefog( const WorldState &w )
 	if( floorK > 1.0f ) floorK = 1.0f;	// 1 = identity (no defog)
 	float range = ( s_cvarRange != NULL ) ? s_cvarRange->value : 1600.0f;
 
+	// floorK is shared by the LOCAL and NON-LOCAL (v3) defog, so feed it unconditionally
+	// (the non-local cones can be active even with no local shadowed flashlight this frame).
+	if( w.uSpotDefog >= 0 ) glUniform1f( w.uSpotDefog, floorK );
+
+	// LOCAL first-person cone (the single shadowed spot). camera == apex -> the FS view-ray test.
 	SpotLightParams spot;
 	if( FogVolumeLocalSpot( spot ) )
 	{
@@ -258,11 +266,29 @@ void FeedSpotDefog( const WorldState &w )
 		if( w.uSpotRange >= 0 )    glUniform1f( w.uSpotRange, len );
 		if( w.uSpotCosInner >= 0 ) glUniform1f( w.uSpotCosInner, spot.cosInner );
 		if( w.uSpotCosOuter >= 0 ) glUniform1f( w.uSpotCosOuter, spot.cosOuter );
-		if( w.uSpotDefog >= 0 )    glUniform1f( w.uSpotDefog, floorK );
 	}
 	else if( w.uSpotRange >= 0 )
 	{
-		glUniform1f( w.uSpotRange, 0.0f );	// no shadowed flashlight -> shader skips (identity)
+		glUniform1f( w.uSpotRange, 0.0f );	// no shadowed flashlight -> shader skips the local term
+	}
+
+	// NON-LOCAL cones (v3): every other player's beam clears the black fog inside its volume,
+	// so the third-person flashlight reads "see-through to lit surfaces + enemies". Same source
+	// of truth (FogVolumeNonLocalDefogCones) the slot-13.4 cone indicator draws from.
+	if( w.uNlDefogCount >= 0 )
+	{
+		float apex[3 * kCszMaxDefogCones], dir[3 * kCszMaxDefogCones];
+		float len[kCszMaxDefogCones], cosI[kCszMaxDefogCones], cosO[kCszMaxDefogCones];
+		int n = FogVolumeNonLocalDefogCones( kCszMaxDefogCones, apex, dir, len, cosI, cosO );
+		glUniform1i( w.uNlDefogCount, n );
+		if( n > 0 )
+		{
+			if( w.uNlDefogApex >= 0 )     glUniform3fv( w.uNlDefogApex, n, apex );
+			if( w.uNlDefogDir >= 0 )      glUniform3fv( w.uNlDefogDir, n, dir );
+			if( w.uNlDefogLen >= 0 )      glUniform1fv( w.uNlDefogLen, n, len );
+			if( w.uNlDefogCosInner >= 0 ) glUniform1fv( w.uNlDefogCosInner, n, cosI );
+			if( w.uNlDefogCosOuter >= 0 ) glUniform1fv( w.uNlDefogCosOuter, n, cosO );
+		}
 	}
 }
 
@@ -1130,6 +1156,12 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.uSpotCosInner = UniformLoc( s_world.program, "u_spotCosInner" );
 	s_world.uSpotCosOuter = UniformLoc( s_world.program, "u_spotCosOuter" );
 	s_world.uSpotDefog = UniformLoc( s_world.program, "u_spotDefog" );
+	s_world.uNlDefogCount = UniformLoc( s_world.program, "u_nlDefogCount" );		// v3 non-local defog cones
+	s_world.uNlDefogApex = UniformLoc( s_world.program, "u_nlDefogApex" );
+	s_world.uNlDefogDir = UniformLoc( s_world.program, "u_nlDefogDir" );
+	s_world.uNlDefogLen = UniformLoc( s_world.program, "u_nlDefogLen" );
+	s_world.uNlDefogCosInner = UniformLoc( s_world.program, "u_nlDefogCosInner" );
+	s_world.uNlDefogCosOuter = UniformLoc( s_world.program, "u_nlDefogCosOuter" );
 	s_world.uCamPos = UniformLoc( s_world.program, "u_camPos" );
 	s_world.uAmbTint = UniformLoc( s_world.program, "u_ambTint" );
 	s_world.uSkyAmbScale = UniformLoc( s_world.program, "u_skyAmbScale" );
@@ -1178,6 +1210,7 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	// guard is skipped so the fog extinction is byte-identical until a frame feeds a spot.
 	if( s_world.uSpotRange >= 0 )    glUniform1f( s_world.uSpotRange, 0.0f );
 	if( s_world.uSpotDefog >= 0 )    glUniform1f( s_world.uSpotDefog, 1.0f );	// floorK 1 = identity even if range fed
+	if( s_world.uNlDefogCount >= 0 ) glUniform1i( s_world.uNlDefogCount, 0 );	// v3 non-local defog OFF until fed (loop skipped)
 	glUniform3fv( s_world.uCamPos, 1, kCamPosZero );
 	glUniform3fv( s_world.uAmbTint, 1, kTintNeutral );
 	glUniform1f( s_world.uSkyAmbScale, 1.0f );	// L3b: neutral until fed (no sky-ambient dimming)

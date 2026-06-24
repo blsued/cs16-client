@@ -36,6 +36,7 @@
 #include "csz_studio_bones.h"
 #include "csz_studio_mesh.h"
 #include "csz_world.h"			// S1: g_world.SkyVisAtPoint for per-entity sky visibility
+#include "../fog/csz_fog_volume.h"	// v3: FogVolumeNonLocalDefogCones (enemies visible in others' beams)
 #include "../core/csz_engine.h"
 #include "../core/csz_glcaps.h"
 #include "../core/csz_glfuncs.h"
@@ -71,6 +72,8 @@ struct PassLocs
 	int uSkyAmbScale;						// L3b sky-ambient cloud dimmer scalar (base program only); 1.0 neutral
 	int uFogParams, uCamPos;					// analytic base fog (fog M1 Step 2): height b/sunGlow/maxOpacity + ray origin
 	int uFogParams2, uFogParams3, uFogLit;				// S3 fog rework: per-channel ext + noise + Start/Cutoff + toward-body lit color
+	int uSpotDefog;							// v3 non-local defog floorK (base program only)
+	int uNlDefogCount, uNlDefogApex, uNlDefogDir, uNlDefogLen, uNlDefogCosInner, uNlDefogCosOuter;	// v3 non-local defog cones (base program only)
 	int uSunDir, uSunColor;						// base program only (sky 档1 directional N.L; lit/depth exempt, pitfall 23)
 	int uSkyVis;							// S1: per-entity geometric sky visibility (base program only); 1.0 default
 	int uMoonInScatter, uShaftMask, uMoonShaft;			// fog M1 L4 moon Tyndall air-glow (base program only; identity until fed)
@@ -120,6 +123,13 @@ void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 	out.uFogParams2 = UniformLoc( prog, "u_fogParams2" );	// S3
 	out.uFogParams3 = UniformLoc( prog, "u_fogParams3" );	// S3
 	out.uFogLit = UniformLoc( prog, "u_fogLit" );		// S3
+	out.uSpotDefog = UniformLoc( prog, "u_spotDefog" );			// v3 non-local defog
+	out.uNlDefogCount = UniformLoc( prog, "u_nlDefogCount" );
+	out.uNlDefogApex = UniformLoc( prog, "u_nlDefogApex" );
+	out.uNlDefogDir = UniformLoc( prog, "u_nlDefogDir" );
+	out.uNlDefogLen = UniformLoc( prog, "u_nlDefogLen" );
+	out.uNlDefogCosInner = UniformLoc( prog, "u_nlDefogCosInner" );
+	out.uNlDefogCosOuter = UniformLoc( prog, "u_nlDefogCosOuter" );
 	out.uCamPos = UniformLoc( prog, "u_camPos" );
 	out.uAmbTint = UniformLoc( prog, "u_ambTint" );
 	out.uSkyAmbScale = UniformLoc( prog, "u_skyAmbScale" );
@@ -568,6 +578,36 @@ void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, cons
 	if( locs.uFogParams2 >= 0 ) glUniform4fv( locs.uFogParams2, 1, fogParams2 );
 	if( locs.uFogParams3 >= 0 ) glUniform4fv( locs.uFogParams3, 1, fogParams3 );
 	if( locs.uFogLit >= 0 )     glUniform3fv( locs.uFogLit, 1, fogLit );
+	// v3 NON-LOCAL flashlight defog: clear the black fog on models inside other players' cones
+	// (enemies visible through fog). Base program only (lit/depth locs are -1). Same cone set
+	// + floorK the world base pass uses -> models and world clear consistently inside a beam.
+	if( locs.uNlDefogCount >= 0 )
+	{
+		static cvar_t *s_cvarDefog = NULL;
+		static bool    s_lookedDefog = false;
+		if( !s_lookedDefog )
+		{
+			s_lookedDefog = true;
+			s_cvarDefog = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_defog" );	// registered by the world base pass
+		}
+		float floorK = ( s_cvarDefog != NULL ) ? s_cvarDefog->value : 1.0f;
+		if( floorK < 0.0f ) floorK = 0.0f;
+		if( floorK > 1.0f ) floorK = 1.0f;
+		if( locs.uSpotDefog >= 0 ) glUniform1f( locs.uSpotDefog, floorK );
+
+		float apex[3 * kCszMaxDefogCones], dir[3 * kCszMaxDefogCones];
+		float len[kCszMaxDefogCones], cosI[kCszMaxDefogCones], cosO[kCszMaxDefogCones];
+		int n = FogVolumeNonLocalDefogCones( kCszMaxDefogCones, apex, dir, len, cosI, cosO );
+		glUniform1i( locs.uNlDefogCount, n );
+		if( n > 0 )
+		{
+			if( locs.uNlDefogApex >= 0 )     glUniform3fv( locs.uNlDefogApex, n, apex );
+			if( locs.uNlDefogDir >= 0 )      glUniform3fv( locs.uNlDefogDir, n, dir );
+			if( locs.uNlDefogLen >= 0 )      glUniform1fv( locs.uNlDefogLen, n, len );
+			if( locs.uNlDefogCosInner >= 0 ) glUniform1fv( locs.uNlDefogCosInner, n, cosI );
+			if( locs.uNlDefogCosOuter >= 0 ) glUniform1fv( locs.uNlDefogCosOuter, n, cosO );
+		}
+	}
 	glUniform3fv( locs.uCamPos, 1, view.origin );	// ray origin for the height-fog integral
 	glUniform3fv( locs.uAmbTint, 1, amb.tint );
 	glUniform1f( locs.uSkyAmbScale, amb.skyAmbientScale );	// L3b sky-ambient cloud dimmer (1.0 when clouds off; floored >=0.6 in L3a)
