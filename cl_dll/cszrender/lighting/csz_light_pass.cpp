@@ -88,8 +88,18 @@ cvar_t *s_cvarShadow;		// csz_light_shadow (B-class quality seam, default 1)
 cvar_t *s_cvarFlashlightReal;	// csz_flashlight_real (default 1: feed the table from live player flashlights)
 cvar_t *s_cvarV3;		// csz_flashlight_v3 (owned by RegisterLightingCommands); the local/non-local
 bool   s_lookedV3;		// split master. Fetched lazily (mirrors the cone + fog-volume v3 latch).
-cvar_t *s_cvarNlPool;		// csz_flashlight_nl_pool (§V2 #4): non-local ground-pool intensity scale
-bool   s_lookedNlPool;		// (0 = beam-only legacy v3; >0 = re-enabled SOFT projected-spot pool). Lazy.
+// v5 third-person FAINT WARM dlight knobs (csz_tpdl_*). Each NON-LOCAL player whose
+// flashlight is on gets a small, faint, warm, omni-ish lantern (CollectRealFlashlights)
+// drawn by the existing direct lit pass -- the reverted world light-cone's replacement.
+// Pointers cached at RegisterLightingCommands; values read live each frame.
+cvar_t *s_cvarTpdl;        // csz_tpdl            master enable (1)
+cvar_t *s_cvarTpdlInt;     // csz_tpdl_intensity  faint direct-pool brightness
+cvar_t *s_cvarTpdlRadius;  // csz_tpdl_radius     small attenuation radius (world units)
+cvar_t *s_cvarTpdlFov;     // csz_tpdl_fov        wide cone (omni-ish pool)
+cvar_t *s_cvarTpdlHeight;  // csz_tpdl_height     z-offset above the player origin
+cvar_t *s_cvarTpdlR;       // csz_tpdl_r          warm color R
+cvar_t *s_cvarTpdlG;       // csz_tpdl_g          warm color G
+cvar_t *s_cvarTpdlB;       // csz_tpdl_b          warm color B
 
 // L6c dev-override latch. The csz_flashlight_test fixture and the real per-player
 // feed both write the SAME state table with owner keys that overlap (test uses
@@ -98,11 +108,6 @@ bool   s_lookedNlPool;		// (0 = beam-only legacy v3; >0 = re-enabled SOFT projec
 // no-op (test overrides); "csz_flashlight_test off" clears the table and the latch,
 // and the real feed resumes the next frame.
 bool s_flashlightTestActive;
-
-// Eye-height offset for OTHER players' beams: their entity origin is at the feet,
-// the muzzle/flashlight rides at roughly standing eye height. Approximate (M1):
-// the local player uses the exact view eye instead.
-const float kOtherPlayerEyeHeight = 24.0f;
 
 // T-spawn parse cache, keyed by map name (re-parsed on map change).
 char s_spawnMapName[64];
@@ -536,10 +541,27 @@ void CollectRealFlashlights( const ViewSetup &mainView )
 
 	AngleVectors( mainView.angles, fwd, right, up );
 
+	// v5 faint-warm third-person lantern knobs (csz_tpdl_*), read live each frame. The
+	// master gate (csz_tpdl 0) drops every NON-LOCAL glow entirely; the local first-
+	// person beam is never affected by these.
+	bool  tpdlOn     = ( s_cvarTpdl       == NULL ) ? true   : ( s_cvarTpdl->value >= 0.5f );
+	float tpdlHeight = ( s_cvarTpdlHeight == NULL ) ? 40.0f  : s_cvarTpdlHeight->value;
+	float tpdlRadius = ( s_cvarTpdlRadius == NULL ) ? 150.0f : s_cvarTpdlRadius->value;
+	float tpdlFov    = ( s_cvarTpdlFov    == NULL ) ? 160.0f : s_cvarTpdlFov->value;
+	float tpdlR      = ( s_cvarTpdlR      == NULL ) ? 1.0f   : s_cvarTpdlR->value;
+	float tpdlG      = ( s_cvarTpdlG      == NULL ) ? 0.72f  : s_cvarTpdlG->value;
+	float tpdlB      = ( s_cvarTpdlB      == NULL ) ? 0.42f  : s_cvarTpdlB->value;
+
 	for( int i = 1; i <= maxClients; i++ )
 	{
 		cl_entity_t *ent = gEngfuncs.GetEntityByIndex( i );
 		bool lit = ( ent != NULL && ( ent->curstate.effects & EF_DIMLIGHT ) != 0 );
+
+		// v5 master gate: csz_tpdl 0 removes the third-person glow for NON-LOCAL players
+		// entirely (no published spot -> no direct pool, no dust tint). The local first-
+		// person beam is never gated here.
+		if( lit && i != localIdx && !tpdlOn )
+			lit = false;
 
 		if( !lit )
 		{
@@ -568,18 +590,26 @@ void CollectRealFlashlights( const ViewSetup &mainView )
 		}
 		else
 		{
-			// Other players: feet origin + eye height, aimed along the transmitted
-			// player angles. Pitch fidelity for remote players is approximate (M1).
+			// v5 third-person tell: a FAINT WARM lantern on the holder instead of a world
+			// beam. The old non-local forward cone + ground ring were reverted; this hangs a
+			// small, faint, warm, omni-ish dlight just above the player aimed straight DOWN,
+			// so the existing direct lit pass softly lights the player model + a little floor
+			// around them ("someone turned a flashlight on"). No directional shaft.
 			st.origin[0] = ent->curstate.origin[0];
 			st.origin[1] = ent->curstate.origin[1];
-			st.origin[2] = ent->curstate.origin[2] + kOtherPlayerEyeHeight;
-			st.angles[0] = ent->curstate.angles[0];
-			st.angles[1] = ent->curstate.angles[1];
+			st.origin[2] = ent->curstate.origin[2] + tpdlHeight;
+			st.angles[0] = 90.0f;	// quake +pitch = straight down (lantern, not a beam)
+			st.angles[1] = 0.0f;
 			st.angles[2] = 0.0f;
+			st.range = tpdlRadius;	// small, bounded
+			st.fov   = tpdlFov;	// wide -> omni-ish pool
+			st.color[0] = tpdlR;	// warm hue; faint brightness applied as directGain
+			st.color[1] = tpdlG;	// (csz_tpdl_intensity) in RunLightPasses
+			st.color[2] = tpdlB;
 		}
 
-		st.range = 0.0f;	// module defaults (warm-white, 700u, 50deg)
-		st.fov = 0.0f;
+		// Local first-person beam: leave range/fov/color at memset-0 -> module defaults
+		// (warm-white, 1400u, 50deg), exactly as 9e84148. (Non-local set its own above.)
 
 		FlashlightSet( st );
 	}
@@ -672,18 +702,10 @@ void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, 
 	}
 	bool v3 = ( s_cvarV3 == NULL ) ? true : ( s_cvarV3->value >= 0.5f );
 
-	// §V2 #4: re-enable a SOFT non-local ground pool. csz_flashlight_nl_pool scales the
-	// direct-pool brightness for other players' beams; the v3 split below used to drop
-	// the non-local pool wholesale (a naive full-strength pool floated a hard "ring" on
-	// the ground). With the §V2 air cone now drawing the connecting shaft (光柱), a soft
-	// reduced pool reads as "where the beam lands" (光打到哪). 0 = beam-only (legacy v3).
-	if( !s_lookedNlPool )
-	{
-		s_lookedNlPool = true;
-		s_cvarNlPool = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_nl_pool" );
-	}
-	float nlPool = ( s_cvarNlPool != NULL ) ? s_cvarNlPool->value : 0.5f;
-	if( nlPool < 0.0f ) nlPool = 0.0f;
+	// v5: faint warm third-person glow brightness (csz_tpdl_intensity). Drives the
+	// non-local lantern's direct-pool gain, decoupled from the first-person direct_gain.
+	float tpdlInt = ( s_cvarTpdlInt != NULL ) ? s_cvarTpdlInt->value : 0.5f;
+	if( tpdlInt < 0.0f ) tpdlInt = 0.0f;
 
 	float now = ClientTime();
 	int active = 0;
@@ -714,26 +736,23 @@ void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, 
 		if( light->budgetTier == kBudgetCull )
 			continue;
 
-		// Local/non-local split: under v3, the local first-person beam paints its crisp
-		// direct lit pool (圈). Non-local beams (§V2 #4) get a SOFT, reduced ground pool
-		// (csz_flashlight_nl_pool) that connects visually to the §V2 air shaft -- or are
-		// beam-only when nl_pool == 0 (legacy v3 = no stray third-person circle).
+		// v5 local/non-local split: the local first-person beam keeps its crisp direct
+		// pool (BuildSpotParams). NON-LOCAL beams are the faint warm third-person lantern
+		// (csz_tpdl_*): a soft, hotspot-less, dimmed pool -- NO world cone, NO forward shaft.
+		// (v3 0 -> legacy: every spot draws the first-person profile, kept for A/B.)
 		bool nonLocal = ( v3 && !light->desc.isLocal );
-		if( nonLocal && nlPool <= 0.0f )
-			continue;
 
 		SpotLightParams params;
 
 		g_lights.BuildSpotParams( *light, params );
 		if( nonLocal )
 		{
-			// Soft non-local pool: scale the brightness down and soften the cone edge +
-			// kill the central hotspot so the pool is a gentle radial falloff rather than
-			// a hard floating ring. The shader already bounds it to the cone frustum +
-			// range (atten^2) + ndotl + (cheap-tier) shadowless occlusion. Artistic shape;
-			// the local first-person profile is left exactly as BuildSpotParams set it.
-			params.directGain *= nlPool;
-			params.edgeExp = 1.2f;        // softer boundary than the crisp local 2.5
+			// Faint warm lantern profile: dedicated dim gain (csz_tpdl_intensity, decoupled
+			// from the first-person csz_flashlight_direct_gain), soft wide edge, no hotspot.
+			// Bounded by atten^2 + the wide cone + ndotl; small radius + the budget cap keep
+			// multiple holders as separate small pools (never a merged white blob).
+			params.directGain = tpdlInt;
+			params.edgeExp = 1.0f;        // soft, wide falloff (no crisp rim)
 			params.hotspotGain = 0.0f;    // even pool, no central hot core
 		}
 		g_world.DrawLitAdditive( mainView, params );
@@ -775,10 +794,17 @@ void RegisterLightingCommands()
 	gEngfuncs.pfnRegisterVariable( "csz_flashlight_hotspot_sharp", "8.0", FCVAR_CLIENTDLL );  // hotspot tightness
 	gEngfuncs.pfnRegisterVariable( "csz_flashlight_direct_gain", "1.8", FCVAR_CLIENTDLL );    // direct-pool brightness
 
-	// §V2 #4: non-local (third-person) ground-pool intensity scale. Default 0.5 = a soft,
-	// reduced projected-spot pool re-enabled for other players' beams (connects to the
-	// §V2 air shaft); 0 = beam-only (legacy v3, no non-local pool). Live-tunable.
-	gEngfuncs.pfnRegisterVariable( "csz_flashlight_nl_pool", "0.5", FCVAR_CLIENTDLL );
+	// v5 third-person FAINT WARM dlight ("someone turned their flashlight on" tell).
+	// One small, faint, warm, omni-ish lantern per NON-LOCAL lit player (built in
+	// CollectRealFlashlights, drawn by the existing direct lit pass). Live-tunable.
+	s_cvarTpdl       = gEngfuncs.pfnRegisterVariable( "csz_tpdl",           "1",    FCVAR_CLIENTDLL );  // master enable
+	s_cvarTpdlInt    = gEngfuncs.pfnRegisterVariable( "csz_tpdl_intensity", "0.5",  FCVAR_CLIENTDLL );  // faint brightness (direct gain)
+	s_cvarTpdlRadius = gEngfuncs.pfnRegisterVariable( "csz_tpdl_radius",    "150",  FCVAR_CLIENTDLL );  // small radius (world units)
+	s_cvarTpdlFov    = gEngfuncs.pfnRegisterVariable( "csz_tpdl_fov",       "160",  FCVAR_CLIENTDLL );  // wide cone -> omni-ish pool
+	s_cvarTpdlHeight = gEngfuncs.pfnRegisterVariable( "csz_tpdl_height",    "40",   FCVAR_CLIENTDLL );  // z-offset above the player origin
+	s_cvarTpdlR      = gEngfuncs.pfnRegisterVariable( "csz_tpdl_r",         "1.0",  FCVAR_CLIENTDLL );  // warm color R
+	s_cvarTpdlG      = gEngfuncs.pfnRegisterVariable( "csz_tpdl_g",         "0.72", FCVAR_CLIENTDLL );  // warm color G
+	s_cvarTpdlB      = gEngfuncs.pfnRegisterVariable( "csz_tpdl_b",         "0.42", FCVAR_CLIENTDLL );  // warm color B
 
 	if( s_cvarTestLight == NULL )
 		s_cvarTestLight = gEngfuncs.pfnRegisterVariable( "csz_testlight", "0", FCVAR_CLIENTDLL );

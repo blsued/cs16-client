@@ -188,7 +188,10 @@ void FlashlightPublishToRegistry()
 		desc.radius = ( st.range > 0.0f ) ? st.range : kDefaultRange;
 		desc.fov    = ( st.fov   > 0.0f ) ? st.fov   : kDefaultFov;
 		desc.die = 0.0f;			// lifetime owned by the state table, not a timer
-		desc.castShadow = true;		// the budgeter decides who actually gets the 1 shadow map
+		// v5: only the local first-person beam claims the single shadow map; non-local
+		// lanterns stay shadowless (faint glows need none, and the fog march keys on the
+		// shadowed spot -- this keeps the lanterns out of it, so no third-person fog shaft).
+		desc.castShadow = st.isLocal;
 		desc.isLocal = st.isLocal;	// budget top-priority hook for the viewer's own beam
 
 		g_lights.AddOrUpdate( KeyForOwner( st.owner ), desc );

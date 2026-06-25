@@ -386,9 +386,11 @@ void DrawConeForSpot( const ViewSetup &view, const SpotLightParams &spot,
 void LightConeRegisterCvars()
 {
 	if( s_cvarTp == NULL )
-		// Default 1 = the USER-desired third-person visible beam. 0 = off (A/B; the
-		// spot DIRECT lit pool stays, only the air volume goes away).
-		s_cvarTp = gEngfuncs.pfnRegisterVariable( "csz_flashlight_tp", "1", FCVAR_CLIENTDLL );
+		// v5: DEFAULT 0 -- the non-local third-person world light-cone (volumetric air
+		// shaft) is disabled. It was repeatedly rejected/reverted; the third-person tell is
+		// now a faint warm lantern dlight on the holder (csz_tpdl_*, csz_light_pass.cpp).
+		// Set csz_flashlight_tp 1 to re-enable the legacy world cone for A/B only.
+		s_cvarTp = gEngfuncs.pfnRegisterVariable( "csz_flashlight_tp", "0", FCVAR_CLIENTDLL );
 	if( s_cvarTpIntensity == NULL )
 		// Linear-HDR additive radiance scale on the energy-conserving in-scatter. With
 		// the §V2 rebuild the integral is bounded by the Beer-Lambert slice + per-light
