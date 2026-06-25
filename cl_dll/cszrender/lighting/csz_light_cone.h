@@ -41,7 +41,7 @@ struct ViewSetup;
 // camera angle (the spot DIRECT pass in csz_light_pass.cpp already lights the
 // holder's body + struck surfaces in world space; this adds the volume between
 // the lamp and what it hits). Occluded camera-side by the scene depth texture
-// (soft fade, no punch-through). Gated by csz_flashlight_tp (default 1).
+// (soft fade, no punch-through). Gated by csz_flashlight_tp (default 0).
 void LightConeRegisterCvars();                  // csz_flashlight_tp + csz_flashlight_tp_intensity
 void LightConeRender( const ViewSetup &view );  // slot 13.4: after spot direct add, before the Step-3 march
 void LightConeShutdown();                       // generation-safe GL teardown (Renderer::Shutdown)
