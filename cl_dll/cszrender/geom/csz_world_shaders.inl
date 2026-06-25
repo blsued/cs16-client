@@ -135,7 +135,17 @@ uniform vec3  u_spotDir;          // normalized cone forward
 uniform float u_spotRange;        // beam length (world units); <=0 => no flashlight this frame -> shader is identity
 uniform float u_spotCosInner;     // soft cone rim start (cos half-angle, inner)
 uniform float u_spotCosOuter;     // cone cutoff       (cos half-angle, outer)
-uniform float u_spotDefog;        // floorK: extinction multiplier at the cone core (1 = off/identity; lower = clears more; non-0 keeps thin fog)
+uniform float u_spotDefog;        // floorK: legacy floor (v5.1 first-person now clears to ZERO -> read no longer; kept as inert uniform)
+// v5.1 third-person FOG glow: each NON-LOCAL lantern (csz_tpdl_*) faintly lights the MIST
+// around its holder ("a lantern in the fog" -> exposes position) WITHOUT clearing fog. Pure
+// ADDITIVE in-scatter, bounded per-light by a small radius and CLAMPED in sum so clustered
+// holders saturate to a ceiling (never a white blob). Count 0 -> the loop is skipped (identity).
+#define CSZ_TPFOG_MAX 8
+uniform int   u_tpfogCount;                 // active non-local lantern glows this frame (0 = off)
+uniform vec3  u_tpfogPos[CSZ_TPFOG_MAX];    // lantern world positions (above each holder)
+uniform vec3  u_tpfogColor;                 // shared warm glow color (linear)
+uniform float u_tpfogRadius;                // glow radius (world units); small -> local mist halo
+uniform float u_tpfogIntensity;            // faint glow strength (bounded; clamped sum * this)
 out vec4 fragColor;
 // S3 procedural 2D value noise (finding 6: 2D only -- the GL function table has no
 // glTexImage3D, so this is in-shader hash noise, pure ALU, NO texture binding). Two
@@ -298,19 +308,22 @@ void main()
 	float dens = 1.0;
 	if( u_fogParams2.w > 0.0 )                                    // 2D noise density modulation (drifts with wind)
 		dens = mix( 1.0, 2.0 * cszFogNoise( v_worldPos.xy, u_fogParams3.x, u_fogParams3.y, u_fogParams3.w ), u_fogParams2.w );
-	// Flashlight defog: lower the base fog's SCALAR extinction along the view ray INSIDE the
-	// local flashlight cone so the player sees a path through the black fog. Angular mask =
-	// view ray vs cone dir (smoothstep cosOuter..cosInner -> 0 outside the cone); distance
-	// falloff fades the clearing toward the beam's range so far fog re-thickens. Outside the
-	// cone -- or with no flashlight (u_spotRange<=0) -- clearFactor=0 and the extinction byte
-	// is UNCHANGED from the server value (gameplay blackout preserved; cszFogT3 itself unchanged).
+	// Flashlight defog (v5.1, ported from the A/B-verified shelved first-person defog): the
+	// local first-person cone now DISPELS the fog -- the SCALAR extinction along the view ray
+	// inside the cone is cleared to ZERO so the player sees a clean path through the black fog
+	// (no residual "lit shaft" haze; the air ray-march that lit it is OFF, csz_flashlight_fpmarch
+	// 0). Angular mask = view ray vs cone dir (smoothstep cosOuter..cosInner -> 0 outside the
+	// cone); distance falloff fades the clearing toward the beam's range so far fog re-thickens.
+	// Outside the cone -- or with no flashlight (u_spotRange<=0) -- clearFactor=0 and the
+	// extinction byte is UNCHANGED from the server value (gameplay blackout preserved). u_spotDefog
+	// (floorK) is no longer read here (optimized out) -- the clear goes fully to 0, not floorK.
 	float fogA = u_fog.w;
 	if( u_spotRange > 0.0 )
 	{
 		float ang      = smoothstep( u_spotCosOuter, u_spotCosInner, dot( rd, u_spotDir ) );
 		float distFall = 1.0 - smoothstep( u_spotRange * 0.6, u_spotRange, tLen );
 		float clearFactor = ang * distFall;                      // 1 = cone core in range, 0 = rim/outside/no-light
-		fogA *= mix( 1.0, u_spotDefog, clearFactor );            // core -> floorK*a (see-through); rim/outside -> a unchanged
+		fogA *= ( 1.0 - clearFactor );                           // core -> fog GONE (see-through); rim/outside -> a unchanged
 	}
 	vec3 aRGB = fogA * u_fogParams2.xyz;                          // per-channel extinction (b_ch = a * tint)
 	vec3 T = cszFogT3( v_worldPos, u_camPos, aRGB, u_fogParams.x, u_fogParams.z,
@@ -333,6 +346,28 @@ void main()
 	float hg2 = ( 1.0 - CSZ_HG_G * CSZ_HG_G ) / ( 4.0 * 3.14159265 * pow( max( hgD2, 1e-4 ), 1.5 ));
 	inscatter += ( u_moonShaft * u_shaftMask * hg2 ) * u_moonInScatter;
 	col = col * T + inscatter * ( 1.0 - T );
+	// v5.1 third-person FOG glow: faintly brighten the MIST around each NON-LOCAL lantern so a
+	// holder reads as "a lantern in the fog" (exposes their position) -- WITHOUT clearing fog.
+	// For each lantern, find the closest approach of the lantern point to the visible view-ray
+	// segment [cam, fragment] and add a small radius-bounded falloff. The accumulated glow is
+	// CLAMPED to [0,1] BEFORE the intensity scale, so N clustered/overlapping holders saturate to
+	// one ceiling instead of summing into a white blob. Weighted by the fog opacity (1-T): glow
+	// appears ONLY where fog exists (none in clear air) and stays inside the fog's scatter budget.
+	// This is purely ADDITIVE radiance -- it never touches fogA/extinction, so it does NOT clear fog.
+	if( u_tpfogCount > 0 )
+	{
+		float tpGlow = 0.0;
+		for( int i = 0; i < u_tpfogCount; i++ )
+		{
+			vec3  toL = u_tpfogPos[i] - u_camPos;
+			float tc  = clamp( dot( toL, rd ), 0.0, tLen );      // closest param on the cam->fragment segment
+			vec3  cp  = u_camPos + rd * tc;                      // closest point on that segment
+			float d   = length( u_tpfogPos[i] - cp );            // perpendicular distance to the lantern
+			tpGlow   += smoothstep( u_tpfogRadius, 0.0, d );     // 1 at the core, 0 beyond the radius (bounded)
+		}
+		tpGlow = min( tpGlow, 1.0 ) * u_tpfogIntensity;          // CLAMP the sum -> no cluster over-exposure
+		col   += u_tpfogColor * tpGlow * ( 1.0 - T );            // additive mist glow, inside the fog opacity budget
+	}
 	fragColor = vec4( col, base.a * u_brushAlpha );
 }
 )GLSL";

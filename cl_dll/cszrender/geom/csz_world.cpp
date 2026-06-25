@@ -35,6 +35,8 @@
 #include "csz_world.h"
 #include "csz_lightmap.h"
 #include "../fog/csz_fog_volume.h"	// FogVolumeLocalSpot: same shadowed flashlight the march uses (defog cone)
+#include "../lighting/csz_light_registry.h"	// v5.1: enumerate non-local lantern spots for the third-person fog glow
+#include "../lighting/csz_light_budget.h"	// v5.1: kBudgetCull (respect the per-frame light cap)
 #include "../core/csz_engine.h"
 #include "../core/csz_engine_bsp.h"
 #include "../core/csz_glcaps.h"
@@ -134,6 +136,7 @@ struct WorldState
 	int uNightSky, uNightFloor, uNightK, uNightMoon;	// S2 world night ambient calibration (base pass only)
 	int uBrushAlpha;		// per-entity translucency for blended brush modes (renderamt); 1.0 = opaque/world
 	int uSpotOrigin, uSpotDir, uSpotRange, uSpotCosInner, uSpotCosOuter, uSpotDefog;	// flashlight defog cone (base pass only; local clear of black fog)
+	int uTpFogCount, uTpFogPos, uTpFogColor, uTpFogRadius, uTpFogIntensity;	// v5.1 third-person fog glow (non-local lanterns light the mist, bounded)
 	ShaderProgram litProgram;	// additive per-light pass (T6)
 	int litUViewProj, litUModel, litUAlphaTest;
 	int litULightOrigin, litULightDir, litULightColor;
@@ -206,6 +209,7 @@ void FeedNightModel( const WorldState &w, const AmbienceParams &amb )
 }
 
 void FeedSpotDefog( const WorldState &w );	// fwd: flashlight defog cone feed (defined below)
+void FeedTpFogGlow( const WorldState &w );	// fwd: v5.1 third-person fog glow feed (defined below)
 
 // S3 fog feed (REWORK-SPEC §S3, finding 5: ONE inscatter owner). Single chokepoint shared
 // by all three base-pass feed sites (DrawOpaque / DrawBrushOpaque / DrawBrushTransparent),
@@ -222,6 +226,7 @@ void FeedFog( const WorldState &w, const AmbienceParams &amb )
 	if( w.uFogParams3 >= 0 ) glUniform4fv( w.uFogParams3, 1, fogParams3 );
 	if( w.uFogLit >= 0 )     glUniform3fv( w.uFogLit, 1, fogLit );
 	FeedSpotDefog( w );	// flashlight defog cone (opaque + brush-opaque base sites)
+	FeedTpFogGlow( w );	// v5.1: non-local lanterns light the mist around their holders (bounded glow)
 }
 
 // Flashlight defog feed (base pass only). Pushes the local player's shadowed-flashlight cone
@@ -263,6 +268,78 @@ void FeedSpotDefog( const WorldState &w )
 	else if( w.uSpotRange >= 0 )
 	{
 		glUniform1f( w.uSpotRange, 0.0f );	// no shadowed flashlight -> shader skips (identity)
+	}
+}
+
+// v5.1 third-person FOG glow feed (base pass only). Gathers every NON-LOCAL lantern spot the
+// v5 third-person tell publishes (csz_tpdl_*, isLocal == false) and hands the world FS a small
+// bounded set of glow points so the MIST around each holder brightens faintly ("a lantern in the
+// fog" -> exposes position). It NEVER touches the fog extinction (u_fog / FeedSpotDefog) -> the
+// glow does NOT clear fog; it is additive radiance only, clamped in the shader so clustered
+// holders cannot over-expose. Capped at CSZ_TPFOG_MAX and to the live light budget (kBudgetCull
+// dropped), so the cost is bounded regardless of player count. Pure client effect, zero engine touch.
+void FeedTpFogGlow( const WorldState &w )
+{
+	const int kTpFogMax = 8;	// MUST match CSZ_TPFOG_MAX in csz_world_shaders.inl
+
+	// cvars (registered once; live-tunable so the USER can dial the mist glow in-game).
+	static cvar_t *s_on = NULL, *s_int = NULL, *s_rad = NULL;
+	static cvar_t *s_r = NULL, *s_g = NULL, *s_b = NULL;
+	static bool    s_looked = false;
+	if( !s_looked )
+	{
+		s_looked = true;
+		s_on  = gEngfuncs.pfnRegisterVariable( "csz_tpfog",           "1",    FCVAR_CLIENTDLL );	// master enable (third-person fog glow)
+		s_int = gEngfuncs.pfnRegisterVariable( "csz_tpfog_intensity", "0.35", FCVAR_CLIENTDLL );	// faint glow strength (bounded)
+		s_rad = gEngfuncs.pfnRegisterVariable( "csz_tpfog_radius",    "120",  FCVAR_CLIENTDLL );	// small mist-halo radius (world units)
+		s_r   = gEngfuncs.pfnRegisterVariable( "csz_tpfog_r",         "1.0",  FCVAR_CLIENTDLL );	// warm color R
+		s_g   = gEngfuncs.pfnRegisterVariable( "csz_tpfog_g",         "0.72", FCVAR_CLIENTDLL );	// warm color G
+		s_b   = gEngfuncs.pfnRegisterVariable( "csz_tpfog_b",         "0.42", FCVAR_CLIENTDLL );	// warm color B
+	}
+
+	bool on = ( s_on == NULL ) ? true : ( s_on->value >= 0.5f );
+
+	float pos[kTpFogMax * 3];
+	int   count = 0;
+	if( on )
+	{
+		for( int i = 0; i < LightRegistry::kMaxLights && count < kTpFogMax; i++ )
+		{
+			ActiveLight *l = g_lights.Slot( i );
+			if( !l->used || l->desc.type != kLightSpot )
+				continue;
+			if( l->desc.isLocal )			// local = first-person beam, not a third-person tell
+				continue;
+			if( l->budgetTier == kBudgetCull )	// respect the per-frame light cap (off-screen / over budget)
+				continue;
+			pos[count * 3 + 0] = l->desc.origin[0];
+			pos[count * 3 + 1] = l->desc.origin[1];
+			pos[count * 3 + 2] = l->desc.origin[2];
+			count++;
+		}
+	}
+
+	if( w.uTpFogCount >= 0 )
+		glUniform1i( w.uTpFogCount, count );	// 0 -> the shader's glow loop is skipped (identity)
+	if( count > 0 )
+	{
+		if( w.uTpFogPos >= 0 )       glUniform3fv( w.uTpFogPos, count, pos );
+		if( w.uTpFogRadius >= 0 )    glUniform1f( w.uTpFogRadius, ( s_rad != NULL ) ? s_rad->value : 120.0f );
+		if( w.uTpFogIntensity >= 0 )
+		{
+			float ti = ( s_int != NULL ) ? s_int->value : 0.35f;
+			if( ti < 0.0f ) ti = 0.0f;	// clamp negative (no inverse glow)
+			glUniform1f( w.uTpFogIntensity, ti );
+		}
+		if( w.uTpFogColor >= 0 )
+		{
+			float c[3] = {
+				( s_r != NULL ) ? s_r->value : 1.0f,
+				( s_g != NULL ) ? s_g->value : 0.72f,
+				( s_b != NULL ) ? s_b->value : 0.42f,
+			};
+			glUniform3fv( w.uTpFogColor, 1, c );
+		}
 	}
 }
 
@@ -1130,6 +1207,11 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.uSpotCosInner = UniformLoc( s_world.program, "u_spotCosInner" );
 	s_world.uSpotCosOuter = UniformLoc( s_world.program, "u_spotCosOuter" );
 	s_world.uSpotDefog = UniformLoc( s_world.program, "u_spotDefog" );
+	s_world.uTpFogCount = UniformLoc( s_world.program, "u_tpfogCount" );		// v5.1 third-person fog glow
+	s_world.uTpFogPos = UniformLoc( s_world.program, "u_tpfogPos" );
+	s_world.uTpFogColor = UniformLoc( s_world.program, "u_tpfogColor" );
+	s_world.uTpFogRadius = UniformLoc( s_world.program, "u_tpfogRadius" );
+	s_world.uTpFogIntensity = UniformLoc( s_world.program, "u_tpfogIntensity" );
 	s_world.uCamPos = UniformLoc( s_world.program, "u_camPos" );
 	s_world.uAmbTint = UniformLoc( s_world.program, "u_ambTint" );
 	s_world.uSkyAmbScale = UniformLoc( s_world.program, "u_skyAmbScale" );
@@ -1178,6 +1260,7 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	// guard is skipped so the fog extinction is byte-identical until a frame feeds a spot.
 	if( s_world.uSpotRange >= 0 )    glUniform1f( s_world.uSpotRange, 0.0f );
 	if( s_world.uSpotDefog >= 0 )    glUniform1f( s_world.uSpotDefog, 1.0f );	// floorK 1 = identity even if range fed
+	if( s_world.uTpFogCount >= 0 )   glUniform1i( s_world.uTpFogCount, 0 );	// v5.1: 0 lanterns -> the glow loop is skipped (identity) until fed
 	glUniform3fv( s_world.uCamPos, 1, kCamPosZero );
 	glUniform3fv( s_world.uAmbTint, 1, kTintNeutral );
 	glUniform1f( s_world.uSkyAmbScale, 1.0f );	// L3b: neutral until fed (no sky-ambient dimming)

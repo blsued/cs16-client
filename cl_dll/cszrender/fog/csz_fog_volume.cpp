@@ -71,6 +71,7 @@ cvar_t *s_cvarUpSmooth;    // csz_fog_upsample_smooth default "1": 1 = 5x5 gauss
 cvar_t *s_cvarUpSigma;     // csz_fog_upsample_sigma  default "1.5": gaussian spatial sigma (half-res texels) for the 5x5 path
 cvar_t *s_cvarHalo;        // csz_fog_halo            default "0.6": §5.2 halo/glare strength (wider 2nd forward lobe; 0 = no halo)
 cvar_t *s_cvarAir;         // csz_fog_march_air       default "0.18": §5.2 v3 air-vs-surface balance (was hardcoded kV3MarchScale)
+cvar_t *s_cvarFpMarch;     // csz_flashlight_fpmarch  default "0" (v5.1): first-person lit-air ray-march OFF -> no air-glow haze
 
 // §5.2: the first-person march is the air-glow main act once the local world cone is dropped,
 // but it must NOT wash the surface direct pool. The v3 surface-vs-air balance is now the live
@@ -335,12 +336,31 @@ void FogVolumeRegisterCvars()
 		s_cvarUpSmooth = gEngfuncs.pfnRegisterVariable( "csz_fog_upsample_smooth", "1", FCVAR_CLIENTDLL );
 	if( s_cvarUpSigma == NULL )
 		s_cvarUpSigma = gEngfuncs.pfnRegisterVariable( "csz_fog_upsample_sigma", "1.5", FCVAR_CLIENTDLL );
+	if( s_cvarFpMarch == NULL )
+		// v5.1 (ported from the A/B-verified shelved first-person defog): the first-person
+		// volumetric march lit the air (the cone-周 halo). With the floating dust (slot 13.6)
+		// already carrying the atmosphere AND the first-person cone now CLEARING the fog
+		// (world FS clear-to-0), the extra continuous lit-air haze is redundant + tiring ->
+		// default OFF. The first-person flashlight now = clear fog + lit surfaces + dust, with
+		// NO lit-air shaft. Set csz_flashlight_fpmarch 1 to restore the legacy march for A/B.
+		s_cvarFpMarch = gEngfuncs.pfnRegisterVariable( "csz_flashlight_fpmarch", "0", FCVAR_CLIENTDLL );
 
-	CSZ_LogDev( "fogvol", "cvars registered (csz_fog_quality/steps/halfres/march_intensity/march_g, csz_flashlight_v2/range, csz_fog_upsample_smooth/sigma)" );
+	CSZ_LogDev( "fogvol", "cvars registered (csz_fog_quality/steps/halfres/march_intensity/march_g, csz_flashlight_v2/range/fpmarch, csz_fog_upsample_smooth/sigma)" );
 }
 
 void FogVolumeRender( const ViewSetup &view )
 {
+	// Gate 0 (v5.1, ported from the shelved A/B-verified first-person defog): the first-person
+	// air ray-march is OFF by default. This pass is the ONLY producer of the first-person
+	// lit-air shaft/halo. With the first-person cone now CLEARING fog (world FS) and the dust
+	// (slot 13.6) supplying the atmosphere, the lit-air haze is redundant + tiring -> drop it.
+	// Early-out at the very top, before any GL state / FBO / program work, so the pass is a
+	// true side-effect-free no-op. FogGodraysRender + DustRender are SEPARATE calls
+	// (csz_renderer.cpp), so god rays and dust are unaffected. Set csz_flashlight_fpmarch 1 to
+	// restore the legacy march for A/B.
+	if( ReadCvar( s_cvarFpMarch, 0.0f ) < 0.5f )
+		return;
+
 	// Gate 1: quality tier (Step 3 lives at Med+; Low = analytic base fog only).
 	if( ReadCvar( s_cvarQuality, 1.0f ) < 1.0f )
 		return;
