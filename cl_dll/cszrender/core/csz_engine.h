@@ -56,6 +56,15 @@ model_t *WorldModel();                  // gRenderAPI.pfnGetModel( 1 ); NULL whe
 int TexSlotToGlName( int texSlot );     // RenderGetParm( PARM_TEX_TEXNUM, texSlot ); 0 on failure
 float ClientTime();                     // gEngfuncs.GetClientTime()
 
+// True when player entity index `idx` is currently DEAD (server-authoritative
+// scoreboard flag g_PlayerExtraInfo[idx].dead, fed by the ScoreAttrib message for
+// bots AND humans alike). Used to suppress the third-person flashlight lantern on
+// corpses: a dead holder's cl_entity_t can retain a stale EF_DIMLIGHT in its last
+// networked curstate, so the EF_DIMLIGHT bit alone is not a safe "glow" signal.
+// Out-of-range / index 0 (worldspawn) -> false. Lives here because g_PlayerExtraInfo
+// is a hud.h global and csz_engine.cpp is the only cszrender TU allowed to touch it.
+bool PlayerIsDead( int idx );
+
 // Active round timing: round start=sunset, end=dawn. false when no round is
 // active (idle / between rounds) -> sky falls back to a free-running cycle.
 bool RoundTiming( float &outDuration, float &outRemaining );

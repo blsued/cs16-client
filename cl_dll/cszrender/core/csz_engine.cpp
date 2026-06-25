@@ -66,6 +66,18 @@ bool RoundTiming( float &outDuration, float &outRemaining )
 	return gHUD.m_Timer.GetRoundTiming( ClientTime(), outDuration, outRemaining );
 }
 
+bool PlayerIsDead( int idx )
+{
+	// g_PlayerExtraInfo is sized [MAX_PLAYERS+1]; valid player slots are 1..MAX_PLAYERS
+	// (idx 0 is worldspawn). The 'dead' bool is set from PLAYER_DEAD in ScoreAttrib for
+	// every player the server reports (bots and humans), so it stays valid for a corpse
+	// even after its entity stops delta-updating EF_DIMLIGHT.
+	if( idx < 1 || idx > MAX_PLAYERS )
+		return false;
+
+	return g_PlayerExtraInfo[idx].dead;
+}
+
 // fog M1 L4 moonlight Tyndall air-glow toggle (csz_moonshaft). Default "0" =
 // the L4 moon-axis shaft is OFF: it is a cloud-gap volumetric effect that needs a
 // meaningful shaftMask (clouds = a future milestone), and the S3 HG in-scatter lobe

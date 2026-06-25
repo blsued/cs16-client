@@ -563,6 +563,17 @@ void CollectRealFlashlights( const ViewSetup &mainView )
 		if( lit && i != localIdx && !tpdlOn )
 			lit = false;
 
+		// Corpses never glow. The server clears EF_DIMLIGHT on death (regamedll Killed)
+		// and only re-arms ALIVE bots, but a dead holder's cl_entity_t can keep a STALE
+		// EF_DIMLIGHT in its retained curstate (the corpse entity stops delta-updating
+		// effects), so the bit alone is not a safe alive signal. Gate the NON-LOCAL
+		// third-person lantern on the server-authoritative scoreboard dead flag
+		// (g_PlayerExtraInfo[i].dead, set for bots AND humans) so a corpse stops glowing
+		// the instant the server reports the death. The local first-person beam follows
+		// the viewer's own flashlight state and is left to its path below.
+		if( lit && i != localIdx && csz::PlayerIsDead( i ) )
+			lit = false;
+
 		if( !lit )
 		{
 			FlashlightClear( i );	// off this frame / disconnected -> drop the beam
