@@ -289,7 +289,7 @@ void FeedTpFogGlow( const WorldState &w )
 	if( !s_looked )
 	{
 		s_looked = true;
-		s_on  = gEngfuncs.pfnRegisterVariable( "csz_tpfog",           "1",    FCVAR_CLIENTDLL );	// master enable (third-person fog glow)
+		s_on  = gEngfuncs.pfnRegisterVariable( "csz_tpfog",           "0",    FCVAR_CLIENTDLL );	// v5.2: third-person fog glow OFF by default (USER removed the mist-glow; code kept behind cvar, set csz_tpfog 1 for A/B)
 		s_int = gEngfuncs.pfnRegisterVariable( "csz_tpfog_intensity", "0.35", FCVAR_CLIENTDLL );	// faint glow strength (bounded)
 		s_rad = gEngfuncs.pfnRegisterVariable( "csz_tpfog_radius",    "120",  FCVAR_CLIENTDLL );	// small mist-halo radius (world units)
 		s_r   = gEngfuncs.pfnRegisterVariable( "csz_tpfog_r",         "1.0",  FCVAR_CLIENTDLL );	// warm color R
