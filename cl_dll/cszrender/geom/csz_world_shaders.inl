@@ -135,7 +135,6 @@ uniform vec3  u_spotDir;          // normalized cone forward
 uniform float u_spotRange;        // beam length (world units); <=0 => no flashlight this frame -> shader is identity
 uniform float u_spotCosInner;     // soft cone rim start (cos half-angle, inner)
 uniform float u_spotCosOuter;     // cone cutoff       (cos half-angle, outer)
-uniform float u_spotDefog;        // floorK: legacy floor (v5.1 first-person now clears to ZERO -> read no longer; kept as inert uniform)
 // v5.1 third-person FOG glow: each NON-LOCAL lantern (csz_tpdl_*) faintly lights the MIST
 // around its holder ("a lantern in the fog" -> exposes position) WITHOUT clearing fog. Pure
 // ADDITIVE in-scatter, bounded per-light by a small radius and CLAMPED in sum so clustered
@@ -315,8 +314,8 @@ void main()
 	// 0). Angular mask = view ray vs cone dir (smoothstep cosOuter..cosInner -> 0 outside the
 	// cone); distance falloff fades the clearing toward the beam's range so far fog re-thickens.
 	// Outside the cone -- or with no flashlight (u_spotRange<=0) -- clearFactor=0 and the
-	// extinction byte is UNCHANGED from the server value (gameplay blackout preserved). u_spotDefog
-	// (floorK) is no longer read here (optimized out) -- the clear goes fully to 0, not floorK.
+	// extinction byte is UNCHANGED from the server value (gameplay blackout preserved). The clear
+	// goes fully to 0 (no floorK floor; the v1-v5 u_spotDefog floor uniform was removed).
 	float fogA = u_fog.w;
 	if( u_spotRange > 0.0 )
 	{

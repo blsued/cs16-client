@@ -135,7 +135,7 @@ struct WorldState
 	int uMoonDir, uMoonColor;			// S2 gated night moon directional (base pass only)
 	int uNightSky, uNightFloor, uNightK, uNightMoon;	// S2 world night ambient calibration (base pass only)
 	int uBrushAlpha;		// per-entity translucency for blended brush modes (renderamt); 1.0 = opaque/world
-	int uSpotOrigin, uSpotDir, uSpotRange, uSpotCosInner, uSpotCosOuter, uSpotDefog;	// flashlight defog cone (base pass only; local clear of black fog)
+	int uSpotOrigin, uSpotDir, uSpotRange, uSpotCosInner, uSpotCosOuter;	// flashlight defog cone (base pass only; local clear of black fog)
 	int uTpFogCount, uTpFogPos, uTpFogColor, uTpFogRadius, uTpFogIntensity;	// v5.1 third-person fog glow (non-local lanterns light the mist, bounded)
 	ShaderProgram litProgram;	// additive per-light pass (T6)
 	int litUViewProj, litUModel, litUAlphaTest;
@@ -230,27 +230,22 @@ void FeedFog( const WorldState &w, const AmbienceParams &amb )
 }
 
 // Flashlight defog feed (base pass only). Pushes the local player's shadowed-flashlight cone
-// + a "defog strength" floorK so the base FS can locally LOWER the fog extinction INSIDE the
-// cone (a see-through path) while the server fog stays untouched everywhere else. Same spot the
-// volumetric march uses (FogVolumeLocalSpot). No flashlight this frame -> u_spotRange 0 ->
-// shader is identity. Pure render-side; never touches u_fog / the server black-fog protocol.
+// so the base FS can locally clear the fog extinction INSIDE the cone (a see-through path) while
+// the server fog stays untouched everywhere else. Same spot the volumetric march uses
+// (FogVolumeLocalSpot). No flashlight this frame -> u_spotRange 0 -> shader is identity. Pure
+// render-side; never touches u_fog / the server black-fog protocol. (The v1-v5 floorK strength
+// uniform u_spotDefog/csz_flashlight_defog was removed once the v5.1 shader started clearing to
+// ZERO rather than a floor -- the cvar was no longer read.)
 void FeedSpotDefog( const WorldState &w )
 {
-	// csz_flashlight_defog (NEW, floorK) + csz_flashlight_range (FogVolume-owned) fetched once.
-	static cvar_t *s_cvarDefog = NULL;
+	// csz_flashlight_range (FogVolume-owned) fetched once; caps the clear distance.
 	static cvar_t *s_cvarRange = NULL;
 	static bool    s_looked = false;
 	if( !s_looked )
 	{
 		s_looked = true;
-		// floorK: extinction multiplier at the cone core. 0.2 = clearly see-through but a thin
-		// fog remains (锥内不全干); 1.0 = off/identity; lower = clears more. Live-tunable.
-		s_cvarDefog = gEngfuncs.pfnRegisterVariable( "csz_flashlight_defog", "0.2", FCVAR_CLIENTDLL );
 		s_cvarRange = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_range" );	// owned by FogVolume
 	}
-	float floorK = ( s_cvarDefog != NULL ) ? s_cvarDefog->value : 0.2f;
-	if( floorK < 0.0f ) floorK = 0.0f;
-	if( floorK > 1.0f ) floorK = 1.0f;	// 1 = identity (no defog)
 	float range = ( s_cvarRange != NULL ) ? s_cvarRange->value : 1600.0f;
 
 	SpotLightParams spot;
@@ -263,7 +258,6 @@ void FeedSpotDefog( const WorldState &w )
 		if( w.uSpotRange >= 0 )    glUniform1f( w.uSpotRange, len );
 		if( w.uSpotCosInner >= 0 ) glUniform1f( w.uSpotCosInner, spot.cosInner );
 		if( w.uSpotCosOuter >= 0 ) glUniform1f( w.uSpotCosOuter, spot.cosOuter );
-		if( w.uSpotDefog >= 0 )    glUniform1f( w.uSpotDefog, floorK );
 	}
 	else if( w.uSpotRange >= 0 )
 	{
@@ -1206,7 +1200,6 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.uSpotRange = UniformLoc( s_world.program, "u_spotRange" );
 	s_world.uSpotCosInner = UniformLoc( s_world.program, "u_spotCosInner" );
 	s_world.uSpotCosOuter = UniformLoc( s_world.program, "u_spotCosOuter" );
-	s_world.uSpotDefog = UniformLoc( s_world.program, "u_spotDefog" );
 	s_world.uTpFogCount = UniformLoc( s_world.program, "u_tpfogCount" );		// v5.1 third-person fog glow
 	s_world.uTpFogPos = UniformLoc( s_world.program, "u_tpfogPos" );
 	s_world.uTpFogColor = UniformLoc( s_world.program, "u_tpfogColor" );
@@ -1259,7 +1252,6 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	// Flashlight defog defaults to OFF: u_spotRange 0 -> the shader's `if(u_spotRange>0)`
 	// guard is skipped so the fog extinction is byte-identical until a frame feeds a spot.
 	if( s_world.uSpotRange >= 0 )    glUniform1f( s_world.uSpotRange, 0.0f );
-	if( s_world.uSpotDefog >= 0 )    glUniform1f( s_world.uSpotDefog, 1.0f );	// floorK 1 = identity even if range fed
 	if( s_world.uTpFogCount >= 0 )   glUniform1i( s_world.uTpFogCount, 0 );	// v5.1: 0 lanterns -> the glow loop is skipped (identity) until fed
 	glUniform3fv( s_world.uCamPos, 1, kCamPosZero );
 	glUniform3fv( s_world.uAmbTint, 1, kTintNeutral );
