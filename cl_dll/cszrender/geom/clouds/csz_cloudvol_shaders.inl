@@ -96,17 +96,13 @@ uniform float u_silverWidth;   // rim band width: LOW=broad glow reaching inward
 uniform float u_sigmaT;        // extinction coefficient (1/world-units along the march)
 uniform float u_baseFreq;      // base 3D-noise frequency (1/world-units)
 uniform float u_detailFreq;    // detail 3D-noise frequency (1/world-units)
-uniform float u_detailAmt;     // high-frequency Worley edge-erosion amount
-uniform float u_falloff;       // X/Y face-falloff window fraction (density->0 BEFORE the box faces)
-uniform float u_hBase;         // height-gradient: base taper fraction (flat-ish feathered base)
-uniform float u_hTop;          // height-gradient: where the rounded top begins
+uniform float u_detailAmt;     // high-frequency Worley EDGE-erosion strength (interiors stay smooth)
+uniform float u_falloff;       // SAFETY-fade band: density->0 within this outer fraction of each AABB face
 uniform float u_powder;        // powder dark-edge strength
-uniform float u_billow;        // cauliflower lobe separation (0=smooth mass, 1=deeply lobed turrets)
-uniform float u_erodeDepth;    // multi-octave erosion valley DEPTH (deeper notches BETWEEN lobes)
-uniform int   u_erodeOct;      // erosion octave count 1..4 (coarse turret-scale valleys + fine edge fray)
-uniform float u_selfShadow;    // cone-march self-shadow strength (darkens valleys/undersides -> internal pockets)
-uniform float u_baseIrreg;     // underside irregularity (bumpy / mammatus base instead of a flat plane)
-uniform float u_towerVar;      // tower height variance (ragged uneven crown; some lobes rise higher)
+uniform float u_erodeDepth;    // high-freq edge-erosion DEPTH (how far the detail bites the envelope edge)
+uniform int   u_erodeOct;      // detail erosion octave count 1..3
+uniform float u_selfShadow;    // cone-march self-shadow / multi-scatter extinction weight (internal pockets)
+uniform float u_envWarp;       // organic silhouette perturbation amount (low-freq noise warp of the lobe shell)
 uniform float u_lightReach;    // TOTAL cone light-march reach toward the lit body (world units)
 uniform float u_marchFar;      // hard distance cap (world units)
 uniform vec2  u_targetSize;    // quarter-res target size in pixels
@@ -142,85 +138,130 @@ float remap( float v, float a, float b, float c, float d )
 	return c + ( clamp( ( v - a ) / max( b - a, 1e-4 ), 0.0, 1.0 ) ) * ( d - c );
 }
 
-// SampleCloudDensity -- the SINGLE density function used by BOTH the view march AND the
-// cone light march (codex #8: no hidden "delete density / keep lighting" coupling).
-// detail=1 pays for the multi-octave Worley edge/valley erosion (view march); detail=0
-// skips ONLY that fine pass -- the cone shadow lookup STILL sees the full lobe + ragged-
-// height + irregular-base structure, so the light march genuinely self-shadows the valleys
-// and undersides (internal shadow pockets), while buying back the per-tap erosion cost.
-float SampleCloudDensity( vec3 p, int detail )
+// =============================================================================
+// ORGANIC MACRO SHAPE (the anti-CUBE re-architecture). The AABB is now ONLY an
+// invisible march bound -- the visible silhouette comes from a smooth-union of
+// ellipsoid lobes: a wide flat MOTHER BODY + several cauliflower TOWERS at varied
+// heights + a rounded CAP, perturbed by low-frequency noise and cut by a ragged,
+// broken BASE. This is a believable cumulus/cumulonimbus, not a box. Density
+// reaches 0 within the outer u_falloff fraction of every AABB face (a SAFETY fade,
+// NEVER the cloud shape). Built in box-normalized coords q in [-1,1]^3 so the lobe
+// layout is independent of the hero box's world size (Quake Z-up = vertical).
+// =============================================================================
+float sdEllipsoid( vec3 p, vec3 r )
 {
-	vec3 wind = vec3( u_time * 0.6, u_time * 0.25, 0.0 );   // SLOW wind (do not swamp parallax)
-	vec3 uvw  = ( p + wind ) * u_baseFreq;
-	vec4 b    = texture( u_base3d, uvw );
-	// Worley billow FBM from the increasing-frequency G/B/A octaves: HIGH at lump centers,
-	// LOW in the gaps between cells -> the cauliflower lobe field that shapes the turrets.
-	float wfbm = b.g * 0.625 + b.b * 0.25 + b.a * 0.125;
+	vec3 q = p / r;
+	return ( length( q ) - 1.0 ) * min( min( r.x, r.y ), r.z );
+}
 
-	float zspan = max( u_boxMax.z - u_boxMin.z, 1.0 );
-	float h = clamp( ( p.z - u_boxMin.z ) / zspan, 0.0, 1.0 );
+// Polynomial smooth-minimum (metaball union of two SDFs over blend radius k).
+float smin( float a, float b, float k )
+{
+	float t = clamp( 0.5 + 0.5 * ( b - a ) / k, 0.0, 1.0 );
+	return mix( b, a, t ) - k * t * ( 1.0 - t );
+}
 
-	// --- VERTICAL DEVELOPMENT: ragged, uneven crown. Lump cores (coarse Worley b.g high) push
-	// their top ABOVE u_hTop while the gaps cap BELOW it, so the silhouette is a CLUSTER of
-	// turrets at DIFFERENT heights -- a towering cumulus, not one flat ceiling. ---
-	float hTopVar = clamp( u_hTop + u_towerVar * ( b.g - 0.5 ) * 2.0, u_hBase + 0.05, 0.999 );
+float CloudShapeEnvelope( vec3 p, out float h )
+{
+	vec3 bc = 0.5 * ( u_boxMin + u_boxMax );
+	vec3 bh = max( 0.5 * ( u_boxMax - u_boxMin ), vec3( 1.0 ) );
+	vec3 q  = ( p - bc ) / bh;                          // box-normalized [-1,1]^3
 
-	// --- IRREGULAR UNDERSIDE: perturb the base-taper height with the billow field so the bottom
-	// BULGES and dimples (cauliflower/mammatus-like lumps) instead of reading as a flat plane. ---
-	float baseEdge = max( u_hBase * ( 1.0 + u_baseIrreg * ( wfbm - 0.5 ) * 2.0 ), 0.01 );
-
-	float base = clamp( remap( h, 0.0, baseEdge, 0.0, 1.0 ), 0.0, 1.0 );
-	float top  = clamp( remap( h, hTopVar, 1.0, 1.0, 0.0 ), 0.0, 1.0 );
-	float grad = base * top;          // valleys between turrets (h > local top) read as open sky
-	if( grad <= 0.0 )
+	float bound = max( max( abs( q.x ), abs( q.y ) ), abs( q.z ) );
+	h = clamp( ( q.z + 0.55 ) / 1.25, 0.0, 1.0 );       // 0 at ragged base .. 1 at crown
+	if( bound > 0.999 )
 		return 0.0;
 
-	// Dilate the low-freq Perlin-Worley (R) by the Worley FBM: the connected base mass.
-	float cloud = remap( b.r, wfbm - 1.0, 1.0, 0.0, 1.0 );
-	cloud *= grad;
+	// low-frequency Perlin-Worley (R) sampled at a SHAPE scale, decoupled from the
+	// body-noise frequency, used to warp the lobe shell into an organic silhouette.
+	float low = texture( u_base3d, ( p + vec3( u_time * 0.25, 0.0, 0.0 ) ) * ( 1.0 / 8500.0 ) ).r;
 
-	// --- CAULIFLOWER TURRET CARVE: contrast-stretch the billow field into distinct lobes (pow
-	// sharpens the Worley crests) and use (1 - lobes) as a lower erosion bound, opening DEEP
-	// valleys BETWEEN turrets at TURRET scale -- the move that turns one smooth lump into several
-	// well-separated cauliflower bumps. u_billow = lobe separation (0 => the old smooth mass). ---
-	float lobes = pow( clamp( wfbm, 0.0, 1.0 ), 1.0 + u_billow * 3.0 );
-	cloud = remap( cloud, ( 1.0 - lobes ) * u_billow * 0.85, 1.0, 0.0, 1.0 );
+	// mother body: wide, flat, sitting low in the box.
+	float d = sdEllipsoid( q - vec3(  0.00,  0.00, -0.34 ), vec3( 0.74, 0.60, 0.26 ) );
+	// stacked cauliflower towers at varied positions / heights / sizes (the billowing crown).
+	d = smin( d, sdEllipsoid( q - vec3( -0.34,  0.06, -0.04 ), vec3( 0.32, 0.27, 0.40 ) ), 0.20 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.06, -0.12,  0.16 ), vec3( 0.40, 0.32, 0.58 ) ), 0.22 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.38,  0.10,  0.06 ), vec3( 0.31, 0.26, 0.46 ) ), 0.20 );
+	d = smin( d, sdEllipsoid( q - vec3( -0.10,  0.30,  0.30 ), vec3( 0.30, 0.24, 0.34 ) ), 0.18 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.20, -0.26,  0.22 ), vec3( 0.27, 0.23, 0.36 ) ), 0.18 );
+	// rounded cap riding the central tower.
+	d = smin( d, sdEllipsoid( q - vec3( -0.06,  0.10,  0.50 ), vec3( 0.26, 0.22, 0.30 ) ), 0.16 );
 
-	// Coverage gate (WHERE cloud exists). Higher coverage -> a fuller, more solid tower.
-	cloud = remap( cloud, 1.0 - u_coverage, 1.0, 0.0, 1.0 );
+	// perturb the implicit surface with low-freq noise -> ragged, organic, non-symmetric edge.
+	d += ( 0.5 - low ) * u_envWarp;
 
-	if( detail == 1 && cloud > 0.0 && u_detailAmt > 0.001 )
+	// SDF -> soft 0..1 mask (deep inside -> 1, outside the shell -> 0).
+	float env = smoothstep( 0.12, -0.10, d );
+
+	// ragged, noise-broken BASE (no flat plane): density fades below a perturbed base height.
+	float baseZ = -0.52 + ( low - 0.5 ) * 0.12;
+	env *= smoothstep( baseZ, baseZ + 0.12, q.z );
+
+	// SAFETY fade ONLY: guarantee density -> 0 before the box faces over the outer u_falloff band.
+	env *= 1.0 - smoothstep( 1.0 - u_falloff, 1.0, bound );
+
+	return env;
+}
+
+// SampleCloudDensity -- the SINGLE density function used by BOTH the view march AND the cone
+// light / sky-visibility marches (no hidden "delete density / keep lighting" coupling). The
+// organic macro envelope sets the silhouette; the baked noise only FILLS and ERODES WITHIN it:
+//   * low-freq Perlin-Worley (R) dilated by the Worley FBM = the SOFT billowy body (anti-popcorn,
+//     never raw Worley), coverage slides the existence threshold;
+//   * high-freq Worley = EDGE-ONLY erosion (the (1-smoothstep) edge weight keeps dense interiors
+//     smooth -- the anti-popcorn rule). detail=0 skips ONLY the fine erosion (cheap shadow taps).
+float SampleCloudDensity( vec3 p, int detail )
+{
+	float h;
+	float macro = CloudShapeEnvelope( p, h );
+	if( macro <= 0.001 )
+		return 0.0;
+
+	vec3 wind = vec3( u_time * 0.6, u_time * 0.25, 0.0 );   // SLOW wind (do not swamp parallax)
+	vec4 b    = texture( u_base3d, ( p + wind ) * u_baseFreq );
+	// Worley billow FBM from the increasing-frequency G/B/A octaves: dilates the Perlin base.
+	float wfbm = dot( b.gba, vec3( 0.625, 0.25, 0.125 ) );
+
+	// Nubis-style: coherent Perlin-Worley base (R), coverage slides the existence threshold,
+	// the Worley FBM DILATES it into round soft billows (NOT raw Worley = popcorn).
+	float base = remap( b.r, 1.0 - u_coverage, 1.0, 0.0, 1.0 );
+	base = mix( base, remap( base, wfbm * 0.35, 1.0, 0.0, 1.0 ), 0.35 );
+
+	float cloud = macro * base;
+
+	if( detail == 1 && cloud > 0.01 && u_detailAmt > 0.001 )
 	{
-		vec3 dt = texture( u_detail3d, ( p + wind * 2.0 ) * u_detailFreq ).rgb;
-		// MULTI-OCTAVE erosion field: octave 0 = coarse base Worley (b.b) carving TURRET-scale
-		// valleys/notches BETWEEN lobes; octaves 1..3 = the detail Worley channels (increasing
-		// freq) fraying the edges into wisps. u_erodeOct selects how many octaves blend in.
-		float dfbm = b.b;
-		float norm = 1.0;
-		float amp  = 0.55;
-		if( u_erodeOct >= 2 ) { dfbm += dt.r * amp; norm += amp; amp *= 0.6; }
-		if( u_erodeOct >= 3 ) { dfbm += dt.g * amp; norm += amp; amp *= 0.6; }
-		if( u_erodeOct >= 4 ) { dfbm += dt.b * amp; norm += amp; }
+		// high-freq Worley detail, EDGE-WEIGHTED so dense interiors are untouched (the anti-popcorn
+		// rule): the (1 - smoothstep) edge mask -> 0 inside thick cloud, 1 only near the thin edge.
+		// u_erodeOct blends 1..3 detail octaves; u_erodeDepth scales how far it bites; wispy at the
+		// base -> firmer toward the crown via h.
+		vec3 dt = texture( u_detail3d, ( p + wind * 1.7 ) * u_detailFreq ).rgb;
+		float dfbm = dt.r;
+		float norm = 1.0, amp = 0.5;
+		if( u_erodeOct >= 2 ) { dfbm += dt.g * amp; norm += amp; amp *= 0.5; }
+		if( u_erodeOct >= 3 ) { dfbm += dt.b * amp; norm += amp; }
 		dfbm /= norm;
-		// wispy curls at the base, firmer toward the crown.
-		float erode = mix( dfbm, 1.0 - dfbm, clamp( h * 2.0, 0.0, 1.0 ) );
-		// erosion DEPTH eats the lower bound further in -> deeper gaps between stacked lobes.
-		cloud = remap( cloud, erode * u_detailAmt * u_erodeDepth, 1.0, 0.0, 1.0 );
+		float edge     = 1.0 - smoothstep( 0.35, 0.85, cloud );
+		float erodeAmt = u_detailAmt * u_erodeDepth * edge * mix( 0.55, 1.0, h );
+		cloud = remap( cloud, dfbm * erodeAmt, 1.0, 0.0, 1.0 );
 	}
 
-	// X/Y FACE FALLOFF -- the box-silhouette killer. Feather density smoothly to ZERO over the
-	// outer u_falloff fraction of each horizontal half-extent so the cloud NEVER reaches the AABB
-	// side faces: open sky reads through near the box boundary, and the remaining mass is an
-	// organic blob inside the box, not a filled cube. (The vertical Z faces are already feathered
-	// by heightGradient's base taper + rounded top.)
-	vec3  bc    = 0.5 * ( u_boxMin + u_boxMax );
-	vec2  bhalf = max( 0.5 * ( u_boxMax.xy - u_boxMin.xy ), vec2( 1.0 ) );
-	vec2  dn    = abs( p.xy - bc.xy ) / bhalf;          // 0 at center -> 1 at the X/Y face
-	float win   = smoothstep( 1.0, 1.0 - u_falloff, dn.x )
-	            * smoothstep( 1.0, 1.0 - u_falloff, dn.y );
-	cloud *= win;
-
 	return clamp( cloud, 0.0, 1.0 ) * u_density;
+}
+
+// Cheap UPWARD density trace (Quake Z-up) for sky-visibility ambient occlusion: accumulates
+// optical-depth toward the sky so deep/under-cloud samples receive LESS sky ambient (AO).
+float TraceDensityUp( vec3 p, int steps, float reach )
+{
+	float stepLen = reach / float( max( steps, 1 ) );
+	float acc = 0.0;
+	for( int i = 0; i < 4; i++ )
+	{
+		if( i >= steps ) break;
+		vec3 sp = p + vec3( 0.0, 0.0, 1.0 ) * ( stepLen * ( float( i ) + 0.5 ) );
+		acc += SampleCloudDensity( sp, 0 ) * stepLen;
+	}
+	return acc;
 }
 
 // Normalized Henyey-Greenstein phase.
@@ -287,13 +328,8 @@ void main()
 	float t = t0 + stepLen * jit;
 
 	float cosT   = dot( rd, u_lightDir );   // +1 => view looks TOWARD the lit body (forward scatter / BACKLIT cloud)
-	float gFwd   = 0.72;                     // forward in-scatter lobe (peaks looking toward the light)
-	float phase  = 0.9 * hg( cosT, gFwd ) + 0.12 * hg( cosT, -0.2 );
 	// Toward-light gate for the silver lining: rises as the view turns INTO the light (the real
-	// golden-hour gameplay case = looking toward the low bright sun THROUGH the cloud). Broad
-	// onset (-0.15..0.55) so the rim is a WIDE glowing band, not a razor sliver. This REPLACES the
-	// prior INVERTED gate smoothstep(-0.05,-0.6,cosT), which only fired when looking AWAY from the
-	// sun -- so the silver lining never appeared head-on toward a low golden-hour sun.
+	// golden-hour gameplay case = looking toward the low bright sun THROUGH the cloud).
 	float towardLight = smoothstep( -0.15, 0.55, cosT );
 
 	float lightStepLen = u_lightReach / float( max( u_lightSteps, 1 ) );
@@ -308,7 +344,9 @@ void main()
 		float dens = SampleCloudDensity( p, 1 );
 		if( dens > 0.0015 )
 		{
-			// --- cone light march toward the lit body (BASE density only) ---
+			float hf = clamp( ( p.z - u_boxMin.z ) / max( u_boxMax.z - u_boxMin.z, 1.0 ), 0.0, 1.0 );
+
+			// --- cone light march toward the lit body (BASE density only) -> cone optical depth ---
 			float lt = 0.0;
 			for( int j = 0; j < MAX_LIGHT; j++ )
 			{
@@ -316,30 +354,45 @@ void main()
 				vec3 lp = p + u_lightDir * ( lightStepLen * ( float( j ) + 0.5 ) );
 				lt += SampleCloudDensity( lp, 0 ) * lightStepLen;
 			}
-			// SELF-SHADOW: u_selfShadow weights the cone optical depth so the lit lobes pop
-			// against DARK valleys/undersides (internal shadow pockets) -- the #1 thing that sells
-			// 3D. The cone sees the full lobe + ragged-height + bumpy-base structure (above), so
-			// the darkening lands in the gaps and on the shadowed turret faces.
-			float Tl = exp( -u_sigmaT * lt * u_selfShadow );
-			// cheap multiscatter octave reuse (no re-march)
-			float ms = Tl + 0.5 * pow( Tl, 0.5 );
-			// --- forward-scatter SILVER LINING: the brilliant gold/bright rim of a BACKLIT cloud.
-			// Fires when looking toward the lit body (towardLight) and where sunlight still penetrates
-			// the cloud (Tl high => thin rim/edge). pow(Tl,u_silverWidth) with a SMALL width broadens
-			// the glow INWARD from the razor edge; the hg core gives the directional blaze and the
-			// +0.4 floor keeps the whole lit rim glowing (not just the peak). Colored by u_lightColor
-			// downstream (warm sun => gold lining; cool moon => cool lining).
-			float pene = pow( clamp( Tl, 0.0, 1.0 ), u_silverWidth );
-			float rim  = u_silver * towardLight * pene * ( hg( cosT, 0.6 ) + 0.4 );
-			// powder dark-edge: deepens the self-shadowed near faces of dense lumps
-			float powder = 1.0 - exp( -2.0 * dens * stepLen * 40.0 );
-			float powderShade = mix( 1.0, 0.45 + 0.55 * Tl, 0.6 ) * max( 0.05, 1.0 - 0.35 * u_powder * powder );
-			// height-aware ambient skylight (undersides not black)
-			float hf = clamp( ( p.z - u_boxMin.z ) / max( u_boxMax.z - u_boxMin.z, 1.0 ), 0.0, 1.0 );
-			vec3 ambient = mix( u_ambGround, u_ambSky, hf );
+			float tauL = u_sigmaT * lt;
+
+			// --- HILLAIRE-STYLE MULTI-SCATTER: 3 octaves, each HALVING extinction / phase
+			// anisotropy / contribution weight -> the soft, deep, layered in-scatter glow of a real
+			// cumulus, NO extra marching. octave 0 carries the dual-lobe HG (0.8 forward / -0.15 back),
+			// deeper octaves broaden into the diffuse multi-scatter floor. u_selfShadow weights the
+			// cone extinction so lit lobes still pop against shadowed valleys/undersides. ---
+			float scatter = 0.0;
+			float weight = 1.0, ext = 1.0, g = 0.80;
+			for( int o = 0; o < 3; o++ )
+			{
+				float Tr = exp( -tauL * ext * u_selfShadow );
+				float ph = 0.8 * hg( cosT, g ) + 0.2 * hg( cosT, -0.15 * ext );
+				scatter += weight * Tr * ph;
+				weight *= 0.45;
+				ext    *= 0.55;
+				g      *= 0.55;
+			}
+
+			// powder dark-edge sugar: darkens the THIN lit edges (the dark-sugar look), interiors full.
+			float powderD    = 1.0 - exp( -2.0 * dens * stepLen * 40.0 );
+			float powderTerm = mix( 1.0, powderD, u_powder * 0.5 );
+
+			// SILVER LINING: ONLY on THIN / backlit / translucent edges (the codex `thin` mask), NOT
+			// sqrt(Tl) frosting the whole top. Fires looking toward the lit body where light still
+			// penetrates (exp(-tauL) high); u_silverWidth broadens the penetration band inward.
+			float thin = smoothstep( 0.02, 0.14, dens ) * ( 1.0 - smoothstep( 0.25, 0.55, dens ) );
+			float pene = smoothstep( 0.95 - 0.10 * u_silverWidth, 0.95, exp( -tauL ) );
+			float rim  = u_silver * towardLight * thin * pene * hg( cosT, 0.75 );
+
+			// SKY-VISIBILITY AMBIENT: cheap upward density trace -> ambient occlusion; sky term scaled
+			// by sky-vis * height gradient, plus a dim ground-bounce term (undersides not black).
+			float skyVis = exp( -0.5 * u_sigmaT * TraceDensityUp( p, 3, 900.0 ) );
+			vec3  ambient = u_ambSky * skyVis * mix( 0.35, 1.0, hf )
+			              + u_ambGround * 0.35 * ( 1.0 - hf );
+
 			// energy-conserving in-scatter slice (Beer-Lambert)
 			float stepT = exp( -u_sigmaT * dens * stepLen );
-			vec3 S = u_lightColor * ( ms * phase * powderShade + rim ) + ambient;
+			vec3 S = u_lightColor * ( scatter * powderTerm + rim ) + ambient;
 			L += Tview * ( 1.0 - stepT ) * S;
 			Tview *= stepT;
 			if( Tview < 0.01 )
