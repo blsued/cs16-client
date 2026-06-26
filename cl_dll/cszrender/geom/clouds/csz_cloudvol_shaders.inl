@@ -101,6 +101,12 @@ uniform float u_falloff;       // X/Y face-falloff window fraction (density->0 B
 uniform float u_hBase;         // height-gradient: base taper fraction (flat-ish feathered base)
 uniform float u_hTop;          // height-gradient: where the rounded top begins
 uniform float u_powder;        // powder dark-edge strength
+uniform float u_billow;        // cauliflower lobe separation (0=smooth mass, 1=deeply lobed turrets)
+uniform float u_erodeDepth;    // multi-octave erosion valley DEPTH (deeper notches BETWEEN lobes)
+uniform int   u_erodeOct;      // erosion octave count 1..4 (coarse turret-scale valleys + fine edge fray)
+uniform float u_selfShadow;    // cone-march self-shadow strength (darkens valleys/undersides -> internal pockets)
+uniform float u_baseIrreg;     // underside irregularity (bumpy / mammatus base instead of a flat plane)
+uniform float u_towerVar;      // tower height variance (ragged uneven crown; some lobes rise higher)
 uniform float u_lightReach;    // TOTAL cone light-march reach toward the lit body (world units)
 uniform float u_marchFar;      // hard distance cap (world units)
 uniform vec2  u_targetSize;    // quarter-res target size in pixels
@@ -136,47 +142,70 @@ float remap( float v, float a, float b, float c, float d )
 	return c + ( clamp( ( v - a ) / max( b - a, 1e-4 ), 0.0, 1.0 ) ) * ( d - c );
 }
 
-// Cumulus vertical profile across the hero box [0 = base, 1 = top]: a flat-ish defined
-// base that ramps up quickly, full density through the body, rounding off into a fat
-// rounded top -- reads as a towering cumulus, not a thin flat layer.
-float heightGradient( float h )
-{
-	float base = clamp( remap( h, 0.0, u_hBase, 0.0, 1.0 ), 0.0, 1.0 );
-	float top  = clamp( remap( h, u_hTop, 1.0, 1.0, 0.0 ), 0.0, 1.0 );
-	return base * top;
-}
-
 // SampleCloudDensity -- the SINGLE density function used by BOTH the view march AND the
 // cone light march (codex #8: no hidden "delete density / keep lighting" coupling).
-// detail=1 pays for the high-freq Worley edge erosion (view march); detail=0 skips it
-// (the shadow lookup only needs approximate occlusion), buying back the cone-march cost.
+// detail=1 pays for the multi-octave Worley edge/valley erosion (view march); detail=0
+// skips ONLY that fine pass -- the cone shadow lookup STILL sees the full lobe + ragged-
+// height + irregular-base structure, so the light march genuinely self-shadows the valleys
+// and undersides (internal shadow pockets), while buying back the per-tap erosion cost.
 float SampleCloudDensity( vec3 p, int detail )
 {
-	float h = clamp( ( p.z - u_boxMin.z ) / max( u_boxMax.z - u_boxMin.z, 1.0 ), 0.0, 1.0 );
-	float grad = heightGradient( h );
-	if( grad <= 0.0 )
-		return 0.0;
-
 	vec3 wind = vec3( u_time * 0.6, u_time * 0.25, 0.0 );   // SLOW wind (do not swamp parallax)
 	vec3 uvw  = ( p + wind ) * u_baseFreq;
 	vec4 b    = texture( u_base3d, uvw );
-	// Worley FBM from the increasing-frequency G/B/A octaves -> billow dilation field.
+	// Worley billow FBM from the increasing-frequency G/B/A octaves: HIGH at lump centers,
+	// LOW in the gaps between cells -> the cauliflower lobe field that shapes the turrets.
 	float wfbm = b.g * 0.625 + b.b * 0.25 + b.a * 0.125;
-	// Dilate the low-freq Perlin-Worley (R) by the Worley FBM: billowy cauliflower lumps
-	// emerge instead of a smooth blob -- the move that kills the "flat" look at the root.
+
+	float zspan = max( u_boxMax.z - u_boxMin.z, 1.0 );
+	float h = clamp( ( p.z - u_boxMin.z ) / zspan, 0.0, 1.0 );
+
+	// --- VERTICAL DEVELOPMENT: ragged, uneven crown. Lump cores (coarse Worley b.g high) push
+	// their top ABOVE u_hTop while the gaps cap BELOW it, so the silhouette is a CLUSTER of
+	// turrets at DIFFERENT heights -- a towering cumulus, not one flat ceiling. ---
+	float hTopVar = clamp( u_hTop + u_towerVar * ( b.g - 0.5 ) * 2.0, u_hBase + 0.05, 0.999 );
+
+	// --- IRREGULAR UNDERSIDE: perturb the base-taper height with the billow field so the bottom
+	// BULGES and dimples (cauliflower/mammatus-like lumps) instead of reading as a flat plane. ---
+	float baseEdge = max( u_hBase * ( 1.0 + u_baseIrreg * ( wfbm - 0.5 ) * 2.0 ), 0.01 );
+
+	float base = clamp( remap( h, 0.0, baseEdge, 0.0, 1.0 ), 0.0, 1.0 );
+	float top  = clamp( remap( h, hTopVar, 1.0, 1.0, 0.0 ), 0.0, 1.0 );
+	float grad = base * top;          // valleys between turrets (h > local top) read as open sky
+	if( grad <= 0.0 )
+		return 0.0;
+
+	// Dilate the low-freq Perlin-Worley (R) by the Worley FBM: the connected base mass.
 	float cloud = remap( b.r, wfbm - 1.0, 1.0, 0.0, 1.0 );
 	cloud *= grad;
+
+	// --- CAULIFLOWER TURRET CARVE: contrast-stretch the billow field into distinct lobes (pow
+	// sharpens the Worley crests) and use (1 - lobes) as a lower erosion bound, opening DEEP
+	// valleys BETWEEN turrets at TURRET scale -- the move that turns one smooth lump into several
+	// well-separated cauliflower bumps. u_billow = lobe separation (0 => the old smooth mass). ---
+	float lobes = pow( clamp( wfbm, 0.0, 1.0 ), 1.0 + u_billow * 3.0 );
+	cloud = remap( cloud, ( 1.0 - lobes ) * u_billow * 0.85, 1.0, 0.0, 1.0 );
+
 	// Coverage gate (WHERE cloud exists). Higher coverage -> a fuller, more solid tower.
 	cloud = remap( cloud, 1.0 - u_coverage, 1.0, 0.0, 1.0 );
 
 	if( detail == 1 && cloud > 0.0 && u_detailAmt > 0.001 )
 	{
-		vec3 duvw = ( p + wind * 2.0 ) * u_detailFreq;
-		vec3 dt   = texture( u_detail3d, duvw ).rgb;
-		float dfbm = dt.r * 0.625 + dt.g * 0.25 + dt.b * 0.125;
-		// Erode the silhouette: wispy curls at the base, firmer toward the crown.
+		vec3 dt = texture( u_detail3d, ( p + wind * 2.0 ) * u_detailFreq ).rgb;
+		// MULTI-OCTAVE erosion field: octave 0 = coarse base Worley (b.b) carving TURRET-scale
+		// valleys/notches BETWEEN lobes; octaves 1..3 = the detail Worley channels (increasing
+		// freq) fraying the edges into wisps. u_erodeOct selects how many octaves blend in.
+		float dfbm = b.b;
+		float norm = 1.0;
+		float amp  = 0.55;
+		if( u_erodeOct >= 2 ) { dfbm += dt.r * amp; norm += amp; amp *= 0.6; }
+		if( u_erodeOct >= 3 ) { dfbm += dt.g * amp; norm += amp; amp *= 0.6; }
+		if( u_erodeOct >= 4 ) { dfbm += dt.b * amp; norm += amp; }
+		dfbm /= norm;
+		// wispy curls at the base, firmer toward the crown.
 		float erode = mix( dfbm, 1.0 - dfbm, clamp( h * 2.0, 0.0, 1.0 ) );
-		cloud = remap( cloud, erode * u_detailAmt, 1.0, 0.0, 1.0 );
+		// erosion DEPTH eats the lower bound further in -> deeper gaps between stacked lobes.
+		cloud = remap( cloud, erode * u_detailAmt * u_erodeDepth, 1.0, 0.0, 1.0 );
 	}
 
 	// X/Y FACE FALLOFF -- the box-silhouette killer. Feather density smoothly to ZERO over the
@@ -287,7 +316,11 @@ void main()
 				vec3 lp = p + u_lightDir * ( lightStepLen * ( float( j ) + 0.5 ) );
 				lt += SampleCloudDensity( lp, 0 ) * lightStepLen;
 			}
-			float Tl = exp( -u_sigmaT * lt );
+			// SELF-SHADOW: u_selfShadow weights the cone optical depth so the lit lobes pop
+			// against DARK valleys/undersides (internal shadow pockets) -- the #1 thing that sells
+			// 3D. The cone sees the full lobe + ragged-height + bumpy-base structure (above), so
+			// the darkening lands in the gaps and on the shadowed turret faces.
+			float Tl = exp( -u_sigmaT * lt * u_selfShadow );
 			// cheap multiscatter octave reuse (no re-march)
 			float ms = Tl + 0.5 * pow( Tl, 0.5 );
 			// --- forward-scatter SILVER LINING: the brilliant gold/bright rim of a BACKLIT cloud.

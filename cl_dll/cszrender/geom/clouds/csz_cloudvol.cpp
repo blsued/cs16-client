@@ -109,6 +109,14 @@ cvar_t *s_cvSunElev;     // csz_clouds_sun_elev    -1    [-1..90]    CLOUD-ONLY 
 cvar_t *s_cvSunAzim;     // csz_clouds_sun_azim    -1    [-1..360]   CLOUD-ONLY light azimuth override (deg); used only when sun_elev>=0
 cvar_t *s_cvMoon;        // csz_clouds_moon        2.40  [0..12]     moon lit intensity (dim BUT visible -- not a black void)
 cvar_t *s_cvMoonTint;    // csz_clouds_moontint    1.00  [0..2]      moon cool-tint amount (0=white, 1=cool, 2=very cool)
+// STRUCTURE hot cvars (iter-3): turn the smooth slab into stacked cauliflower turrets with
+// shadowed valleys + an eroded, irregular (non-flat) underside. All live/hot (no rebuild).
+cvar_t *s_cvBillow;      // csz_clouds_billow      0.55  [0..1]      cauliflower lobe separation (deep valleys between turrets)
+cvar_t *s_cvErodeDepth;  // csz_clouds_erode_depth 1.00  [0..3]      multi-octave erosion valley DEPTH (deeper notches between lobes)
+cvar_t *s_cvErodeOct;    // csz_clouds_erode_oct   4     [1..4]      erosion octave count (coarse turret-scale valleys + fine fray)
+cvar_t *s_cvSelfShadow;  // csz_clouds_selfshadow  1.60  [0..5]      cone-march self-shadow strength (internal shadow pockets)
+cvar_t *s_cvBaseIrreg;   // csz_clouds_base_irreg  0.60  [0..1]      underside irregularity (bumpy/mammatus base, not a flat plane)
+cvar_t *s_cvTowerVar;    // csz_clouds_tower_var   0.28  [0..0.6]    tower height variance (ragged uneven crown; some lobes rise higher)
 
 void RegisterCvarsImpl()
 {
@@ -151,8 +159,16 @@ void RegisterCvarsImpl()
 	s_cvSunAzim     = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun_azim",    "-1",    FCVAR_CLIENTDLL );
 	s_cvMoon        = gEngfuncs.pfnRegisterVariable( "csz_clouds_moon",        "2.4",   FCVAR_CLIENTDLL );
 	s_cvMoonTint    = gEngfuncs.pfnRegisterVariable( "csz_clouds_moontint",    "1.0",   FCVAR_CLIENTDLL );
+	// STRUCTURE hot cvars (iter-3): stacked cauliflower turrets + shadowed valleys + irregular base.
+	// Defaults already show clearly separated lobes with internal shadow pockets out of the box.
+	s_cvBillow      = gEngfuncs.pfnRegisterVariable( "csz_clouds_billow",      "0.55",  FCVAR_CLIENTDLL );
+	s_cvErodeDepth  = gEngfuncs.pfnRegisterVariable( "csz_clouds_erode_depth", "1.0",   FCVAR_CLIENTDLL );
+	s_cvErodeOct    = gEngfuncs.pfnRegisterVariable( "csz_clouds_erode_oct",   "4",     FCVAR_CLIENTDLL );
+	s_cvSelfShadow  = gEngfuncs.pfnRegisterVariable( "csz_clouds_selfshadow",  "1.6",   FCVAR_CLIENTDLL );
+	s_cvBaseIrreg   = gEngfuncs.pfnRegisterVariable( "csz_clouds_base_irreg",  "0.6",   FCVAR_CLIENTDLL );
+	s_cvTowerVar    = gEngfuncs.pfnRegisterVariable( "csz_clouds_tower_var",   "0.28",  FCVAR_CLIENTDLL );
 	s_cvarsReady = true;
-	CSZ_LogDev( "cloudvol", "cvars registered (csz_clouds + _tod/_res/_perf/_dbg_* + LOOK: coverage/density/sigma/basescale/detail/detailscale/hbase/htop/falloff/silver/silver_width/powder/ambient/sun/sun_elev/sun_azim/moon/moontint)" );
+	CSZ_LogDev( "cloudvol", "cvars registered (csz_clouds + _tod/_res/_perf/_dbg_* + LOOK: coverage/density/sigma/basescale/detail/detailscale/hbase/htop/falloff/silver/silver_width/powder/ambient/sun/sun_elev/sun_azim/moon/moontint + STRUCTURE: billow/erode_depth/erode_oct/selfshadow/base_irreg/tower_var)" );
 }
 
 // =============================================================================
@@ -338,6 +354,7 @@ struct VolGpu
 	int mBoxMin, mBoxMax, mTime, mFrame, mDensity, mCoverage, mSilver, mSigmaT;
 	int mBaseFreq, mDetailFreq, mDetailAmt, mLightReach, mMarchFar, mTargetSize, mSteps, mLightSteps;
 	int mFalloff, mHBase, mHTop, mPowder, mSilverWidth;
+	int mBillow, mErodeDepth, mErodeOct, mSelfShadow, mBaseIrreg, mTowerVar;
 	int mDepthTex, mZNear, mZFar, mInvViewProj, mBase3d, mDetail3d;
 	// upsample uniforms
 	int uCloudTex, uFullSize;
@@ -558,6 +575,12 @@ void BuildPrograms()
 	s_gpu.mHBase       = UniformLoc( s_gpu.march, "u_hBase" );
 	s_gpu.mHTop        = UniformLoc( s_gpu.march, "u_hTop" );
 	s_gpu.mPowder      = UniformLoc( s_gpu.march, "u_powder" );
+	s_gpu.mBillow      = UniformLoc( s_gpu.march, "u_billow" );
+	s_gpu.mErodeDepth  = UniformLoc( s_gpu.march, "u_erodeDepth" );
+	s_gpu.mErodeOct    = UniformLoc( s_gpu.march, "u_erodeOct" );
+	s_gpu.mSelfShadow  = UniformLoc( s_gpu.march, "u_selfShadow" );
+	s_gpu.mBaseIrreg   = UniformLoc( s_gpu.march, "u_baseIrreg" );
+	s_gpu.mTowerVar    = UniformLoc( s_gpu.march, "u_towerVar" );
 	s_gpu.mLightReach  = UniformLoc( s_gpu.march, "u_lightReach" );
 	s_gpu.mMarchFar    = UniformLoc( s_gpu.march, "u_marchFar" );
 	s_gpu.mTargetSize  = UniformLoc( s_gpu.march, "u_targetSize" );
@@ -734,6 +757,14 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	float sunI        = clampf( ReadCvar( s_cvSun,         3.2f   ), 0.0f,    12.0f   );
 	float moonI       = clampf( ReadCvar( s_cvMoon,        2.4f   ), 0.0f,    12.0f   );
 	float moonTint    = clampf( ReadCvar( s_cvMoonTint,    1.0f   ), 0.0f,    2.0f    );
+	// STRUCTURE hot params (iter-3): stacked turrets / multi-octave valleys / self-shadow pockets /
+	// irregular base / ragged crown. Read live + clamp; folded into the LOOK change-log below.
+	float billow      = clampf( ReadCvar( s_cvBillow,      0.55f  ), 0.0f,    1.0f    );
+	float erodeDepth  = clampf( ReadCvar( s_cvErodeDepth,  1.0f   ), 0.0f,    3.0f    );
+	int   erodeOct    = clampi( (int)( ReadCvar( s_cvErodeOct, 4.0f ) + 0.5f ), 1, 4 );
+	float selfShadow  = clampf( ReadCvar( s_cvSelfShadow,  1.6f   ), 0.0f,    5.0f    );
+	float baseIrreg   = clampf( ReadCvar( s_cvBaseIrreg,   0.6f   ), 0.0f,    1.0f    );
+	float towerVar    = clampf( ReadCvar( s_cvTowerVar,    0.28f  ), 0.0f,    0.6f    );
 	// CLOUD-ONLY sun-direction override: -1 = follow the tod/skymath sun (production unchanged).
 	// elev>=0 rebuilds the cloud light dir from (elev,azim); azim<0 falls back to a fixed azimuth.
 	float sunElevOvr  = ReadCvar( s_cvSunElev, -1.0f );
@@ -744,18 +775,20 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	float detailFreq  = 1.0f / detailScale;
 	{
 		static bool  s_lookLogged = false;
-		static float s_last[18] = { 0 };
-		float cur[18] = { coverage, density, sigmaT, baseScale, detailScale, detailAmt,
+		static float s_last[24] = { 0 };
+		float cur[24] = { coverage, density, sigmaT, baseScale, detailScale, detailAmt,
 		                  hBase, hTop, falloff, silver, silverWidth, powder, ambientMul, sunI, moonI, moonTint,
-		                  sunElevOvr, sunAzimOvr };
+		                  sunElevOvr, sunAzimOvr,
+		                  billow, erodeDepth, (float)erodeOct, selfShadow, baseIrreg, towerVar };
 		bool changed = !s_lookLogged;
-		for( int i = 0; i < 18 && !changed; i++ ) if( s_last[i] != cur[i] ) changed = true;
+		for( int i = 0; i < 24 && !changed; i++ ) if( s_last[i] != cur[i] ) changed = true;
 		if( changed )
 		{
 			CSZ_LogInfo( "cloudvol",
-				"[csz_clouds] LOOK resolved: cov=%.2f dens=%.2f sigma=%.4f baseScale=%.0f detScale=%.0f detail=%.2f hBase=%.2f hTop=%.2f falloff=%.2f silver=%.2f silverW=%.2f powder=%.2f amb=%.2f sun=%.2f moon=%.2f moonTint=%.2f sunElevOvr=%.1f sunAzimOvr=%.1f",
-				coverage, density, sigmaT, baseScale, detailScale, detailAmt, hBase, hTop, falloff, silver, silverWidth, powder, ambientMul, sunI, moonI, moonTint, sunElevOvr, sunAzimOvr );
-			for( int i = 0; i < 18; i++ ) s_last[i] = cur[i];
+				"[csz_clouds] LOOK resolved: cov=%.2f dens=%.2f sigma=%.4f baseScale=%.0f detScale=%.0f detail=%.2f hBase=%.2f hTop=%.2f falloff=%.2f silver=%.2f silverW=%.2f powder=%.2f amb=%.2f sun=%.2f moon=%.2f moonTint=%.2f sunElevOvr=%.1f sunAzimOvr=%.1f | STRUCT billow=%.2f erodeDepth=%.2f erodeOct=%d selfShadow=%.2f baseIrreg=%.2f towerVar=%.2f",
+				coverage, density, sigmaT, baseScale, detailScale, detailAmt, hBase, hTop, falloff, silver, silverWidth, powder, ambientMul, sunI, moonI, moonTint, sunElevOvr, sunAzimOvr,
+				billow, erodeDepth, erodeOct, selfShadow, baseIrreg, towerVar );
+			for( int i = 0; i < 24; i++ ) s_last[i] = cur[i];
 			s_lookLogged = true;
 		}
 	}
@@ -843,10 +876,12 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	}
 
 	// --- march constants (NOT look cvars: cost/quality knobs, fixed this phase) -----------
-	const float lightReach = 2600.0f;          // cone self-shadow over several feature-diameters
+	// iter-3: longer cone reach + more taps so the self-shadow spans whole turrets and lands
+	// real shadow in the valleys between stacked lobes (paired with the u_selfShadow weight).
+	const float lightReach = 3200.0f;          // cone self-shadow over several feature-diameters
 	const float marchFar   = 12000.0f;         // bounded well below zFar (avoid far-depth quantization)
 	const int   steps      = 48;
-	const int   lightSteps = 6;
+	const int   lightSteps = 8;                // == MAX_LIGHT cap in the shader
 
 	float t = fmodf( ClientTime(), 3600.0f );
 	float frame = (float)( s_frame & 1023u );
@@ -976,6 +1011,12 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	if( s_gpu.mHBase >= 0 )       glUniform1f( s_gpu.mHBase, hBase );
 	if( s_gpu.mHTop >= 0 )        glUniform1f( s_gpu.mHTop, hTop );
 	if( s_gpu.mPowder >= 0 )      glUniform1f( s_gpu.mPowder, powder );
+	if( s_gpu.mBillow >= 0 )      glUniform1f( s_gpu.mBillow, billow );
+	if( s_gpu.mErodeDepth >= 0 )  glUniform1f( s_gpu.mErodeDepth, erodeDepth );
+	if( s_gpu.mErodeOct >= 0 )    glUniform1i( s_gpu.mErodeOct, erodeOct );
+	if( s_gpu.mSelfShadow >= 0 )  glUniform1f( s_gpu.mSelfShadow, selfShadow );
+	if( s_gpu.mBaseIrreg >= 0 )   glUniform1f( s_gpu.mBaseIrreg, baseIrreg );
+	if( s_gpu.mTowerVar >= 0 )    glUniform1f( s_gpu.mTowerVar, towerVar );
 	if( s_gpu.mLightReach >= 0 )  glUniform1f( s_gpu.mLightReach, lightReach );
 	if( s_gpu.mMarchFar >= 0 )    glUniform1f( s_gpu.mMarchFar, marchFar );
 	if( s_gpu.mTargetSize >= 0 )  glUniform2fv( s_gpu.mTargetSize, 1, fTarget );
