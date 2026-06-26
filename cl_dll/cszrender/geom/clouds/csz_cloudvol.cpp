@@ -73,14 +73,19 @@ cvar_t *s_cvMaster;   // csz_clouds        "0"  master on/off (0 = production by
 cvar_t *s_cvTod;      // csz_clouds_tod    "0"  0 live / 1 day / 2 sunset / 3 full-moon night
 cvar_t *s_cvRes;      // csz_clouds_res    "4"  resolution divisor (quarter-res)
 cvar_t *s_cvPerf;     // csz_clouds_perf   "0"  0 off / 1 per-frame GPU-ms timer log
-// TEST-ONLY judgeability knob (NOT a production/look cvar): relocate the hero box to a
-// large mass directly in front of the spawn vantage so a clamped/headless capture camera
-// can actually SEE it. 0 = real world-fixed placement (kOffX east). 1 = AHEAD (centered on
-// the spawn's initial view-forward). 2 = OBLIQUE (same range, shifted laterally so a
-// stationary forward-looking camera sees a SIDE face + the front face -> visible depth,
-// no freecam translation required). Does NOT touch density/coverage/lighting -- placement
-// + footprint only. See the dbgNear branch in Contribute().
-cvar_t *s_cvDbgNear;  // csz_clouds_dbg_nearbox "0"  0 off / 1 ahead / 2 oblique (TEST ONLY)
+// TEST-ONLY judgeability knob (NOT a production/look cvar): relocate the hero box to an
+// ABSOLUTE WORLD position so a clamped/headless capture camera (which cannot freecam/setpos
+// in the rig) can place the cloud wherever the fixed sky-vantage camera is already looking,
+// NO camera movement required. 0 = real world-fixed placement (kOffX east of spawn, unchanged).
+// 1 = ABSOLUTE WORLD: box centered at (box_x,box_y,box_z) with half-extent box_radius, IGNORING
+// the spawn-relative offset logic (the prior spawn-forward placement aimed the box into a WALL).
+// Does NOT touch density/coverage/lighting -- placement + footprint only. See the dbgNear
+// branch in Contribute(). Resolved AABB min/max is logged to engine.log on enable.
+cvar_t *s_cvDbgNear;    // csz_clouds_dbg_nearbox  "0"  0 off / 1 absolute-world (TEST ONLY)
+cvar_t *s_cvDbgBoxX;    // csz_clouds_dbg_box_x       world center X (default: open sky over de_dust2)
+cvar_t *s_cvDbgBoxY;    // csz_clouds_dbg_box_y       world center Y
+cvar_t *s_cvDbgBoxZ;    // csz_clouds_dbg_box_z       world center Z (high in open sky)
+cvar_t *s_cvDbgBoxRad;  // csz_clouds_dbg_box_radius  half-extent (cube AABB); big cumulus footprint
 
 void RegisterCvarsImpl()
 {
@@ -90,9 +95,16 @@ void RegisterCvarsImpl()
 	s_cvTod     = gEngfuncs.pfnRegisterVariable( "csz_clouds_tod", "0", FCVAR_CLIENTDLL );
 	s_cvRes     = gEngfuncs.pfnRegisterVariable( "csz_clouds_res", "4", FCVAR_CLIENTDLL );
 	s_cvPerf    = gEngfuncs.pfnRegisterVariable( "csz_clouds_perf","0", FCVAR_CLIENTDLL );
-	s_cvDbgNear = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_nearbox", "0", FCVAR_CLIENTDLL );
+	s_cvDbgNear   = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_nearbox",    "0",    FCVAR_CLIENTDLL );
+	// Absolute-world hero-box placement (active only when csz_clouds_dbg_nearbox 1). Defaults
+	// frame a big cumulus HIGH in open sky over the de_dust2 playable area, sited to land in the
+	// fixed sky-vantage capture camera's view (see recommended capture args in the handoff).
+	s_cvDbgBoxX   = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_x",      "150",  FCVAR_CLIENTDLL );
+	s_cvDbgBoxY   = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_y",      "2850", FCVAR_CLIENTDLL );
+	s_cvDbgBoxZ   = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_z",      "1200", FCVAR_CLIENTDLL );
+	s_cvDbgBoxRad = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_radius", "1500", FCVAR_CLIENTDLL );
 	s_cvarsReady = true;
-	CSZ_LogDev( "cloudvol", "cvars registered (csz_clouds + _tod/_res/_perf/_dbg_nearbox)" );
+	CSZ_LogDev( "cloudvol", "cvars registered (csz_clouds + _tod/_res/_perf/_dbg_nearbox + _dbg_box_x/y/z/radius)" );
 }
 
 // =============================================================================
@@ -662,26 +674,40 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 			s_anchor[0], s_anchor[1], s_anchor[2], s_anchorFwd[0], s_anchorFwd[1] );
 	}
 
-	int dbgNear = clampi( (int)( ReadCvar( s_cvDbgNear, 0.0f ) + 0.5f ), 0, 2 );
+	int dbgNear = clampi( (int)( ReadCvar( s_cvDbgNear, 0.0f ) + 0.5f ), 0, 1 );
 	float boxMin[3], boxMax[3];
 	if( dbgNear >= 1 )
 	{
-		// TEST-ONLY judgeability placement (csz_clouds_dbg_nearbox): a large cumulus mass close
-		// in front of the spawn vantage, base near the horizon line, sized to subtend a wide arc
-		// of sky so even a clamped headless camera reads it as a clear volume. Range/footprint
-		// chosen for a 1280x720 ~90deg-FOV frame: top edge ~23deg up, sides ~+/-27deg, base ~horizon.
-		// mode 1 = AHEAD (centered on spawn-forward); mode 2 = OBLIQUE (shifted one footprint to the
-		// side so a stationary forward-looking camera sees a SIDE face + the front -> visible depth,
-		// no freecam translation needed). Density/coverage/lighting are UNCHANGED -- placement only.
-		const float kNearDist = 2000.0f;                    // center distance ahead along spawn-forward
-		const float kNearHalf = 1000.0f;                    // 2000u footprint (X and Y)
-		const float kNearZ0   = -120.0f, kNearZ1 = 880.0f;  // base just below eye -> ~1000u tall mass
-		float rx = s_anchorFwd[1], ry = -s_anchorFwd[0];    // horizontal right (forward rotated -90deg)
-		float side = ( dbgNear == 2 ) ? ( kNearHalf + 200.0f ) : 0.0f;
-		float cx = s_anchor[0] + s_anchorFwd[0] * kNearDist + rx * side;
-		float cy = s_anchor[1] + s_anchorFwd[1] * kNearDist + ry * side;
-		boxMin[0] = cx - kNearHalf; boxMin[1] = cy - kNearHalf; boxMin[2] = s_anchor[2] + kNearZ0;
-		boxMax[0] = cx + kNearHalf; boxMax[1] = cy + kNearHalf; boxMax[2] = s_anchor[2] + kNearZ1;
+		// TEST-ONLY judgeability placement (csz_clouds_dbg_nearbox 1): a large cumulus mass at an
+		// ABSOLUTE WORLD center (box_x,box_y,box_z) with half-extent box_radius, IGNORING the
+		// spawn-relative offset (the prior spawn-forward placement aimed the box into a WALL). This
+		// lets a capture pass drop the cloud wherever the fixed sky-vantage camera is already looking
+		// -- no freecam/setpos needed. Coords clamped to the engine world box; radius to a sane span.
+		// Density/coverage/lighting are UNCHANGED -- placement + footprint only.
+		const float kWorldLim = 16384.0f;                   // GoldSrc engine world half-extent
+		float cx = clampf( ReadCvar( s_cvDbgBoxX,   150.0f  ), -kWorldLim, kWorldLim );
+		float cy = clampf( ReadCvar( s_cvDbgBoxY,   2850.0f ), -kWorldLim, kWorldLim );
+		float cz = clampf( ReadCvar( s_cvDbgBoxZ,   1200.0f ), -kWorldLim, kWorldLim );
+		float rad = clampf( ReadCvar( s_cvDbgBoxRad, 1500.0f ), 16.0f, 8000.0f );
+		boxMin[0] = cx - rad; boxMin[1] = cy - rad; boxMin[2] = cz - rad;
+		boxMax[0] = cx + rad; boxMax[1] = cy + rad; boxMax[2] = cz + rad;
+
+		// Log the resolved AABB once on enable, and again whenever the box is retuned via cvar mid-run,
+		// so a capture pass can confirm placement from engine.log without spamming every frame.
+		static bool  s_dbgLogged = false;
+		static float s_dbgLast[6] = { 0, 0, 0, 0, 0, 0 };
+		bool changed = !s_dbgLogged ||
+			s_dbgLast[0] != boxMin[0] || s_dbgLast[1] != boxMin[1] || s_dbgLast[2] != boxMin[2] ||
+			s_dbgLast[3] != boxMax[0] || s_dbgLast[4] != boxMax[1] || s_dbgLast[5] != boxMax[2];
+		if( changed )
+		{
+			CSZ_LogInfo( "cloudvol",
+				"[csz_clouds] dbg_nearbox 1: ABSOLUTE-WORLD hero box center(%.0f %.0f %.0f) radius=%.0f -> AABB min(%.0f %.0f %.0f) max(%.0f %.0f %.0f)",
+				cx, cy, cz, rad, boxMin[0], boxMin[1], boxMin[2], boxMax[0], boxMax[1], boxMax[2] );
+			s_dbgLast[0] = boxMin[0]; s_dbgLast[1] = boxMin[1]; s_dbgLast[2] = boxMin[2];
+			s_dbgLast[3] = boxMax[0]; s_dbgLast[4] = boxMax[1]; s_dbgLast[5] = boxMax[2];
+			s_dbgLogged = true;
+		}
 	}
 	else
 	{
