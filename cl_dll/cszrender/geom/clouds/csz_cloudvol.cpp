@@ -73,17 +73,26 @@ cvar_t *s_cvMaster;   // csz_clouds        "0"  master on/off (0 = production by
 cvar_t *s_cvTod;      // csz_clouds_tod    "0"  0 live / 1 day / 2 sunset / 3 full-moon night
 cvar_t *s_cvRes;      // csz_clouds_res    "4"  resolution divisor (quarter-res)
 cvar_t *s_cvPerf;     // csz_clouds_perf   "0"  0 off / 1 per-frame GPU-ms timer log
+// TEST-ONLY judgeability knob (NOT a production/look cvar): relocate the hero box to a
+// large mass directly in front of the spawn vantage so a clamped/headless capture camera
+// can actually SEE it. 0 = real world-fixed placement (kOffX east). 1 = AHEAD (centered on
+// the spawn's initial view-forward). 2 = OBLIQUE (same range, shifted laterally so a
+// stationary forward-looking camera sees a SIDE face + the front face -> visible depth,
+// no freecam translation required). Does NOT touch density/coverage/lighting -- placement
+// + footprint only. See the dbgNear branch in Contribute().
+cvar_t *s_cvDbgNear;  // csz_clouds_dbg_nearbox "0"  0 off / 1 ahead / 2 oblique (TEST ONLY)
 
 void RegisterCvarsImpl()
 {
 	if( s_cvarsReady )
 		return;
-	s_cvMaster = gEngfuncs.pfnRegisterVariable( "csz_clouds",     "0", FCVAR_CLIENTDLL );
-	s_cvTod    = gEngfuncs.pfnRegisterVariable( "csz_clouds_tod", "0", FCVAR_CLIENTDLL );
-	s_cvRes    = gEngfuncs.pfnRegisterVariable( "csz_clouds_res", "4", FCVAR_CLIENTDLL );
-	s_cvPerf   = gEngfuncs.pfnRegisterVariable( "csz_clouds_perf","0", FCVAR_CLIENTDLL );
+	s_cvMaster  = gEngfuncs.pfnRegisterVariable( "csz_clouds",     "0", FCVAR_CLIENTDLL );
+	s_cvTod     = gEngfuncs.pfnRegisterVariable( "csz_clouds_tod", "0", FCVAR_CLIENTDLL );
+	s_cvRes     = gEngfuncs.pfnRegisterVariable( "csz_clouds_res", "4", FCVAR_CLIENTDLL );
+	s_cvPerf    = gEngfuncs.pfnRegisterVariable( "csz_clouds_perf","0", FCVAR_CLIENTDLL );
+	s_cvDbgNear = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_nearbox", "0", FCVAR_CLIENTDLL );
 	s_cvarsReady = true;
-	CSZ_LogDev( "cloudvol", "cvars registered (csz_clouds + _tod/_res/_perf)" );
+	CSZ_LogDev( "cloudvol", "cvars registered (csz_clouds + _tod/_res/_perf/_dbg_nearbox)" );
 }
 
 // =============================================================================
@@ -292,6 +301,7 @@ bool     s_tmuProbed = false;  // GL_MAX_TEXTURE_IMAGE_UNITS query (codex #10) d
 bool     s_tmuOk     = false;
 bool     s_anchored  = false;  // hero-box world anchor latched (per generation)
 float    s_anchor[3] = { 0.0f, 0.0f, 0.0f };
+float    s_anchorFwd[2] = { 1.0f, 0.0f };  // spawn-frame horizontal view-forward (XY, normalized) for the nearbox knob
 
 void ForgetGpuTimers()
 {
@@ -640,16 +650,49 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	if( !s_anchored )
 	{
 		s_anchor[0] = view.origin[0]; s_anchor[1] = view.origin[1]; s_anchor[2] = view.origin[2];
+		// latch the spawn-frame horizontal view-forward so the nearbox knob can place the hero
+		// mass directly in front of wherever the (often clamped/headless) camera first looks.
+		float lf[3], lr[3], lu[3];
+		AngleVectors( view.angles, lf, lr, lu );
+		float fl = sqrtf( lf[0] * lf[0] + lf[1] * lf[1] );
+		if( fl > 1.0e-3f ) { s_anchorFwd[0] = lf[0] / fl; s_anchorFwd[1] = lf[1] / fl; }
+		else               { s_anchorFwd[0] = 1.0f;       s_anchorFwd[1] = 0.0f; }
 		s_anchored = true;
-		CSZ_LogInfo( "cloudvol", "[csz_clouds] hero-box anchor latched at (%.0f %.0f %.0f)", s_anchor[0], s_anchor[1], s_anchor[2] );
+		CSZ_LogInfo( "cloudvol", "[csz_clouds] hero-box anchor latched at (%.0f %.0f %.0f) fwd(%.2f %.2f)",
+			s_anchor[0], s_anchor[1], s_anchor[2], s_anchorFwd[0], s_anchorFwd[1] );
 	}
-	const float kOffX = 3000.0f;   // mid-range east of spawn (visible cloud SIDE for a horizon shot)
-	const float kHalfX = 1900.0f, kHalfY = 1900.0f;   // ~3800u footprint
-	const float kZ0 = 600.0f, kZ1 = 3800.0f;          // tall: ~3200u above spawn (towering cumulus)
-	float cx = s_anchor[0] + kOffX;
-	float cy = s_anchor[1];
-	float boxMin[3] = { cx - kHalfX, cy - kHalfY, s_anchor[2] + kZ0 };
-	float boxMax[3] = { cx + kHalfX, cy + kHalfY, s_anchor[2] + kZ1 };
+
+	int dbgNear = clampi( (int)( ReadCvar( s_cvDbgNear, 0.0f ) + 0.5f ), 0, 2 );
+	float boxMin[3], boxMax[3];
+	if( dbgNear >= 1 )
+	{
+		// TEST-ONLY judgeability placement (csz_clouds_dbg_nearbox): a large cumulus mass close
+		// in front of the spawn vantage, base near the horizon line, sized to subtend a wide arc
+		// of sky so even a clamped headless camera reads it as a clear volume. Range/footprint
+		// chosen for a 1280x720 ~90deg-FOV frame: top edge ~23deg up, sides ~+/-27deg, base ~horizon.
+		// mode 1 = AHEAD (centered on spawn-forward); mode 2 = OBLIQUE (shifted one footprint to the
+		// side so a stationary forward-looking camera sees a SIDE face + the front -> visible depth,
+		// no freecam translation needed). Density/coverage/lighting are UNCHANGED -- placement only.
+		const float kNearDist = 2000.0f;                    // center distance ahead along spawn-forward
+		const float kNearHalf = 1000.0f;                    // 2000u footprint (X and Y)
+		const float kNearZ0   = -120.0f, kNearZ1 = 880.0f;  // base just below eye -> ~1000u tall mass
+		float rx = s_anchorFwd[1], ry = -s_anchorFwd[0];    // horizontal right (forward rotated -90deg)
+		float side = ( dbgNear == 2 ) ? ( kNearHalf + 200.0f ) : 0.0f;
+		float cx = s_anchor[0] + s_anchorFwd[0] * kNearDist + rx * side;
+		float cy = s_anchor[1] + s_anchorFwd[1] * kNearDist + ry * side;
+		boxMin[0] = cx - kNearHalf; boxMin[1] = cy - kNearHalf; boxMin[2] = s_anchor[2] + kNearZ0;
+		boxMax[0] = cx + kNearHalf; boxMax[1] = cy + kNearHalf; boxMax[2] = s_anchor[2] + kNearZ1;
+	}
+	else
+	{
+		const float kOffX = 3000.0f;   // mid-range east of spawn (visible cloud SIDE for a horizon shot)
+		const float kHalfX = 1900.0f, kHalfY = 1900.0f;   // ~3800u footprint
+		const float kZ0 = 600.0f, kZ1 = 3800.0f;          // tall: ~3200u above spawn (towering cumulus)
+		float cx = s_anchor[0] + kOffX;
+		float cy = s_anchor[1];
+		boxMin[0] = cx - kHalfX; boxMin[1] = cy - kHalfY; boxMin[2] = s_anchor[2] + kZ0;
+		boxMax[0] = cx + kHalfX; boxMax[1] = cy + kHalfY; boxMax[2] = s_anchor[2] + kZ1;
+	}
 
 	// --- density / lighting constants (Phase 0 fixed; live tuning is a later phase) ---
 	const float density    = 1.6f;
