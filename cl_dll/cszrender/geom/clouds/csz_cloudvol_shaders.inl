@@ -96,6 +96,10 @@ uniform float u_sigmaT;        // extinction coefficient (1/world-units along th
 uniform float u_baseFreq;      // base 3D-noise frequency (1/world-units)
 uniform float u_detailFreq;    // detail 3D-noise frequency (1/world-units)
 uniform float u_detailAmt;     // high-frequency Worley edge-erosion amount
+uniform float u_falloff;       // X/Y face-falloff window fraction (density->0 BEFORE the box faces)
+uniform float u_hBase;         // height-gradient: base taper fraction (flat-ish feathered base)
+uniform float u_hTop;          // height-gradient: where the rounded top begins
+uniform float u_powder;        // powder dark-edge strength
 uniform float u_lightReach;    // TOTAL cone light-march reach toward the lit body (world units)
 uniform float u_marchFar;      // hard distance cap (world units)
 uniform vec2  u_targetSize;    // quarter-res target size in pixels
@@ -136,8 +140,8 @@ float remap( float v, float a, float b, float c, float d )
 // rounded top -- reads as a towering cumulus, not a thin flat layer.
 float heightGradient( float h )
 {
-	float base = clamp( remap( h, 0.0, 0.12, 0.0, 1.0 ), 0.0, 1.0 );
-	float top  = clamp( remap( h, 0.55, 1.0, 1.0, 0.0 ), 0.0, 1.0 );
+	float base = clamp( remap( h, 0.0, u_hBase, 0.0, 1.0 ), 0.0, 1.0 );
+	float top  = clamp( remap( h, u_hTop, 1.0, 1.0, 0.0 ), 0.0, 1.0 );
 	return base * top;
 }
 
@@ -173,6 +177,19 @@ float SampleCloudDensity( vec3 p, int detail )
 		float erode = mix( dfbm, 1.0 - dfbm, clamp( h * 2.0, 0.0, 1.0 ) );
 		cloud = remap( cloud, erode * u_detailAmt, 1.0, 0.0, 1.0 );
 	}
+
+	// X/Y FACE FALLOFF -- the box-silhouette killer. Feather density smoothly to ZERO over the
+	// outer u_falloff fraction of each horizontal half-extent so the cloud NEVER reaches the AABB
+	// side faces: open sky reads through near the box boundary, and the remaining mass is an
+	// organic blob inside the box, not a filled cube. (The vertical Z faces are already feathered
+	// by heightGradient's base taper + rounded top.)
+	vec3  bc    = 0.5 * ( u_boxMin + u_boxMax );
+	vec2  bhalf = max( 0.5 * ( u_boxMax.xy - u_boxMin.xy ), vec2( 1.0 ) );
+	vec2  dn    = abs( p.xy - bc.xy ) / bhalf;          // 0 at center -> 1 at the X/Y face
+	float win   = smoothstep( 1.0, 1.0 - u_falloff, dn.x )
+	            * smoothstep( 1.0, 1.0 - u_falloff, dn.y );
+	cloud *= win;
+
 	return clamp( cloud, 0.0, 1.0 ) * u_density;
 }
 
@@ -271,7 +288,7 @@ void main()
 			float rim = u_silver * backlit * Tl * ( 1.0 - Tl ) * hg( cosT, 0.92 ) * 5.0;
 			// powder dark-edge: deepens the self-shadowed near faces of dense lumps
 			float powder = 1.0 - exp( -2.0 * dens * stepLen * 40.0 );
-			float powderShade = mix( 1.0, 0.45 + 0.55 * Tl, 0.6 ) * ( 1.0 - 0.35 * powder );
+			float powderShade = mix( 1.0, 0.45 + 0.55 * Tl, 0.6 ) * max( 0.05, 1.0 - 0.35 * u_powder * powder );
 			// height-aware ambient skylight (undersides not black)
 			float hf = clamp( ( p.z - u_boxMin.z ) / max( u_boxMax.z - u_boxMin.z, 1.0 ), 0.0, 1.0 );
 			vec3 ambient = mix( u_ambGround, u_ambSky, hf );

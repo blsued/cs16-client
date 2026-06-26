@@ -87,6 +87,26 @@ cvar_t *s_cvDbgBoxY;    // csz_clouds_dbg_box_y       world center Y
 cvar_t *s_cvDbgBoxZ;    // csz_clouds_dbg_box_z       world center Z (high in open sky)
 cvar_t *s_cvDbgBoxRad;  // csz_clouds_dbg_box_radius  half-extent (cube AABB); big cumulus footprint
 
+// ---- LOOK hot cvars (csz_clouds_*): the form/lighting controls, READ LIVE each frame so
+// the look can be swept WITHOUT a rebuild. Each is clamped to a sane [min,max] on read;
+// the resolved set is logged to engine.log ONLY when it changes (no per-frame spam). These
+// drive the box-silhouette kill (low coverage + face falloff + erosion) and the lighting form.
+cvar_t *s_cvCoverage;    // csz_clouds_coverage    0.42  [0..1]      coverage gate (LOW => organic blobs, not a full box)
+cvar_t *s_cvDensity;     // csz_clouds_density     1.10  [0.05..6]   density multiplier feeding extinction
+cvar_t *s_cvSigma;       // csz_clouds_sigma       0.006 [5e-4..0.05] extinction coeff (1/world-units)
+cvar_t *s_cvBaseScale;   // csz_clouds_basescale   4500  [500..20000] base-noise tiling PERIOD in world-u (freq=1/scale); tune for several lumps
+cvar_t *s_cvDetail;      // csz_clouds_detail      0.70  [0..1]      high-freq Worley edge-erosion strength (cauliflower edges)
+cvar_t *s_cvDetailScale; // csz_clouds_detailscale 700   [50..4000]  detail-noise tiling period in world-u
+cvar_t *s_cvHBase;       // csz_clouds_hbase       0.12  [0.01..0.6] height-gradient: base taper fraction (feathered flat-ish base)
+cvar_t *s_cvHTop;        // csz_clouds_htop        0.50  [0.15..0.99] height-gradient: where the rounded top begins
+cvar_t *s_cvFalloff;     // csz_clouds_falloff     0.35  [0..0.9]    X/Y face-falloff window (density->0 BEFORE the box faces; kills box silhouette)
+cvar_t *s_cvSilver;      // csz_clouds_silver      1.40  [0..8]      silver-lining rim strength (lit backlit edges)
+cvar_t *s_cvPowder;      // csz_clouds_powder      1.00  [0..3]      powder dark-edge strength (self-shadowed near faces)
+cvar_t *s_cvAmbient;     // csz_clouds_ambient     1.00  [0..4]      ambient skylight multiplier (undersides not black)
+cvar_t *s_cvSun;         // csz_clouds_sun         3.20  [0..12]     day/sun lit intensity
+cvar_t *s_cvMoon;        // csz_clouds_moon        2.40  [0..12]     moon lit intensity (dim BUT visible -- not a black void)
+cvar_t *s_cvMoonTint;    // csz_clouds_moontint    1.00  [0..2]      moon cool-tint amount (0=white, 1=cool, 2=very cool)
+
 void RegisterCvarsImpl()
 {
 	if( s_cvarsReady )
@@ -103,8 +123,25 @@ void RegisterCvarsImpl()
 	s_cvDbgBoxY   = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_y",      "2850", FCVAR_CLIENTDLL );
 	s_cvDbgBoxZ   = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_z",      "1200", FCVAR_CLIENTDLL );
 	s_cvDbgBoxRad = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_radius", "1500", FCVAR_CLIENTDLL );
+	// LOOK hot cvars (swept live, no rebuild). Defaults = the iter-1 STRUCTURE-first target:
+	// low coverage + strong erosion + X/Y face falloff so the AABB silhouette is GONE.
+	s_cvCoverage    = gEngfuncs.pfnRegisterVariable( "csz_clouds_coverage",    "0.42",  FCVAR_CLIENTDLL );
+	s_cvDensity     = gEngfuncs.pfnRegisterVariable( "csz_clouds_density",     "1.1",   FCVAR_CLIENTDLL );
+	s_cvSigma       = gEngfuncs.pfnRegisterVariable( "csz_clouds_sigma",       "0.006", FCVAR_CLIENTDLL );
+	s_cvBaseScale   = gEngfuncs.pfnRegisterVariable( "csz_clouds_basescale",   "4500",  FCVAR_CLIENTDLL );
+	s_cvDetail      = gEngfuncs.pfnRegisterVariable( "csz_clouds_detail",      "0.7",   FCVAR_CLIENTDLL );
+	s_cvDetailScale = gEngfuncs.pfnRegisterVariable( "csz_clouds_detailscale", "700",   FCVAR_CLIENTDLL );
+	s_cvHBase       = gEngfuncs.pfnRegisterVariable( "csz_clouds_hbase",       "0.12",  FCVAR_CLIENTDLL );
+	s_cvHTop        = gEngfuncs.pfnRegisterVariable( "csz_clouds_htop",        "0.5",   FCVAR_CLIENTDLL );
+	s_cvFalloff     = gEngfuncs.pfnRegisterVariable( "csz_clouds_falloff",     "0.35",  FCVAR_CLIENTDLL );
+	s_cvSilver      = gEngfuncs.pfnRegisterVariable( "csz_clouds_silver",      "1.4",   FCVAR_CLIENTDLL );
+	s_cvPowder      = gEngfuncs.pfnRegisterVariable( "csz_clouds_powder",      "1.0",   FCVAR_CLIENTDLL );
+	s_cvAmbient     = gEngfuncs.pfnRegisterVariable( "csz_clouds_ambient",     "1.0",   FCVAR_CLIENTDLL );
+	s_cvSun         = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun",         "3.2",   FCVAR_CLIENTDLL );
+	s_cvMoon        = gEngfuncs.pfnRegisterVariable( "csz_clouds_moon",        "2.4",   FCVAR_CLIENTDLL );
+	s_cvMoonTint    = gEngfuncs.pfnRegisterVariable( "csz_clouds_moontint",    "1.0",   FCVAR_CLIENTDLL );
 	s_cvarsReady = true;
-	CSZ_LogDev( "cloudvol", "cvars registered (csz_clouds + _tod/_res/_perf/_dbg_nearbox + _dbg_box_x/y/z/radius)" );
+	CSZ_LogDev( "cloudvol", "cvars registered (csz_clouds + _tod/_res/_perf/_dbg_* + LOOK: coverage/density/sigma/basescale/detail/detailscale/hbase/htop/falloff/silver/powder/ambient/sun/moon/moontint)" );
 }
 
 // =============================================================================
@@ -289,6 +326,7 @@ struct VolGpu
 	int mCamFwd, mCamRight, mCamUp, mCamPos, mLightDir, mLightColor, mAmbGround, mAmbSky;
 	int mBoxMin, mBoxMax, mTime, mFrame, mDensity, mCoverage, mSilver, mSigmaT;
 	int mBaseFreq, mDetailFreq, mDetailAmt, mLightReach, mMarchFar, mTargetSize, mSteps, mLightSteps;
+	int mFalloff, mHBase, mHTop, mPowder;
 	int mDepthTex, mZNear, mZFar, mInvViewProj, mBase3d, mDetail3d;
 	// upsample uniforms
 	int uCloudTex, uFullSize;
@@ -504,6 +542,10 @@ void BuildPrograms()
 	s_gpu.mBaseFreq    = UniformLoc( s_gpu.march, "u_baseFreq" );
 	s_gpu.mDetailFreq  = UniformLoc( s_gpu.march, "u_detailFreq" );
 	s_gpu.mDetailAmt   = UniformLoc( s_gpu.march, "u_detailAmt" );
+	s_gpu.mFalloff     = UniformLoc( s_gpu.march, "u_falloff" );
+	s_gpu.mHBase       = UniformLoc( s_gpu.march, "u_hBase" );
+	s_gpu.mHTop        = UniformLoc( s_gpu.march, "u_hTop" );
+	s_gpu.mPowder      = UniformLoc( s_gpu.march, "u_powder" );
 	s_gpu.mLightReach  = UniformLoc( s_gpu.march, "u_lightReach" );
 	s_gpu.mMarchFar    = UniformLoc( s_gpu.march, "u_marchFar" );
 	s_gpu.mTargetSize  = UniformLoc( s_gpu.march, "u_targetSize" );
@@ -538,7 +580,7 @@ struct CelLight
 	float ambGround[3];
 	float ambSky[3];
 };
-void DeriveCelestial( float phase, float nightness, CelLight &out )
+void DeriveCelestial( float phase, float nightness, float sunI, float moonI, float ambientMul, float moonTint, CelLight &out )
 {
 	float sun[3];
 	skymath::SunDir( phase, sun );
@@ -559,19 +601,26 @@ void DeriveCelestial( float phase, float nightness, CelLight &out )
 		out.dir[0] = d[0] / len; out.dir[1] = d[1] / len; out.dir[2] = d[2] / len;
 	}
 
-	// Color/intensity: warm bright sun -> cool dim moon (Purkinje), continuous.
-	const float dayC[3]   = { 1.00f, 0.97f, 0.90f }; const float dayI   = 3.2f;
-	const float nightC[3] = { 0.80f, 0.88f, 1.00f }; const float nightI = 1.3f;
+	// Color/intensity: warm bright sun -> cool dim moon (Purkinje), continuous. Intensities
+	// are HOT cvars (sunI/moonI) so day brightness and the moon's read can be swept live; the
+	// moon must stay DIM-BUT-VISIBLE (not the near-black void of iter 0). Cool tint amount is
+	// moonTint (0 = neutral white, 1 = cool, 2 = very cool) blended from a neutral base.
+	const float dayC[3]   = { 1.00f, 0.97f, 0.90f };
+	const float coolC[3]  = { 0.74f, 0.86f, 1.00f };   // fully-cool moon chroma
+	float nightC[3];
 	for( int i = 0; i < 3; i++ )
-		out.color[i] = mixf( dayC[i] * dayI, nightC[i] * nightI, nightness );
+		nightC[i] = mixf( 1.0f, coolC[i], clampf( moonTint, 0.0f, 2.0f ) );
+	for( int i = 0; i < 3; i++ )
+		out.color[i] = mixf( dayC[i] * sunI, nightC[i] * moonI, nightness );
 
 	// Height-aware ambient skylight: darker ground bounce vs cool sky zenith, cross-faded.
+	// Night ambient is raised off the floor (iter 0 was ~black) and scaled by the ambient hot cvar.
 	const float dayG[3] = { 0.18f, 0.20f, 0.24f }; const float dayS[3] = { 0.45f, 0.55f, 0.75f };
-	const float ngG[3]  = { 0.010f, 0.014f, 0.024f }; const float ngS[3] = { 0.040f, 0.055f, 0.090f };
+	const float ngG[3]  = { 0.030f, 0.038f, 0.060f }; const float ngS[3] = { 0.090f, 0.120f, 0.190f };
 	for( int i = 0; i < 3; i++ )
 	{
-		out.ambGround[i] = mixf( dayG[i], ngG[i], nightness );
-		out.ambSky[i]    = mixf( dayS[i], ngS[i], nightness );
+		out.ambGround[i] = mixf( dayG[i], ngG[i], nightness ) * ambientMul;
+		out.ambSky[i]    = mixf( dayS[i], ngS[i], nightness ) * ambientMul;
 	}
 }
 
@@ -653,8 +702,46 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 		case 3:  phase = 0.50f; nightness = 1.0f;  break;   // full-moon night
 		default: phase = g_sky.ComputePhase(); nightness = clampf( view.ambience.nightness, 0.0f, 1.0f ); break;
 	}
+	// --- LOOK hot params: read live + clamp; logged on change (no per-frame spam). These are
+	//     the swept-without-rebuild controls. The defaults are the iter-1 STRUCTURE-first target.
+	float coverage    = clampf( ReadCvar( s_cvCoverage,    0.42f  ), 0.0f,    1.0f    );
+	float density     = clampf( ReadCvar( s_cvDensity,     1.1f   ), 0.05f,   6.0f    );
+	float sigmaT      = clampf( ReadCvar( s_cvSigma,       0.006f ), 0.0005f, 0.05f   );
+	float baseScale   = clampf( ReadCvar( s_cvBaseScale,   4500.0f), 500.0f,  20000.0f);
+	float detailScale = clampf( ReadCvar( s_cvDetailScale, 700.0f ), 50.0f,   4000.0f );
+	float detailAmt   = clampf( ReadCvar( s_cvDetail,      0.7f   ), 0.0f,    1.0f    );
+	float hBase       = clampf( ReadCvar( s_cvHBase,       0.12f  ), 0.01f,   0.6f    );
+	float hTop        = clampf( ReadCvar( s_cvHTop,        0.5f   ), 0.15f,   0.99f   );
+	float falloff     = clampf( ReadCvar( s_cvFalloff,     0.35f  ), 0.0f,    0.9f    );
+	float silver      = clampf( ReadCvar( s_cvSilver,      1.4f   ), 0.0f,    8.0f    );
+	float powder      = clampf( ReadCvar( s_cvPowder,      1.0f   ), 0.0f,    3.0f    );
+	float ambientMul  = clampf( ReadCvar( s_cvAmbient,     1.0f   ), 0.0f,    4.0f    );
+	float sunI        = clampf( ReadCvar( s_cvSun,         3.2f   ), 0.0f,    12.0f   );
+	float moonI       = clampf( ReadCvar( s_cvMoon,        2.4f   ), 0.0f,    12.0f   );
+	float moonTint    = clampf( ReadCvar( s_cvMoonTint,    1.0f   ), 0.0f,    2.0f    );
+	if( hTop <= hBase + 0.05f )                 // keep a body between base taper and top round
+		hTop = clampf( hBase + 0.05f, 0.15f, 0.99f );
+	float baseFreq    = 1.0f / baseScale;
+	float detailFreq  = 1.0f / detailScale;
+	{
+		static bool  s_lookLogged = false;
+		static float s_last[15] = { 0 };
+		float cur[15] = { coverage, density, sigmaT, baseScale, detailScale, detailAmt,
+		                  hBase, hTop, falloff, silver, powder, ambientMul, sunI, moonI, moonTint };
+		bool changed = !s_lookLogged;
+		for( int i = 0; i < 15 && !changed; i++ ) if( s_last[i] != cur[i] ) changed = true;
+		if( changed )
+		{
+			CSZ_LogInfo( "cloudvol",
+				"[csz_clouds] LOOK resolved: cov=%.2f dens=%.2f sigma=%.4f baseScale=%.0f detScale=%.0f detail=%.2f hBase=%.2f hTop=%.2f falloff=%.2f silver=%.2f powder=%.2f amb=%.2f sun=%.2f moon=%.2f moonTint=%.2f",
+				coverage, density, sigmaT, baseScale, detailScale, detailAmt, hBase, hTop, falloff, silver, powder, ambientMul, sunI, moonI, moonTint );
+			for( int i = 0; i < 15; i++ ) s_last[i] = cur[i];
+			s_lookLogged = true;
+		}
+	}
+
 	CelLight cel;
-	DeriveCelestial( phase, nightness, cel );
+	DeriveCelestial( phase, nightness, sunI, moonI, ambientMul, moonTint, cel );
 
 	// --- hero AABB volume: latch a world anchor at the player's first-frame position
 	//     (per generation), so the box is WORLD-FIXED (real parallax + terrain occlusion
@@ -720,14 +807,7 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 		boxMax[0] = cx + kHalfX; boxMax[1] = cy + kHalfY; boxMax[2] = s_anchor[2] + kZ1;
 	}
 
-	// --- density / lighting constants (Phase 0 fixed; live tuning is a later phase) ---
-	const float density    = 1.6f;
-	const float coverage   = 0.55f;
-	const float silver     = 1.0f;
-	const float sigmaT     = 0.006f;
-	const float baseFreq   = 1.0f / 6000.0f;   // tiling period ~6000u (> box) -> no visible repeat; ~1000-1500u billows
-	const float detailFreq = 1.0f / 700.0f;    // high-freq edge erosion
-	const float detailAmt  = 0.5f;
+	// --- march constants (NOT look cvars: cost/quality knobs, fixed this phase) -----------
 	const float lightReach = 2600.0f;          // cone self-shadow over several feature-diameters
 	const float marchFar   = 12000.0f;         // bounded well below zFar (avoid far-depth quantization)
 	const int   steps      = 48;
@@ -856,6 +936,10 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	if( s_gpu.mBaseFreq >= 0 )    glUniform1f( s_gpu.mBaseFreq, baseFreq );
 	if( s_gpu.mDetailFreq >= 0 )  glUniform1f( s_gpu.mDetailFreq, detailFreq );
 	if( s_gpu.mDetailAmt >= 0 )   glUniform1f( s_gpu.mDetailAmt, detailAmt );
+	if( s_gpu.mFalloff >= 0 )     glUniform1f( s_gpu.mFalloff, falloff );
+	if( s_gpu.mHBase >= 0 )       glUniform1f( s_gpu.mHBase, hBase );
+	if( s_gpu.mHTop >= 0 )        glUniform1f( s_gpu.mHTop, hTop );
+	if( s_gpu.mPowder >= 0 )      glUniform1f( s_gpu.mPowder, powder );
 	if( s_gpu.mLightReach >= 0 )  glUniform1f( s_gpu.mLightReach, lightReach );
 	if( s_gpu.mMarchFar >= 0 )    glUniform1f( s_gpu.mMarchFar, marchFar );
 	if( s_gpu.mTargetSize >= 0 )  glUniform2fv( s_gpu.mTargetSize, 1, fTarget );
