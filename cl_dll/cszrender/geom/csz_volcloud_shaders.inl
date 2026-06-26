@@ -12,9 +12,11 @@
  *     work written for CSOZ from first principles. The Beer-Lambert extinction, the
  *     normalized Henyey-Greenstein phase and fractional-Brownian-motion noise are
  *     standard, non-proprietary math used directly from their published descriptions.
- *   - hash13() is Dave Hoskins' "Hash without Sine" (https://www.shadertoy.com/view/4djSRW),
- *     MIT-licensed; the 0.1031 constant is his. The same hash is already used in
- *     csz_sky_shaders.inl.
+ *   - hash13() and hash33() are Dave Hoskins' "Hash without Sine"
+ *     (https://www.shadertoy.com/view/4djSRW), MIT-licensed; the 0.1031 / 0.1030 /
+ *     0.0973 constants are his. hash13 is already used in csz_sky_shaders.inl; hash33
+ *     feeds the compact Worley (cellular) edge-erosion field added in this tuning pass.
+ *     The Worley F1-distance construction itself is standard, non-proprietary math.
  *   - ign() is Jorge Jimenez's Interleaved Gradient Noise ("Next Generation Post
  *     Processing in Call of Duty: Advanced Warfare", SIGGRAPH 2014); its magic
  *     constants (52.9829189, 0.06711056, 0.00583715) are used verbatim.
@@ -90,6 +92,9 @@ uniform float u_time;          // bounded client time (s) for slow wind scroll
 uniform float u_jitterFrame;   // per-frame jitter lattice offset (animated IGN)
 uniform float u_cover;         // 0..1 coverage threshold
 uniform float u_density;       // density multiplier
+uniform float u_silver;        // silver-lining strength (forward-HG lobe boost)
+uniform float u_tint;          // brooding storm tint amount (desaturate + cold teal-grey)
+uniform float u_detail;        // high-frequency Worley edge-erosion amount
 uniform float u_sigmaT;        // extinction coefficient (1/world-units along the march)
 uniform float u_slabBase;      // slab bottom altitude above the camera (world units)
 uniform float u_slabThick;     // slab thickness (world units)
@@ -161,23 +166,57 @@ float remap( float v, float a, float b, float c, float d )
 	return c + ( clamp( ( v - a ) / max( b - a, 1e-4 ), 0.0, 1.0 ) ) * ( d - c );
 }
 
+// Dave Hoskins "Hash without Sine" vec3->vec3 (MIT). Feeds the Worley feature points.
+vec3 hash33( vec3 p )
+{
+	p = fract( p * vec3( 0.1031, 0.1030, 0.0973 ) );
+	p += dot( p, p.yxz + 33.33 );
+	return fract( ( p.xxy + p.yxx ) * p.zyx );
+}
+
+// Compact cellular (Worley) noise -> BILLOW form ( 1 - F1 ). One 3x3x3 neighborhood, one
+// jittered feature point per cell. High near feature points => puffy cauliflower lumps;
+// used to erode crisp 3D wisps out of the cloud edges (gated to the VIEW march only).
+float worleyBillow( vec3 p )
+{
+	vec3 ip = floor( p );
+	vec3 fp = fract( p );
+	float f1 = 1.0;
+	for( int x = -1; x <= 1; x++ )
+	for( int y = -1; y <= 1; y++ )
+	for( int z = -1; z <= 1; z++ )
+	{
+		vec3 g   = vec3( float( x ), float( y ), float( z ) );
+		vec3 fpt = g + hash33( ip + g );      // feature point in neighbor cell
+		vec3 r   = fpt - fp;
+		f1 = min( f1, dot( r, r ) );          // squared F1 distance
+	}
+	return 1.0 - clamp( sqrt( f1 ), 0.0, 1.0 );
+}
+
 // Height fraction across the slab [0 = base, 1 = top].
 float heightFrac( vec3 p )
 {
 	return clamp( ( p.z - ( u_camPos.z + u_slabBase ) ) / max( u_slabThick, 1.0 ), 0.0, 1.0 );
 }
 
-// Vertical density profile: rounded bottom, eroded anvil top (denser low-mid).
+// Vertical density profile: a SHARP defined base, a tall built-up storm-tower body that
+// carries density high into the slab, and a lightly eroded anvil at the crown -- so the
+// masses read as massive vertical cumulonimbus towers, not a thin flat layer.
 float heightProfile( float h )
 {
-	float bottom = smoothstep( 0.0, 0.15, h );
-	float top    = smoothstep( 1.0, 0.55, h );
-	return bottom * top;
+	float base  = smoothstep( 0.0, 0.08, h );               // crisp cloud base
+	float tower = smoothstep( 1.0, 0.30, h );               // density built up high (towering)
+	float anvil = 1.0 - 0.30 * smoothstep( 0.80, 1.0, h );  // slight anvil thinning at the crown
+	return base * tower * anvil;
 }
 
 // Cloud density at world point p (0..~1, scaled by u_density). The DENSITY BACKEND
 // is the swappable cost lever for the measurement cost-ladder.
-float cloudDensity( vec3 p, int oct )
+// detailLod: 1 = VIEW march (pay for high-freq Worley erosion), 0 = cone LIGHT march
+// (skip erosion -- the shadow lookup does not need edge detail, buying back the budget
+// the Worley spends on the primary rays).
+float cloudDensity( vec3 p, int oct, int detailLod )
 {
 	float h    = heightFrac( p );
 	float prof = heightProfile( h );
@@ -186,6 +225,7 @@ float cloudDensity( vec3 p, int oct )
 
 	vec3 wind = vec3( u_time * 3.0, u_time * 1.3, 0.0 );   // slow wind scroll
 	vec3 q    = ( p + wind ) * u_noiseFreq;
+	q.z *= 0.65;                                           // vertical stretch -> taller towers
 
 	float shape;
 	if( u_backend == 2 )           // const-slab: no noise, profile only (cheapest)
@@ -210,13 +250,22 @@ float cloudDensity( vec3 p, int oct )
 	float d = remap( shape, 1.0 - u_cover, 1.0, 0.0, 1.0 );
 	d *= prof;
 
-	// Edge erosion (full path only): carve detail out of the wispy edges.
-	if( u_backend == 0 && d > 0.0 && d < 0.7 )
+	// High-frequency Worley erosion (full path, VIEW march only): carve crisp billowing
+	// wisps out of the edges so masses read as eroded 3D cauliflower, not a soft 2D haze.
+	// Erodes thin edges far more than dense cores -> bright eroded rims vs dark cores.
+	if( u_backend == 0 && detailLod >= 1 && u_detail > 0.001 && d > 0.0 && d < 0.95 )
 	{
-		float ero = fbm( q * 3.1 + vec3( 19.1, 3.7, 11.3 ), min( oct, 2 ) );
-		d = remap( d, ero * 0.5, 1.0, 0.0, 1.0 );
+		float w = worleyBillow( q * 2.7 + vec3( 19.1, 3.7, 11.3 ) );
+		float erodeAmt = u_detail * ( 1.0 - 0.6 * d );
+		d = remap( d, w * erodeAmt, 1.0, 0.0, 1.0 );
 	}
-	return clamp( d, 0.0, 1.0 ) * u_density;
+
+	// Crisper cloud-vs-clear boundary + more density dynamic range (smoothstep contrast):
+	// pushes mid densities apart so dense dark cores stand distinct from thin edges.
+	d = clamp( d, 0.0, 1.0 );
+	d = d * d * ( 3.0 - 2.0 * d );
+
+	return d * u_density;
 }
 
 // Normalized Henyey-Greenstein phase.
@@ -266,8 +315,12 @@ void main()
 	float t = t0 + stepLen * ( 0.5 + ( jit - 0.5 ) * 0.9 );
 
 	float cosT = dot( rd, u_lightDir );
-	// Dual-lobe HG: strong forward silver-lining + a gentle back lobe.
-	float phase = 0.85 * hg( cosT, 0.80 ) + 0.15 * hg( cosT, -0.20 );
+	// SILVER LINING: u_silver sharpens the forward HG lobe AND heavies its weight, so the
+	// sun/moon BACKLIGHTS the cloud edges into bright blazing rims against dark dense cores
+	// -- the single biggest drama cue for storm clouds. A gentle back lobe keeps fill.
+	float sil   = clamp( u_silver, 0.0, 1.5 );
+	float gFwd  = 0.74 + 0.16 * clamp( sil, 0.0, 1.0 );             // forward anisotropy 0.74..0.90
+	float phase = ( 0.80 + 0.95 * sil ) * hg( cosT, gFwd ) + 0.16 * hg( cosT, -0.18 );
 
 	float lightStepLen = u_slabThick / float( max( u_lightSteps, 1 ) ) * 0.6;
 
@@ -278,7 +331,7 @@ void main()
 	{
 		if( i >= steps ) break;
 		vec3 p = ro + rd * t;
-		float dens = cloudDensity( p, u_oct );
+		float dens = cloudDensity( p, u_oct, 1 );
 		if( dens > 0.0015 )
 		{
 			// --- cone light march toward the lit body (BASE density only) ---------
@@ -287,7 +340,7 @@ void main()
 			{
 				if( j >= u_lightSteps ) break;
 				vec3 lp = p + u_lightDir * ( lightStepLen * ( float( j ) + 0.5 ) );
-				lt += cloudDensity( lp, min( u_oct, 2 ) ) * lightStepLen;
+				lt += cloudDensity( lp, min( u_oct, 2 ), 0 ) * lightStepLen;
 			}
 			float Tl = exp( -u_sigmaT * lt );
 
@@ -319,6 +372,16 @@ void main()
 	}
 
 	float alpha = 1.0 - Tview;
+
+	// Brooding STORM TINT: desaturate toward luminance and push a cold grey-teal cast for
+	// the survival-horror mood. Luminance-preserving, so the bright silver rims stay bright
+	// and readable -- "dramatic dark", not a flat dark smear. (L is premultiplied; scaling
+	// the colour without touching alpha keeps the composite physically correct.)
+	float tnt  = clamp( u_tint, 0.0, 1.0 );
+	float lum  = dot( L, vec3( 0.2126, 0.7152, 0.0722 ) );
+	vec3  storm = vec3( lum ) * vec3( 0.78, 0.93, 0.90 );   // cold desaturated teal-grey
+	L = mix( L, storm, tnt );
+
 	// Premultiplied: L is already weighted by coverage along the march.
 	fragColor = vec4( L, alpha );
 }
