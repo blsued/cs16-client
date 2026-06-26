@@ -5,14 +5,22 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * This file is part of CSOZ (cs16-client fork). PROVENANCE / LICENSE: this is a
- * clean-room implementation written from PUBLISHED PHYSICAL/ALGORITHM DESCRIPTIONS
- * ONLY (Beer-Lambert extinction, normalized Henyey-Greenstein phase, fractional
- * Brownian motion). NO code, permutation table, gradient table, or constant set is
- * copied or translated from Shadertoy/iQ, Unreal/Unity/Frostbite/Hillaire sample
- * code, GPU-Gems snippets, PrimeXT, Paranoia, Trinity, or any retail/leaked source.
- * The hash functions are generated integer-bit-mix one-liners (formulas, not tables)
- * with constants chosen for this file; the noise is value/billow fBm built on them.
+ * This file is part of CSOZ (cs16-client fork). PROVENANCE / LICENSE:
+ *   - The raymarch loop, the density model (height profile + coverage remap + edge
+ *     erosion + wind scroll) and the lighting (Beer-Lambert transmittance, cone
+ *     light-march, multi-scatter octave reuse, ground/sky ambient tint) are original
+ *     work written for CSOZ from first principles. The Beer-Lambert extinction, the
+ *     normalized Henyey-Greenstein phase and fractional-Brownian-motion noise are
+ *     standard, non-proprietary math used directly from their published descriptions.
+ *   - hash13() is Dave Hoskins' "Hash without Sine" (https://www.shadertoy.com/view/4djSRW),
+ *     MIT-licensed; the 0.1031 constant is his. The same hash is already used in
+ *     csz_sky_shaders.inl.
+ *   - ign() is Jorge Jimenez's Interleaved Gradient Noise ("Next Generation Post
+ *     Processing in Call of Duty: Advanced Warfare", SIGGRAPH 2014); its magic
+ *     constants (52.9829189, 0.06711056, 0.00583715) are used verbatim.
+ *   No code, permutation table or gradient table is copied or translated from
+ *   Unreal/Unity/Frostbite/Hillaire sample code, GPU-Gems snippets, PrimeXT,
+ *   Paranoia, Trinity, or any retail/leaked source.
  *
  * This program is free software; you can redistribute it and/or modify it under the
  * terms of the GNU General Public License as published by the Free Software
@@ -78,7 +86,6 @@ uniform vec3  u_lightDir;      // world dir toward the LIT body (sun by day / mo
 uniform vec3  u_lightColor;    // linear HDR radiance of the lit body (already phase-independent)
 uniform vec3  u_ambGround;     // ambient skylight toward the cloud UNDERSIDE (darker)
 uniform vec3  u_ambSky;        // ambient skylight toward the cloud TOP (sky/zenith)
-uniform vec2  u_targetSize;    // quarter-res target size in px (for the jitter lattice)
 uniform float u_time;          // bounded client time (s) for slow wind scroll
 uniform float u_jitterFrame;   // per-frame jitter lattice offset (animated IGN)
 uniform float u_cover;         // 0..1 coverage threshold

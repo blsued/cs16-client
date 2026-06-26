@@ -118,7 +118,7 @@ struct VolGpu
 
 	// march uniforms
 	int mCamFwd, mCamRight, mCamUp, mCamPos, mLightDir, mLightColor, mAmbGround, mAmbSky;
-	int mTargetSize, mTime, mJitterFrame, mCover, mDensity, mSigmaT, mSlabBase, mSlabThick;
+	int mTime, mJitterFrame, mCover, mDensity, mSigmaT, mSlabBase, mSlabThick;
 	int mNoiseFreq, mSteps, mLightSteps, mOct, mMsOct, mBackend, mEarlyout, mNoise3d;
 	// upsample uniforms
 	int uCamFwd, uCamRight, uCamUp, uCloudTex, uFullSize;
@@ -296,7 +296,12 @@ void BuildPrograms()
 		s_gpu.gpuGeneration = GpuGeneration();
 	}
 
-	glGenVertexArrays( 1, &s_gpu.vao );
+	// Guard: only mint a VAO name once per GPU generation (the foreign-generation
+	// branch above zeroes it). Without the guard, a shader-compile failure with the
+	// cvar ON returns below WITHOUT setting s_gpu.built, so BuildPrograms re-enters
+	// every frame and would leak a fresh VAO name each time.
+	if( !s_gpu.vao )
+		glGenVertexArrays( 1, &s_gpu.vao );
 	// Spike-quality: a compile failure disables the pass this generation (NOT fatal --
 	// production is OFF by default, so a broken cloud shader must never brick the game).
 	if( !BuildProgram( "csz_volcloud_march", kVolCloudVs, kVolCloudMarchFs, false, s_gpu.march ) ||
@@ -315,7 +320,6 @@ void BuildPrograms()
 	s_gpu.mLightColor = UniformLoc( s_gpu.march, "u_lightColor" );
 	s_gpu.mAmbGround  = UniformLoc( s_gpu.march, "u_ambGround" );
 	s_gpu.mAmbSky     = UniformLoc( s_gpu.march, "u_ambSky" );
-	s_gpu.mTargetSize = UniformLoc( s_gpu.march, "u_targetSize" );
 	s_gpu.mTime       = UniformLoc( s_gpu.march, "u_time" );
 	s_gpu.mJitterFrame= UniformLoc( s_gpu.march, "u_jitterFrame" );
 	s_gpu.mCover      = UniformLoc( s_gpu.march, "u_cover" );
@@ -609,6 +613,14 @@ void VolCloudRenderer::Contribute( const ViewSetup &view )
 	GLint  prevColorMask[4];     glGetIntegerv( GL_COLOR_WRITEMASK, prevColorMask );
 	GLboolean prevScissor = glIsEnabled( GL_SCISSOR_TEST );
 	GLboolean prevSrgb    = glIsEnabled( GL_FRAMEBUFFER_SRGB );
+	// Toggle state this two-pass detour perturbs through the csz Set* wrappers. Snapshot
+	// the ACTUAL entry values (not assumed-baseline constants) and restore them on exit
+	// via the SAME wrappers, so the shadow cache stays coherent for SunMoonContribute,
+	// which runs next inside this takeover. Symmetric with the raw saves above.
+	GLboolean prevDepthTest = glIsEnabled( GL_DEPTH_TEST );
+	GLboolean prevBlend     = glIsEnabled( GL_BLEND );
+	GLboolean prevCull      = glIsEnabled( GL_CULL_FACE );
+	GLint     prevDepthMask = GL_TRUE; glGetIntegerv( GL_DEPTH_WRITEMASK, &prevDepthMask );
 
 	// --- pre-pass GL-error drain + attribution marker (Part 4) ----------------------
 	{
@@ -675,7 +687,6 @@ void VolCloudRenderer::Contribute( const ViewSetup &view )
 	if( P.backend == 3 && s_gpu.noise3dTex )
 		SkyComposeBindTex( 1, GL_TEXTURE_3D, s_gpu.noise3dTex );
 
-	float qSize[2] = { (float)qW, (float)qH };
 	if( s_gpu.mCamFwd >= 0 )     glUniform3fv( s_gpu.mCamFwd, 1, fwd );
 	if( s_gpu.mCamRight >= 0 )   glUniform3fv( s_gpu.mCamRight, 1, rightS );
 	if( s_gpu.mCamUp >= 0 )      glUniform3fv( s_gpu.mCamUp, 1, upS );
@@ -684,7 +695,6 @@ void VolCloudRenderer::Contribute( const ViewSetup &view )
 	if( s_gpu.mLightColor >= 0 ) glUniform3fv( s_gpu.mLightColor, 1, lightColor );
 	if( s_gpu.mAmbGround >= 0 )  glUniform3fv( s_gpu.mAmbGround, 1, ambGround );
 	if( s_gpu.mAmbSky >= 0 )     glUniform3fv( s_gpu.mAmbSky, 1, ambSky );
-	if( s_gpu.mTargetSize >= 0 ) glUniform2fv( s_gpu.mTargetSize, 1, qSize );
 	if( s_gpu.mTime >= 0 )       glUniform1f( s_gpu.mTime, t );
 	if( s_gpu.mJitterFrame >= 0 )glUniform1f( s_gpu.mJitterFrame, jitterFrame );
 	if( s_gpu.mCover >= 0 )      glUniform1f( s_gpu.mCover, P.cover );
@@ -735,12 +745,17 @@ void VolCloudRenderer::Contribute( const ViewSetup &view )
 		s_gpu.ringHead = ( slot + 1 ) % kRing;
 	}
 
-	// --- restore the engine-facing baseline + the raw-only saved state --------------
+	// --- restore the snapshotted entry state + the raw-only saved state --------------
 	UseProgram( 0 );
-	SetBlend( kBlendNone );
-	SetDepthTest( true );
-	SetDepthWrite( true );
-	SetCull( false );
+	// Restore the values snapshotted at pass entry through the wrappers (keeps the
+	// shadow cache coherent for the SunMoon pass that runs next). The blend ENABLE bit
+	// is all glIsEnabled gives us; in this takeover blend is always OFF at entry
+	// (EnterTakeover baseline + every prior pass restores), so the live restore is
+	// kBlendNone -- the enabled branch is a defensive fallback only.
+	SetBlend( prevBlend ? kBlendAlpha : kBlendNone );
+	SetDepthTest( prevDepthTest != GL_FALSE );
+	SetDepthWrite( prevDepthMask != GL_FALSE );
+	SetCull( prevCull != GL_FALSE );
 	BindFbo( (GLuint)prevFbo );
 	glViewport( prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3] );
 	glColorMask( (GLboolean)prevColorMask[0], (GLboolean)prevColorMask[1], (GLboolean)prevColorMask[2], (GLboolean)prevColorMask[3] );
