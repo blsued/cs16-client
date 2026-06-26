@@ -87,14 +87,14 @@ void RegisterCvarsImpl()
 	s_cvMaster   = gEngfuncs.pfnRegisterVariable( "csz_volcloud",         "0",   FCVAR_CLIENTDLL );
 	s_cvPerf     = gEngfuncs.pfnRegisterVariable( "csz_volcloud_perf",     "0",   FCVAR_CLIENTDLL );
 	s_cvRes      = gEngfuncs.pfnRegisterVariable( "csz_volcloud_res",      "4",   FCVAR_CLIENTDLL );
-	s_cvSteps    = gEngfuncs.pfnRegisterVariable( "csz_volcloud_steps",    "32",  FCVAR_CLIENTDLL );
+	s_cvSteps    = gEngfuncs.pfnRegisterVariable( "csz_volcloud_steps",    "40",  FCVAR_CLIENTDLL );
 	s_cvLight    = gEngfuncs.pfnRegisterVariable( "csz_volcloud_light",    "6",   FCVAR_CLIENTDLL );
-	s_cvOct      = gEngfuncs.pfnRegisterVariable( "csz_volcloud_oct",      "2",   FCVAR_CLIENTDLL );
-	s_cvCover    = gEngfuncs.pfnRegisterVariable( "csz_volcloud_cover",    "0.62", FCVAR_CLIENTDLL );
-	s_cvDensity  = gEngfuncs.pfnRegisterVariable( "csz_volcloud_density",  "1.35", FCVAR_CLIENTDLL );
-	s_cvSilver   = gEngfuncs.pfnRegisterVariable( "csz_volcloud_silver",   "0.9",  FCVAR_CLIENTDLL );
-	s_cvTint     = gEngfuncs.pfnRegisterVariable( "csz_volcloud_tint",     "0.45", FCVAR_CLIENTDLL );
-	s_cvDetail   = gEngfuncs.pfnRegisterVariable( "csz_volcloud_detail",   "0.7",  FCVAR_CLIENTDLL );
+	s_cvOct      = gEngfuncs.pfnRegisterVariable( "csz_volcloud_oct",      "3",   FCVAR_CLIENTDLL );
+	s_cvCover    = gEngfuncs.pfnRegisterVariable( "csz_volcloud_cover",    "0.70", FCVAR_CLIENTDLL );
+	s_cvDensity  = gEngfuncs.pfnRegisterVariable( "csz_volcloud_density",  "1.90", FCVAR_CLIENTDLL );
+	s_cvSilver   = gEngfuncs.pfnRegisterVariable( "csz_volcloud_silver",   "1.0",  FCVAR_CLIENTDLL );
+	s_cvTint     = gEngfuncs.pfnRegisterVariable( "csz_volcloud_tint",     "0.25", FCVAR_CLIENTDLL );
+	s_cvDetail   = gEngfuncs.pfnRegisterVariable( "csz_volcloud_detail",   "0.38", FCVAR_CLIENTDLL );
 	s_cvBackend  = gEngfuncs.pfnRegisterVariable( "csz_volcloud_backend",  "0",   FCVAR_CLIENTDLL );
 	s_cvEarlyout = gEngfuncs.pfnRegisterVariable( "csz_volcloud_earlyout", "1",   FCVAR_CLIENTDLL );
 	s_cvarsReady = true;
@@ -125,6 +125,7 @@ struct VolGpu
 	// march uniforms
 	int mCamFwd, mCamRight, mCamUp, mCamPos, mLightDir, mLightColor, mAmbGround, mAmbSky;
 	int mTime, mJitterFrame, mCover, mDensity, mSilver, mTint, mDetail, mSigmaT, mSlabBase, mSlabThick;
+	int mLightReach, mCoverScale;
 	int mNoiseFreq, mSteps, mLightSteps, mOct, mMsOct, mBackend, mEarlyout, mNoise3d;
 	// upsample uniforms
 	int uCamFwd, uCamRight, uCamUp, uCloudTex, uFullSize;
@@ -336,6 +337,8 @@ void BuildPrograms()
 	s_gpu.mSigmaT     = UniformLoc( s_gpu.march, "u_sigmaT" );
 	s_gpu.mSlabBase   = UniformLoc( s_gpu.march, "u_slabBase" );
 	s_gpu.mSlabThick  = UniformLoc( s_gpu.march, "u_slabThick" );
+	s_gpu.mLightReach = UniformLoc( s_gpu.march, "u_lightReach" );
+	s_gpu.mCoverScale = UniformLoc( s_gpu.march, "u_coverScale" );
 	s_gpu.mNoiseFreq  = UniformLoc( s_gpu.march, "u_noiseFreq" );
 	s_gpu.mSteps      = UniformLoc( s_gpu.march, "u_steps" );
 	s_gpu.mLightSteps = UniformLoc( s_gpu.march, "u_lightSteps" );
@@ -411,16 +414,17 @@ void BuildSweep()
 	s_sweep.clear();
 
 	// --- Headline deterministic preset: default config, DAY + NIGHT (>=250 samples) ---
-	// default = res4, steps32, light6, oct2, backend0(procedural), earlyout1
-	SweepCfg pn = { "PRESET_NIGHT",       0, 4, 32, 6, 2, 0, 1, kHeadlineWindow }; s_sweep.push_back( pn );
-	SweepCfg pd = { "PRESET_DAY",         1, 4, 32, 6, 2, 0, 1, kHeadlineWindow }; s_sweep.push_back( pd );
+	// RE-FOUNDED default = res4, steps40, light6, oct3, backend0(procedural), earlyout1
+	// (matches the shipping cvar defaults so the headline preset measures the real cost).
+	SweepCfg pn = { "PRESET_NIGHT",       0, 4, 40, 6, 3, 0, 1, kHeadlineWindow }; s_sweep.push_back( pn );
+	SweepCfg pd = { "PRESET_DAY",         1, 4, 40, 6, 3, 0, 1, kHeadlineWindow }; s_sweep.push_back( pd );
 	// --- Forced-full-step (early-out DISABLED) worst case, day + night ---
-	SweepCfg fn = { "FORCED_FULL_NIGHT",  0, 4, 32, 6, 2, 0, 0, kHeadlineWindow }; s_sweep.push_back( fn );
-	SweepCfg fd = { "FORCED_FULL_DAY",    1, 4, 32, 6, 2, 0, 0, kHeadlineWindow }; s_sweep.push_back( fd );
+	SweepCfg fn = { "FORCED_FULL_NIGHT",  0, 4, 40, 6, 3, 0, 0, kHeadlineWindow }; s_sweep.push_back( fn );
+	SweepCfg fd = { "FORCED_FULL_DAY",    1, 4, 40, 6, 3, 0, 0, kHeadlineWindow }; s_sweep.push_back( fd );
 	// --- 3D-texture-fetch microbench: preset config, backend 3 (only if 3D bound) ---
 	if( s_gpu.tex3dOk )
 	{
-		SweepCfg t3 = { "TEX3D_MICROBENCH", 0, 4, 32, 6, 2, 3, 1, kHeadlineWindow }; s_sweep.push_back( t3 );
+		SweepCfg t3 = { "TEX3D_MICROBENCH", 0, 4, 40, 6, 3, 3, 1, kHeadlineWindow }; s_sweep.push_back( t3 );
 	}
 
 	// --- Cost ladder (coarser window): light x oct x backend x res x earlyout, night ---
@@ -525,32 +529,32 @@ void VolCloudRenderer::Contribute( const ViewSetup &view )
 		{
 			// sweep finished: keep rendering a benign default so the frame is valid.
 			P.res = 4; P.steps = 32; P.light = 6; P.oct = 2; P.backend = 0; P.earlyout = 1;
-			P.cover = 0.62f; P.density = 1.35f; P.forcePhase = true; P.phase = 0.0f;
-			P.silver = 0.9f; P.tint = 0.45f; P.detail = 0.7f;
+			P.cover = 0.70f; P.density = 1.90f; P.forcePhase = true; P.phase = 0.0f;
+			P.silver = 1.0f; P.tint = 0.25f; P.detail = 0.38f;
 		}
 		else
 		{
 			const SweepCfg &c = s_sweep[ s_sweepIdx ];
 			P.res = c.res; P.steps = c.steps; P.light = c.light; P.oct = c.oct;
 			P.backend = c.backend; P.earlyout = c.earlyout;
-			P.cover = 0.62f; P.density = 1.35f;   // fixed non-trivial coverage for the preset
-			P.silver = 0.9f; P.tint = 0.45f; P.detail = 0.7f;   // dramatic-storm look = the real measured cost
+			P.cover = 0.70f; P.density = 1.90f;   // shipping coverage/density for the preset
+			P.silver = 1.0f; P.tint = 0.25f; P.detail = 0.38f;   // dramatic-storm look = the real measured cost
 			P.forcePhase = true; P.phase = c.phaseMode ? 0.5f : 0.0f;
 		}
 	}
 	else
 	{
 		P.res      = clampi( (int)( ReadCvar( s_cvRes, 4.0f ) + 0.5f ), 1, 8 );
-		P.steps    = clampi( (int)( ReadCvar( s_cvSteps, 32.0f ) + 0.5f ), 1, 64 );
+		P.steps    = clampi( (int)( ReadCvar( s_cvSteps, 64.0f ) + 0.5f ), 1, 96 );
 		P.light    = clampi( (int)( ReadCvar( s_cvLight, 6.0f ) + 0.5f ), 0, 8 );
 		P.oct      = clampi( (int)( ReadCvar( s_cvOct, 2.0f ) + 0.5f ), 1, 6 );
 		P.backend  = clampi( (int)( ReadCvar( s_cvBackend, 0.0f ) + 0.5f ), 0, 3 );
 		P.earlyout = ( ReadCvar( s_cvEarlyout, 1.0f ) >= 0.5f ) ? 1 : 0;
-		P.cover    = clampf( ReadCvar( s_cvCover, 0.62f ), 0.0f, 1.0f );
-		P.density  = clampf( ReadCvar( s_cvDensity, 1.35f ), 0.0f, 4.0f );
-		P.silver   = clampf( ReadCvar( s_cvSilver, 0.9f ), 0.0f, 1.5f );
-		P.tint     = clampf( ReadCvar( s_cvTint,   0.45f ), 0.0f, 1.0f );
-		P.detail   = clampf( ReadCvar( s_cvDetail, 0.7f ), 0.0f, 1.0f );
+		P.cover    = clampf( ReadCvar( s_cvCover, 0.70f ), 0.0f, 1.0f );
+		P.density  = clampf( ReadCvar( s_cvDensity, 1.90f ), 0.0f, 4.0f );
+		P.silver   = clampf( ReadCvar( s_cvSilver, 1.0f ), 0.0f, 1.5f );
+		P.tint     = clampf( ReadCvar( s_cvTint,   0.25f ), 0.0f, 1.0f );
+		P.detail   = clampf( ReadCvar( s_cvDetail, 0.38f ), 0.0f, 1.0f );
 	}
 	if( P.backend == 3 && !s_gpu.tex3dOk )
 		P.backend = 0;   // 3D unavailable: fall back to procedural (never sample an unbound 3D tex)
@@ -608,10 +612,28 @@ void VolCloudRenderer::Contribute( const ViewSetup &view )
 	float upS[3]    = { up[0] * tanY,    up[1] * tanY,    up[2] * tanY };
 
 	// cloud slab (world units above the camera) + extinction.
-	const float slabBase = 2400.0f;
-	const float slabThick = 1600.0f;
-	const float noiseFreq = 1.0f / 900.0f;
-	const float sigmaT = 0.0019f;
+	// RE-FOUNDED SCALE (2026-06-26): converged in-engine from the old self-defeating
+	// far/flat/thin scale (slabBase 2400, slabThick 1600, feature ~900u, sigmaT 0.0019,
+	// steps 32, light 6, oct 2) -- which read as a flat 2D texture pasted on the dome --
+	// to a CLOSE + THICK + FINE + STRONGLY-SELF-SHADOWED scale that reads as real volume:
+	//   slabBase  700  : clouds brought CLOSE so there is NEAR cloud overhead (was 2400).
+	//   slabThick 3200 : a deep slab the ray integrates many feature-diameters INTO so
+	//                    vertical billowing towers rise (was 1600 = ~1 feature thick).
+	//   featSize  300  : finer base feature (~300u, noiseFreq 1/300; was ~900u) so a ray
+	//                    cuts MANY feature-diameters => depth + parallax structure.
+	//   sigmaT  0.016  : ~8x stronger extinction so dense cores self-shadow to near-black
+	//                    (was 0.0019 => cores never went dark); THE cue that sells volume.
+	//   lReach    1.3  : cone light-march spans several feature-diameters toward the sun.
+	//   coverScale 0.14: coverage field is LOW-frequency (~7x bigger than the body) so the
+	//                    sky reads as big coherent MASSES with clear GAPS (was 0.46 = small
+	//                    holes). The body fBM (oct 3) adds the billow inside each mass.
+	const float slabBase  = 700.0f;
+	const float slabThick = 3200.0f;
+	const float featSize  = 300.0f;
+	const float noiseFreq = 1.0f / featSize;
+	const float sigmaT    = 0.0160f;
+	const float lReach    = 1.3f;
+	const float coverScale= 0.14f;
 
 	float t = fmodf( ClientTime(), 3600.0f );
 	float jitterFrame = (float)( s_frame & 1023u );
@@ -720,6 +742,10 @@ void VolCloudRenderer::Contribute( const ViewSetup &view )
 	if( s_gpu.mSigmaT >= 0 )     glUniform1f( s_gpu.mSigmaT, sigmaT );
 	if( s_gpu.mSlabBase >= 0 )   glUniform1f( s_gpu.mSlabBase, slabBase );
 	if( s_gpu.mSlabThick >= 0 )  glUniform1f( s_gpu.mSlabThick, slabThick );
+	// light-march reach = several feature-diameters toward the sun (strong self-shadow),
+	// scaled by the dev lReach knob during bisection. featSize is the base feature size (u).
+	if( s_gpu.mLightReach >= 0 ) glUniform1f( s_gpu.mLightReach, featSize * 7.0f * lReach );
+	if( s_gpu.mCoverScale >= 0 ) glUniform1f( s_gpu.mCoverScale, coverScale );
 	if( s_gpu.mNoiseFreq >= 0 )  glUniform1f( s_gpu.mNoiseFreq, noiseFreq );
 	if( s_gpu.mSteps >= 0 )      glUniform1i( s_gpu.mSteps, P.steps );
 	if( s_gpu.mLightSteps >= 0 ) glUniform1i( s_gpu.mLightSteps, P.light );

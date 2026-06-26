@@ -98,6 +98,8 @@ uniform float u_detail;        // high-frequency Worley edge-erosion amount
 uniform float u_sigmaT;        // extinction coefficient (1/world-units along the march)
 uniform float u_slabBase;      // slab bottom altitude above the camera (world units)
 uniform float u_slabThick;     // slab thickness (world units)
+uniform float u_lightReach;    // TOTAL cone light-march reach toward the lit body (world units)
+uniform float u_coverScale;    // coverage-field frequency vs body (smaller => bigger masses + gaps)
 uniform float u_noiseFreq;     // base noise frequency (1/world-units)
 uniform int   u_steps;         // view march steps
 uniform int   u_lightSteps;    // cone light march steps
@@ -110,7 +112,7 @@ uniform sampler3D u_noise3d;   // small procedurally-filled 3D noise (backend 3 
 const float PI = 3.14159265358979323846;
 // Compile-time caps so the driver can bound the (uniform-controlled) loops; the
 // live uniforms clamp BELOW these on the CPU side.
-const int MAX_STEPS = 64;
+const int MAX_STEPS = 96;
 const int MAX_LIGHT = 8;
 const int MAX_OCT   = 6;
 const int MAX_MSOCT = 4;
@@ -267,7 +269,7 @@ float cloudDensity( vec3 p, int oct, int detailLod )
 
 	// WORLD-SPACE sampling: wind-scrolled world position, no camera/screen centering, no
 	// abs()/radial term -> the noise lattice is continuous and never folded about an axis.
-	vec3 wind = vec3( u_time * 3.0, u_time * 1.3, 0.0 );   // slow wind scroll
+	vec3 wind = vec3( u_time * 0.8, u_time * 0.35, 0.0 );  // SLOW wind scroll (do not swamp parallax)
 	vec3 q    = ( p + wind ) * u_noiseFreq;
 	q.z *= 0.65;                                           // vertical stretch -> taller towers
 
@@ -311,7 +313,7 @@ float cloudDensity( vec3 p, int oct, int detailLod )
 	{
 		shape = fbm( qd, oct );                                            // mid/high billow BODY
 		coverNoise = viewMarch
-			? fbm( q * 0.46 + vec3( 51.3, 13.9, 7.1 ), min( oct, 2 ) )     // low-freq COVERAGE (view)
+			? fbm( q * u_coverScale + vec3( 51.3, 13.9, 7.1 ), min( oct, 2 ) ) // low-freq COVERAGE (view)
 			: shape;                                                       // light march: reuse body
 	}
 
@@ -407,7 +409,11 @@ void main()
 	// it appears as a thin bright lining on the backlit silhouette, not an all-over wash.
 	float backlit = smoothstep( -0.05, -0.55, cosT );
 
-	float lightStepLen = u_slabThick / float( max( u_lightSteps, 1 ) ) * 0.6;
+	// Cone light-march reach is sized to the FEATURE scale (passed as u_lightReach), NOT the
+	// slab thickness, so dense cores self-shadow over SEVERAL feature-diameters toward the sun
+	// regardless of slab geometry. Falls back to a slab-relative reach if the uniform is 0.
+	float reachTotal   = ( u_lightReach > 1.0 ) ? u_lightReach : ( u_slabThick * 0.6 );
+	float lightStepLen = reachTotal / float( max( u_lightSteps, 1 ) );
 
 	vec3  L = vec3( 0.0 );
 	float Tview = 1.0;
