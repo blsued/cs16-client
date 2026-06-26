@@ -100,10 +100,13 @@ cvar_t *s_cvDetailScale; // csz_clouds_detailscale 700   [50..4000]  detail-nois
 cvar_t *s_cvHBase;       // csz_clouds_hbase       0.12  [0.01..0.6] height-gradient: base taper fraction (feathered flat-ish base)
 cvar_t *s_cvHTop;        // csz_clouds_htop        0.50  [0.15..0.99] height-gradient: where the rounded top begins
 cvar_t *s_cvFalloff;     // csz_clouds_falloff     0.35  [0..0.9]    X/Y face-falloff window (density->0 BEFORE the box faces; kills box silhouette)
-cvar_t *s_cvSilver;      // csz_clouds_silver      1.40  [0..8]      silver-lining rim strength (lit backlit edges)
+cvar_t *s_cvSilver;      // csz_clouds_silver      2.50  [0..8]      silver-lining rim strength (BACKLIT forward-scatter edges)
+cvar_t *s_cvSilverWidth; // csz_clouds_silver_width 0.50 [0.05..8]  rim band width (LOW=broad glow inward, HIGH=razor edge only)
 cvar_t *s_cvPowder;      // csz_clouds_powder      1.00  [0..3]      powder dark-edge strength (self-shadowed near faces)
 cvar_t *s_cvAmbient;     // csz_clouds_ambient     1.00  [0..4]      ambient skylight multiplier (undersides not black)
 cvar_t *s_cvSun;         // csz_clouds_sun         3.20  [0..12]     day/sun lit intensity
+cvar_t *s_cvSunElev;     // csz_clouds_sun_elev    -1    [-1..90]    CLOUD-ONLY light elevation override (deg, 0=horizon..90=zenith); -1=follow tod/skymath sun
+cvar_t *s_cvSunAzim;     // csz_clouds_sun_azim    -1    [-1..360]   CLOUD-ONLY light azimuth override (deg); used only when sun_elev>=0
 cvar_t *s_cvMoon;        // csz_clouds_moon        2.40  [0..12]     moon lit intensity (dim BUT visible -- not a black void)
 cvar_t *s_cvMoonTint;    // csz_clouds_moontint    1.00  [0..2]      moon cool-tint amount (0=white, 1=cool, 2=very cool)
 
@@ -121,27 +124,35 @@ void RegisterCvarsImpl()
 	// fixed sky-vantage capture camera's view (see recommended capture args in the handoff).
 	s_cvDbgBoxX   = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_x",      "150",  FCVAR_CLIENTDLL );
 	s_cvDbgBoxY   = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_y",      "2850", FCVAR_CLIENTDLL );
-	s_cvDbgBoxZ   = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_z",      "1200", FCVAR_CLIENTDLL );
-	s_cvDbgBoxRad = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_radius", "1500", FCVAR_CLIENTDLL );
-	// LOOK hot cvars (swept live, no rebuild). Defaults = the iter-1 STRUCTURE-first target:
-	// low coverage + strong erosion + X/Y face falloff so the AABB silhouette is GONE.
-	s_cvCoverage    = gEngfuncs.pfnRegisterVariable( "csz_clouds_coverage",    "0.42",  FCVAR_CLIENTDLL );
-	s_cvDensity     = gEngfuncs.pfnRegisterVariable( "csz_clouds_density",     "1.1",   FCVAR_CLIENTDLL );
+	// Bigger/higher default debug box (iter-2 substance lock): a substantial mass by default.
+	s_cvDbgBoxZ   = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_z",      "3000", FCVAR_CLIENTDLL );
+	s_cvDbgBoxRad = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_radius", "2400", FCVAR_CLIENTDLL );
+	// LOOK hot cvars (swept live, no rebuild). Defaults = the iter-2 SUBSTANCE-LOCK target:
+	// coverage 0.6 + density 2.5 + basescale 2200 gave a substantial, rounded, billowy cumulus
+	// (confirmed from the oblique vantage); X/Y face falloff + erosion keep the AABB silhouette GONE.
+	s_cvCoverage    = gEngfuncs.pfnRegisterVariable( "csz_clouds_coverage",    "0.6",   FCVAR_CLIENTDLL );
+	s_cvDensity     = gEngfuncs.pfnRegisterVariable( "csz_clouds_density",     "2.5",   FCVAR_CLIENTDLL );
 	s_cvSigma       = gEngfuncs.pfnRegisterVariable( "csz_clouds_sigma",       "0.006", FCVAR_CLIENTDLL );
-	s_cvBaseScale   = gEngfuncs.pfnRegisterVariable( "csz_clouds_basescale",   "4500",  FCVAR_CLIENTDLL );
+	s_cvBaseScale   = gEngfuncs.pfnRegisterVariable( "csz_clouds_basescale",   "2200",  FCVAR_CLIENTDLL );
 	s_cvDetail      = gEngfuncs.pfnRegisterVariable( "csz_clouds_detail",      "0.7",   FCVAR_CLIENTDLL );
 	s_cvDetailScale = gEngfuncs.pfnRegisterVariable( "csz_clouds_detailscale", "700",   FCVAR_CLIENTDLL );
 	s_cvHBase       = gEngfuncs.pfnRegisterVariable( "csz_clouds_hbase",       "0.12",  FCVAR_CLIENTDLL );
 	s_cvHTop        = gEngfuncs.pfnRegisterVariable( "csz_clouds_htop",        "0.5",   FCVAR_CLIENTDLL );
 	s_cvFalloff     = gEngfuncs.pfnRegisterVariable( "csz_clouds_falloff",     "0.35",  FCVAR_CLIENTDLL );
-	s_cvSilver      = gEngfuncs.pfnRegisterVariable( "csz_clouds_silver",      "1.4",   FCVAR_CLIENTDLL );
+	s_cvSilver      = gEngfuncs.pfnRegisterVariable( "csz_clouds_silver",      "2.5",   FCVAR_CLIENTDLL );
+	s_cvSilverWidth = gEngfuncs.pfnRegisterVariable( "csz_clouds_silver_width","0.5",   FCVAR_CLIENTDLL );
 	s_cvPowder      = gEngfuncs.pfnRegisterVariable( "csz_clouds_powder",      "1.0",   FCVAR_CLIENTDLL );
 	s_cvAmbient     = gEngfuncs.pfnRegisterVariable( "csz_clouds_ambient",     "1.0",   FCVAR_CLIENTDLL );
 	s_cvSun         = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun",         "3.2",   FCVAR_CLIENTDLL );
+	// CLOUD-ONLY sun-direction override (does NOT touch the engine sun or any other system):
+	// -1 = follow the tod/skymath sun (production behavior UNCHANGED). When sun_elev>=0 the cloud's
+	// light direction is rebuilt from (sun_elev,sun_azim) so the lit cauliflower tops can face up/camera.
+	s_cvSunElev     = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun_elev",    "-1",    FCVAR_CLIENTDLL );
+	s_cvSunAzim     = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun_azim",    "-1",    FCVAR_CLIENTDLL );
 	s_cvMoon        = gEngfuncs.pfnRegisterVariable( "csz_clouds_moon",        "2.4",   FCVAR_CLIENTDLL );
 	s_cvMoonTint    = gEngfuncs.pfnRegisterVariable( "csz_clouds_moontint",    "1.0",   FCVAR_CLIENTDLL );
 	s_cvarsReady = true;
-	CSZ_LogDev( "cloudvol", "cvars registered (csz_clouds + _tod/_res/_perf/_dbg_* + LOOK: coverage/density/sigma/basescale/detail/detailscale/hbase/htop/falloff/silver/powder/ambient/sun/moon/moontint)" );
+	CSZ_LogDev( "cloudvol", "cvars registered (csz_clouds + _tod/_res/_perf/_dbg_* + LOOK: coverage/density/sigma/basescale/detail/detailscale/hbase/htop/falloff/silver/silver_width/powder/ambient/sun/sun_elev/sun_azim/moon/moontint)" );
 }
 
 // =============================================================================
@@ -326,7 +337,7 @@ struct VolGpu
 	int mCamFwd, mCamRight, mCamUp, mCamPos, mLightDir, mLightColor, mAmbGround, mAmbSky;
 	int mBoxMin, mBoxMax, mTime, mFrame, mDensity, mCoverage, mSilver, mSigmaT;
 	int mBaseFreq, mDetailFreq, mDetailAmt, mLightReach, mMarchFar, mTargetSize, mSteps, mLightSteps;
-	int mFalloff, mHBase, mHTop, mPowder;
+	int mFalloff, mHBase, mHTop, mPowder, mSilverWidth;
 	int mDepthTex, mZNear, mZFar, mInvViewProj, mBase3d, mDetail3d;
 	// upsample uniforms
 	int uCloudTex, uFullSize;
@@ -538,6 +549,7 @@ void BuildPrograms()
 	s_gpu.mDensity     = UniformLoc( s_gpu.march, "u_density" );
 	s_gpu.mCoverage    = UniformLoc( s_gpu.march, "u_coverage" );
 	s_gpu.mSilver      = UniformLoc( s_gpu.march, "u_silver" );
+	s_gpu.mSilverWidth = UniformLoc( s_gpu.march, "u_silverWidth" );
 	s_gpu.mSigmaT      = UniformLoc( s_gpu.march, "u_sigmaT" );
 	s_gpu.mBaseFreq    = UniformLoc( s_gpu.march, "u_baseFreq" );
 	s_gpu.mDetailFreq  = UniformLoc( s_gpu.march, "u_detailFreq" );
@@ -616,7 +628,9 @@ void DeriveCelestial( float phase, float nightness, float sunI, float moonI, flo
 	// Height-aware ambient skylight: darker ground bounce vs cool sky zenith, cross-faded.
 	// Night ambient is raised off the floor (iter 0 was ~black) and scaled by the ambient hot cvar.
 	const float dayG[3] = { 0.18f, 0.20f, 0.24f }; const float dayS[3] = { 0.45f, 0.55f, 0.75f };
-	const float ngG[3]  = { 0.030f, 0.038f, 0.060f }; const float ngS[3] = { 0.090f, 0.120f, 0.190f };
+	// Night ambient floor RAISED (iter-2): the moon cloud must read as a dim-but-defined COOL mass,
+	// not a black void. Kept cool-biased (blue > red) so the unlit body stays moonlit, not grey.
+	const float ngG[3]  = { 0.065f, 0.080f, 0.120f }; const float ngS[3] = { 0.160f, 0.205f, 0.300f };
 	for( int i = 0; i < 3; i++ )
 	{
 		out.ambGround[i] = mixf( dayG[i], ngG[i], nightness ) * ambientMul;
@@ -704,44 +718,65 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	}
 	// --- LOOK hot params: read live + clamp; logged on change (no per-frame spam). These are
 	//     the swept-without-rebuild controls. The defaults are the iter-1 STRUCTURE-first target.
-	float coverage    = clampf( ReadCvar( s_cvCoverage,    0.42f  ), 0.0f,    1.0f    );
-	float density     = clampf( ReadCvar( s_cvDensity,     1.1f   ), 0.05f,   6.0f    );
+	float coverage    = clampf( ReadCvar( s_cvCoverage,    0.6f   ), 0.0f,    1.0f    );
+	float density     = clampf( ReadCvar( s_cvDensity,     2.5f   ), 0.05f,   6.0f    );
 	float sigmaT      = clampf( ReadCvar( s_cvSigma,       0.006f ), 0.0005f, 0.05f   );
-	float baseScale   = clampf( ReadCvar( s_cvBaseScale,   4500.0f), 500.0f,  20000.0f);
+	float baseScale   = clampf( ReadCvar( s_cvBaseScale,   2200.0f), 500.0f,  20000.0f);
 	float detailScale = clampf( ReadCvar( s_cvDetailScale, 700.0f ), 50.0f,   4000.0f );
 	float detailAmt   = clampf( ReadCvar( s_cvDetail,      0.7f   ), 0.0f,    1.0f    );
 	float hBase       = clampf( ReadCvar( s_cvHBase,       0.12f  ), 0.01f,   0.6f    );
 	float hTop        = clampf( ReadCvar( s_cvHTop,        0.5f   ), 0.15f,   0.99f   );
 	float falloff     = clampf( ReadCvar( s_cvFalloff,     0.35f  ), 0.0f,    0.9f    );
-	float silver      = clampf( ReadCvar( s_cvSilver,      1.4f   ), 0.0f,    8.0f    );
+	float silver      = clampf( ReadCvar( s_cvSilver,      2.5f   ), 0.0f,    8.0f    );
+	float silverWidth = clampf( ReadCvar( s_cvSilverWidth, 0.5f   ), 0.05f,   8.0f    );
 	float powder      = clampf( ReadCvar( s_cvPowder,      1.0f   ), 0.0f,    3.0f    );
 	float ambientMul  = clampf( ReadCvar( s_cvAmbient,     1.0f   ), 0.0f,    4.0f    );
 	float sunI        = clampf( ReadCvar( s_cvSun,         3.2f   ), 0.0f,    12.0f   );
 	float moonI       = clampf( ReadCvar( s_cvMoon,        2.4f   ), 0.0f,    12.0f   );
 	float moonTint    = clampf( ReadCvar( s_cvMoonTint,    1.0f   ), 0.0f,    2.0f    );
+	// CLOUD-ONLY sun-direction override: -1 = follow the tod/skymath sun (production unchanged).
+	// elev>=0 rebuilds the cloud light dir from (elev,azim); azim<0 falls back to a fixed azimuth.
+	float sunElevOvr  = ReadCvar( s_cvSunElev, -1.0f );
+	float sunAzimOvr  = ReadCvar( s_cvSunAzim, -1.0f );
 	if( hTop <= hBase + 0.05f )                 // keep a body between base taper and top round
 		hTop = clampf( hBase + 0.05f, 0.15f, 0.99f );
 	float baseFreq    = 1.0f / baseScale;
 	float detailFreq  = 1.0f / detailScale;
 	{
 		static bool  s_lookLogged = false;
-		static float s_last[15] = { 0 };
-		float cur[15] = { coverage, density, sigmaT, baseScale, detailScale, detailAmt,
-		                  hBase, hTop, falloff, silver, powder, ambientMul, sunI, moonI, moonTint };
+		static float s_last[18] = { 0 };
+		float cur[18] = { coverage, density, sigmaT, baseScale, detailScale, detailAmt,
+		                  hBase, hTop, falloff, silver, silverWidth, powder, ambientMul, sunI, moonI, moonTint,
+		                  sunElevOvr, sunAzimOvr };
 		bool changed = !s_lookLogged;
-		for( int i = 0; i < 15 && !changed; i++ ) if( s_last[i] != cur[i] ) changed = true;
+		for( int i = 0; i < 18 && !changed; i++ ) if( s_last[i] != cur[i] ) changed = true;
 		if( changed )
 		{
 			CSZ_LogInfo( "cloudvol",
-				"[csz_clouds] LOOK resolved: cov=%.2f dens=%.2f sigma=%.4f baseScale=%.0f detScale=%.0f detail=%.2f hBase=%.2f hTop=%.2f falloff=%.2f silver=%.2f powder=%.2f amb=%.2f sun=%.2f moon=%.2f moonTint=%.2f",
-				coverage, density, sigmaT, baseScale, detailScale, detailAmt, hBase, hTop, falloff, silver, powder, ambientMul, sunI, moonI, moonTint );
-			for( int i = 0; i < 15; i++ ) s_last[i] = cur[i];
+				"[csz_clouds] LOOK resolved: cov=%.2f dens=%.2f sigma=%.4f baseScale=%.0f detScale=%.0f detail=%.2f hBase=%.2f hTop=%.2f falloff=%.2f silver=%.2f silverW=%.2f powder=%.2f amb=%.2f sun=%.2f moon=%.2f moonTint=%.2f sunElevOvr=%.1f sunAzimOvr=%.1f",
+				coverage, density, sigmaT, baseScale, detailScale, detailAmt, hBase, hTop, falloff, silver, silverWidth, powder, ambientMul, sunI, moonI, moonTint, sunElevOvr, sunAzimOvr );
+			for( int i = 0; i < 18; i++ ) s_last[i] = cur[i];
 			s_lookLogged = true;
 		}
 	}
 
 	CelLight cel;
 	DeriveCelestial( phase, nightness, sunI, moonI, ambientMul, moonTint, cel );
+
+	// --- CLOUD-ONLY sun-direction override (art/debug, the key missing lever) -----------
+	// When sun_elev>=0, rebuild ONLY this cloud pass's light DIRECTION from (elev,azim) using
+	// the SAME skymath elev/yaw->unit-dir convention the sky uses (Z-up, pointing TOWARD the
+	// body). This does NOT touch g_sky, the engine sun, or any other system -- it only steers
+	// where THIS cloud is lit from, so the lit cauliflower tops can face up/toward the camera
+	// instead of being backlit by a near-horizon golden-hour sun. The light COLOR/intensity and
+	// ambient are unchanged (still the tod-derived warm sun / cool moon). azim<0 => a fixed
+	// default azimuth (the skymath east rise node).
+	if( sunElevOvr >= 0.0f )
+	{
+		float elev = clampf( sunElevOvr, 0.0f, 90.0f );
+		float azim = ( sunAzimOvr < 0.0f ) ? skymath::kNodeYawDeg : sunAzimOvr;
+		skymath::ElevYawDir( elev, azim, cel.dir );
+	}
 
 	// --- hero AABB volume: latch a world anchor at the player's first-frame position
 	//     (per generation), so the box is WORLD-FIXED (real parallax + terrain occlusion
@@ -932,6 +967,7 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	if( s_gpu.mDensity >= 0 )     glUniform1f( s_gpu.mDensity, density );
 	if( s_gpu.mCoverage >= 0 )    glUniform1f( s_gpu.mCoverage, coverage );
 	if( s_gpu.mSilver >= 0 )      glUniform1f( s_gpu.mSilver, silver );
+	if( s_gpu.mSilverWidth >= 0 ) glUniform1f( s_gpu.mSilverWidth, silverWidth );
 	if( s_gpu.mSigmaT >= 0 )      glUniform1f( s_gpu.mSigmaT, sigmaT );
 	if( s_gpu.mBaseFreq >= 0 )    glUniform1f( s_gpu.mBaseFreq, baseFreq );
 	if( s_gpu.mDetailFreq >= 0 )  glUniform1f( s_gpu.mDetailFreq, detailFreq );

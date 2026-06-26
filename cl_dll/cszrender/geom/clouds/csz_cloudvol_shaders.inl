@@ -91,7 +91,8 @@ uniform float u_time;          // bounded client time (s) for slow wind scroll
 uniform float u_frame;         // per-frame jitter lattice offset (animated IGN)
 uniform float u_density;       // density multiplier
 uniform float u_coverage;      // 0..1 coverage gate (more => fuller box)
-uniform float u_silver;        // silver-lining rim strength
+uniform float u_silver;        // silver-lining (forward-scatter) rim strength
+uniform float u_silverWidth;   // rim band width: LOW=broad glow reaching inward, HIGH=razor edge only
 uniform float u_sigmaT;        // extinction coefficient (1/world-units along the march)
 uniform float u_baseFreq;      // base 3D-noise frequency (1/world-units)
 uniform float u_detailFreq;    // detail 3D-noise frequency (1/world-units)
@@ -256,10 +257,15 @@ void main()
 	float jit = ign( gl_FragCoord.xy, u_frame );
 	float t = t0 + stepLen * jit;
 
-	float cosT   = dot( rd, u_lightDir );
-	float gFwd   = 0.72;                                          // single forward lobe (slice)
+	float cosT   = dot( rd, u_lightDir );   // +1 => view looks TOWARD the lit body (forward scatter / BACKLIT cloud)
+	float gFwd   = 0.72;                     // forward in-scatter lobe (peaks looking toward the light)
 	float phase  = 0.9 * hg( cosT, gFwd ) + 0.12 * hg( cosT, -0.2 );
-	float backlit = smoothstep( -0.05, -0.6, cosT );
+	// Toward-light gate for the silver lining: rises as the view turns INTO the light (the real
+	// golden-hour gameplay case = looking toward the low bright sun THROUGH the cloud). Broad
+	// onset (-0.15..0.55) so the rim is a WIDE glowing band, not a razor sliver. This REPLACES the
+	// prior INVERTED gate smoothstep(-0.05,-0.6,cosT), which only fired when looking AWAY from the
+	// sun -- so the silver lining never appeared head-on toward a low golden-hour sun.
+	float towardLight = smoothstep( -0.15, 0.55, cosT );
 
 	float lightStepLen = u_lightReach / float( max( u_lightSteps, 1 ) );
 
@@ -284,8 +290,14 @@ void main()
 			float Tl = exp( -u_sigmaT * lt );
 			// cheap multiscatter octave reuse (no re-march)
 			float ms = Tl + 0.5 * pow( Tl, 0.5 );
-			// silver-lining rim: blazes on thin backlit edges, dark in self-shadowed cores
-			float rim = u_silver * backlit * Tl * ( 1.0 - Tl ) * hg( cosT, 0.92 ) * 5.0;
+			// --- forward-scatter SILVER LINING: the brilliant gold/bright rim of a BACKLIT cloud.
+			// Fires when looking toward the lit body (towardLight) and where sunlight still penetrates
+			// the cloud (Tl high => thin rim/edge). pow(Tl,u_silverWidth) with a SMALL width broadens
+			// the glow INWARD from the razor edge; the hg core gives the directional blaze and the
+			// +0.4 floor keeps the whole lit rim glowing (not just the peak). Colored by u_lightColor
+			// downstream (warm sun => gold lining; cool moon => cool lining).
+			float pene = pow( clamp( Tl, 0.0, 1.0 ), u_silverWidth );
+			float rim  = u_silver * towardLight * pene * ( hg( cosT, 0.6 ) + 0.4 );
 			// powder dark-edge: deepens the self-shadowed near faces of dense lumps
 			float powder = 1.0 - exp( -2.0 * dens * stepLen * 40.0 );
 			float powderShade = mix( 1.0, 0.45 + 0.55 * Tl, 0.6 ) * max( 0.05, 1.0 - 0.35 * u_powder * powder );
