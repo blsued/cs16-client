@@ -116,11 +116,17 @@ const int MAX_OCT   = 6;
 const int MAX_MSOCT = 4;
 
 // --- generated integer-bit-mix hashes (formulas, not tables; clean-room) ----------
+// NOTE on symmetry: the original mixer fract((p.x+p.y)*p.z) is INVARIANT under an x<->y
+// swap of the input lattice cell, so the value-noise field it feeds is mirror-correlated
+// across the x=y diagonal. Combined with the billow fold and the (previously) axis-aligned
+// octave advance, that read on screen as a fake left-right mirror. The mixer below uses an
+// asymmetric, non-commutative chain of the three components (each axis weighted by a distinct
+// irrational and folded in a different order) so no input swap leaves the output unchanged.
 float hash13( vec3 p )
 {
-	p = fract( p * 0.1031 );
-	p += dot( p, p.zyx + 31.3216 );
-	return fract( ( p.x + p.y ) * p.z );
+	p = fract( p * vec3( 0.1031, 0.11369, 0.13787 ) );
+	p += dot( p, p.yzx + 19.19 );
+	return fract( ( p.x + 2.07 * p.y ) * ( p.z + 1.39 * p.x ) + p.y * 0.71 );
 }
 
 // Trilinear value noise on the integer lattice (smoothstep-interpolated).
@@ -144,7 +150,23 @@ float vnoise3( vec3 x )
 	return mix( mix( nx00, nx10, f.y ), mix( nx01, nx11, f.y ), f.z );
 }
 
-// Billow variant: |2n-1| inverted -> puffy lumps. Octave-summed fBm.
+// Per-octave decorrelating rotations. A 3D rotation cannot be expressed as an axis swap,
+// so rotating the domain between octaves guarantees the billow ridges of successive octaves
+// are NOT axis-aligned and cannot stack into a single mirrored macro shape. Two fixed,
+// mutually-prime rotation matrices (about tilted axes) are applied alternately.
+const mat3 kRotA = mat3(
+	 0.00,  0.80, -0.60,
+	-0.80,  0.36,  0.48,
+	 0.60,  0.48,  0.64 );
+const mat3 kRotB = mat3(
+	 0.36, -0.48,  0.80,
+	 0.48,  0.80,  0.36,
+	-0.80,  0.36,  0.48 );
+
+// Billow variant: |2n-1| inverted -> puffy lumps. Octave-summed fBm with per-octave
+// ROTATION + NONUNIFORM SCALE + large irrational OFFSET (the anti-mirror trio). The
+// lacunarity is nonuniform per axis so the lattice never re-aligns with itself, and the
+// alternating rotation breaks the axis-aligned ridge stacking that exposed the mirror.
 float fbm( vec3 p, int oct )
 {
 	float s = 0.0, amp = 0.5, norm = 0.0;
@@ -155,12 +177,32 @@ float fbm( vec3 p, int oct )
 		n = 1.0 - abs( 2.0 * n - 1.0 );     // billow
 		s    += amp * n;
 		norm += amp;
-		p    = p * 2.02 + vec3( 7.3, 1.7, 3.9 );
+		// nonuniform anisotropic lacunarity + rotate the domain + irrational offset.
+		mat3 R = ( ( o & 1 ) == 0 ) ? kRotA : kRotB;
+		p    = R * ( p * vec3( 2.13, 1.97, 2.41 ) ) + vec3( 17.3, 9.1, 23.7 );
 		amp  *= 0.5;
 	}
 	return ( norm > 0.0 ) ? ( s / norm ) : 0.0;
 }
 
+// Cheap 2-octave vector warp field for the ASYMMETRIC domain warp. Returns a world-space
+// displacement that is NOT centered on the camera/screen and NOT mirror-symmetric (each
+// component samples a DIFFERENT, offset, rotated slice of the noise), so it bends the cloud
+// domain into asymmetric flowing shapes and destroys any residual repetition.
+vec3 domainWarp( vec3 q )
+{
+	vec3 a = kRotA * q + vec3(  41.7,  7.3, 13.1 );
+	vec3 b = kRotB * q + vec3( -19.4, 31.8, 27.2 );
+	return vec3(
+		vnoise3( a )            - 0.5,
+		vnoise3( b * 1.27 )     - 0.5,
+		vnoise3( a * 0.83 + b ) - 0.5 );
+}
+)GLSL"
+// ---- MSVC string-literal split: the march FS exceeds the ~16KB single-literal cap, so
+// it is authored as two ADJACENT raw string literals. C/C++ concatenates adjacent string
+// literals at translation, so the GLSL the driver sees is byte-identical to one source. ----
+R"GLSL(
 float remap( float v, float a, float b, float c, float d )
 {
 	return c + ( clamp( ( v - a ) / max( b - a, 1e-4 ), 0.0, 1.0 ) ) * ( d - c );
@@ -223,46 +265,85 @@ float cloudDensity( vec3 p, int oct, int detailLod )
 	if( prof <= 0.0 )
 		return 0.0;
 
+	// WORLD-SPACE sampling: wind-scrolled world position, no camera/screen centering, no
+	// abs()/radial term -> the noise lattice is continuous and never folded about an axis.
 	vec3 wind = vec3( u_time * 3.0, u_time * 1.3, 0.0 );   // slow wind scroll
 	vec3 q    = ( p + wind ) * u_noiseFreq;
 	q.z *= 0.65;                                           // vertical stretch -> taller towers
 
-	float shape;
+	// const-slab backend short-circuits BEFORE any noise.
 	if( u_backend == 2 )           // const-slab: no noise, profile only (cheapest)
-	{
 		return u_density * prof;
-	}
-	else if( u_backend == 3 )      // 3D-texture fetch (same march; microbench backend)
+
+	// detailLod 1 = VIEW march: pays for the full anti-mirror domain warp + decoupled
+	// coverage + Worley. detailLod 0 = cone LIGHT (shadow) march: it runs up to u_lightSteps
+	// times PER active view step, so it takes the CHEAP path (no warp, one shared fbm field
+	// for coverage+body). The shadow lookup only needs approximate occlusion, not edge detail
+	// or anti-mirror decorrelation, so this buys back nearly all the budget those cost.
+	bool viewMarch = ( detailLod >= 1 );
+
+	// ---- ASYMMETRIC DOMAIN WARP (VIEW march only) -------------------------------------
+	// Bend the sample domain by a non-centered, non-mirror vector field BEFORE looking up
+	// the shape noise. This is the single strongest anti-repetition move: the macro shape
+	// flows asymmetrically instead of tiling, so neither the coverage nor the density field
+	// can read as a left-right mirror. Gated to the full procedural backend on the view march.
+	vec3 qd = q;
+	if( u_backend == 0 && viewMarch )
+		qd = q + ( 0.55 + 0.9 * u_detail ) * domainWarp( q * 0.85 + vec3( 3.1, 8.7, 1.9 ) );
+
+	// ---- SEPARATE non-centered COVERAGE field -----------------------------------------
+	// Coverage (WHERE clouds are) uses its OWN low-frequency, independently-offset field --
+	// NOT the same octave as the density body (reusing one low-freq octave for both was a
+	// prime cause of the macro repetition). On the cheap LIGHT march the body field is reused
+	// for coverage (one fbm) -- the shadow term does not need the decorrelation.
+	float shape, coverNoise;
+	if( u_backend == 3 )      // 3D-texture fetch (same march; microbench backend)
 	{
-		// tri-LINEAR filtered fetch of the small repeating 3D noise; .r is the base.
-		shape = texture( u_noise3d, q * 0.25 ).r;
+		shape      = texture( u_noise3d, q  * 0.25 ).r;
+		coverNoise = texture( u_noise3d, q * 0.11 + vec3( 0.37 ) ).r;
 	}
 	else if( u_backend == 1 )      // cheap-hash: single value-noise octave
 	{
-		shape = vnoise3( q );
+		shape      = vnoise3( q );
+		coverNoise = viewMarch ? vnoise3( q * 0.42 + vec3( 11.7, 4.3, 2.9 ) ) : shape;
 	}
 	else                           // procedural full fBM (primary path)
 	{
-		shape = fbm( q, oct );
+		shape = fbm( qd, oct );                                            // mid/high billow BODY
+		coverNoise = viewMarch
+			? fbm( q * 0.46 + vec3( 51.3, 13.9, 7.1 ), min( oct, 2 ) )     // low-freq COVERAGE (view)
+			: shape;                                                       // light march: reuse body
 	}
 
-	// Coverage threshold: higher u_cover -> lower threshold -> more cloud.
-	float d = remap( shape, 1.0 - u_cover, 1.0, 0.0, 1.0 );
+	// LOW-FREQUENCY COVERAGE: gate where clouds exist. Higher u_cover -> more sky filled.
+	float coverage = remap( coverNoise, 1.0 - u_cover, 1.0, 0.0, 1.0 );
+	if( coverage <= 0.0 )
+		return 0.0;
+
+	// MID-FREQUENCY BILLOW BODY remapped INTO the coverage gate: the body density only
+	// exists where coverage allows, and the coverage value erodes the base of the body so
+	// edges thin out naturally (defined base, built-up body, ragged silhouette).
+	float d = remap( shape, 1.0 - 0.85 * coverage, 1.0, 0.0, 1.0 );
 	d *= prof;
 
-	// High-frequency Worley erosion (full path, VIEW march only): carve crisp billowing
-	// wisps out of the edges so masses read as eroded 3D cauliflower, not a soft 2D haze.
-	// Erodes thin edges far more than dense cores -> bright eroded rims vs dark cores.
-	if( u_backend == 0 && detailLod >= 1 && u_detail > 0.001 && d > 0.0 && d < 0.95 )
+	// ---- HIGH-FREQUENCY WORLEY EROSION at the silhouette (VIEW march only) -------------
+	// Two octaves of cellular billow carve crisp cauliflower wisps out of the EDGES (where
+	// d is small) far more than the dense cores (where d is large), so silhouettes become
+	// torn/lumpy and thin wisps separate from solid dark cores. We have the perf headroom.
+	if( u_backend == 0 && detailLod >= 1 && u_detail > 0.001 && d > 0.0 && d < 0.97 )
 	{
-		float w = worleyBillow( q * 2.7 + vec3( 19.1, 3.7, 11.3 ) );
-		float erodeAmt = u_detail * ( 1.0 - 0.6 * d );
+		float w1 = worleyBillow( qd * 2.7 + vec3( 19.1,  3.7, 11.3 ) );
+		float w2 = worleyBillow( qd * 6.3 + vec3(  4.9, 27.1,  8.2 ) );
+		float w  = 0.65 * w1 + 0.35 * w2;
+		float erodeAmt = u_detail * ( 1.0 - 0.55 * d );   // erode thin edges hardest
 		d = remap( d, w * erodeAmt, 1.0, 0.0, 1.0 );
 	}
 
-	// Crisper cloud-vs-clear boundary + more density dynamic range (smoothstep contrast):
-	// pushes mid densities apart so dense dark cores stand distinct from thin edges.
+	// Wider density DYNAMIC RANGE: a steeper-than-smoothstep contrast curve pushes mids
+	// apart so dense dark cores stand clearly distinct from thin eroded wisps (not a flat
+	// uniform stain). Two smoothstep passes ~= a gentle gamma toward the extremes.
 	d = clamp( d, 0.0, 1.0 );
+	d = d * d * ( 3.0 - 2.0 * d );
 	d = d * d * ( 3.0 - 2.0 * d );
 
 	return d * u_density;
@@ -321,6 +402,10 @@ void main()
 	float sil   = clamp( u_silver, 0.0, 1.5 );
 	float gFwd  = 0.74 + 0.16 * clamp( sil, 0.0, 1.0 );             // forward anisotropy 0.74..0.90
 	float phase = ( 0.80 + 0.95 * sil ) * hg( cosT, gFwd ) + 0.16 * hg( cosT, -0.18 );
+	// Backscatter gate (0 when looking toward the light, 1 looking away): the silver RIM is
+	// only allowed to blaze where the light is genuinely BEHIND the cloud edge (cosT<0), so
+	// it appears as a thin bright lining on the backlit silhouette, not an all-over wash.
+	float backlit = smoothstep( -0.05, -0.55, cosT );
 
 	float lightStepLen = u_slabThick / float( max( u_lightSteps, 1 ) ) * 0.6;
 
@@ -355,13 +440,27 @@ void main()
 			}
 			if( u_msOct <= 0 ) ms = Tl;
 
+			// --- SILVER-LINING RIM: a thin, intense bright lining on backlit edges.
+			// Tl is HIGH on thin edges (the light reaches through) and LOW in dense cores
+			// (self-shadowed). (1-Tl)*Tl peaks at the THIN transition zone -> the rim sits
+			// exactly on the silhouette. Gated by the backlit factor + u_silver, so it only
+			// blazes on edges with the light behind them. Strong forward HG sharpens it.
+			float rim = u_silver * backlit * Tl * ( 1.0 - Tl ) * hg( cosT, 0.92 ) * 5.0;
+
+			// --- POWDER / dark-edge term: deepens the SELF-SHADOWED cores. The lit-facing
+			// near surface of a dense lump scatters little single-light back toward the eye
+			// (light has to travel through the lump first) -> a characteristic dark "powder"
+			// edge that, with the bright rim, reads the masses as 3D volumes not a flat sheet.
+			float powder = 1.0 - exp( -2.0 * dens * stepLen * 40.0 );
+			float powderShade = mix( 1.0, 0.45 + 0.55 * Tl, 0.6 ) * ( 1.0 - 0.35 * powder );
+
 			// --- height-aware ambient skylight (undersides not black) -------------
 			float hf = heightFrac( p );
 			vec3 ambient = mix( u_ambGround, u_ambSky, hf );
 
 			// --- energy-conserving in-scatter slice (Beer-Lambert) ----------------
 			float stepT = exp( -u_sigmaT * dens * stepLen );
-			vec3 S = u_lightColor * ( ms * phase ) + ambient;
+			vec3 S = u_lightColor * ( ms * phase * powderShade + rim ) + ambient;
 			L += Tview * ( 1.0 - stepT ) * S;
 			Tview *= stepT;
 

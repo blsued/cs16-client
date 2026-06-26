@@ -72,11 +72,11 @@ cvar_t *s_cvRes;       // csz_volcloud_res     "4"  resolution divisor (quarter-
 cvar_t *s_cvSteps;     // csz_volcloud_steps   "32" view march steps
 cvar_t *s_cvLight;     // csz_volcloud_light   "6"  cone light march steps
 cvar_t *s_cvOct;       // csz_volcloud_oct     "2"  density fBm octaves
-cvar_t *s_cvCover;     // csz_volcloud_cover   "0.58" heavier oppressive overcast (keeps gaps)
-cvar_t *s_cvDensity;   // csz_volcloud_density "1.15" denser dark cores
-cvar_t *s_cvSilver;    // csz_volcloud_silver  "0.7"  silver-lining (forward-HG) strength
-cvar_t *s_cvTint;      // csz_volcloud_tint    "0.5"  brooding storm tint (desat + cold teal)
-cvar_t *s_cvDetail;    // csz_volcloud_detail  "0.6"  high-freq Worley edge-erosion amount
+cvar_t *s_cvCover;     // csz_volcloud_cover   "0.62" heavier oppressive overcast (keeps gaps)
+cvar_t *s_cvDensity;   // csz_volcloud_density "1.35" denser dark cores
+cvar_t *s_cvSilver;    // csz_volcloud_silver  "0.9"  silver-lining rim strength (dedicated rim term)
+cvar_t *s_cvTint;      // csz_volcloud_tint    "0.45" brooding storm tint (desat + cold teal)
+cvar_t *s_cvDetail;    // csz_volcloud_detail  "0.7"  high-freq Worley edge-erosion + warp amount
 cvar_t *s_cvBackend;   // csz_volcloud_backend "0"  0 proc / 1 cheap-hash / 2 const-slab / 3 3dtex
 cvar_t *s_cvEarlyout;  // csz_volcloud_earlyout "1"
 
@@ -90,11 +90,11 @@ void RegisterCvarsImpl()
 	s_cvSteps    = gEngfuncs.pfnRegisterVariable( "csz_volcloud_steps",    "32",  FCVAR_CLIENTDLL );
 	s_cvLight    = gEngfuncs.pfnRegisterVariable( "csz_volcloud_light",    "6",   FCVAR_CLIENTDLL );
 	s_cvOct      = gEngfuncs.pfnRegisterVariable( "csz_volcloud_oct",      "2",   FCVAR_CLIENTDLL );
-	s_cvCover    = gEngfuncs.pfnRegisterVariable( "csz_volcloud_cover",    "0.58", FCVAR_CLIENTDLL );
-	s_cvDensity  = gEngfuncs.pfnRegisterVariable( "csz_volcloud_density",  "1.15", FCVAR_CLIENTDLL );
-	s_cvSilver   = gEngfuncs.pfnRegisterVariable( "csz_volcloud_silver",   "0.7",  FCVAR_CLIENTDLL );
-	s_cvTint     = gEngfuncs.pfnRegisterVariable( "csz_volcloud_tint",     "0.5",  FCVAR_CLIENTDLL );
-	s_cvDetail   = gEngfuncs.pfnRegisterVariable( "csz_volcloud_detail",   "0.6",  FCVAR_CLIENTDLL );
+	s_cvCover    = gEngfuncs.pfnRegisterVariable( "csz_volcloud_cover",    "0.62", FCVAR_CLIENTDLL );
+	s_cvDensity  = gEngfuncs.pfnRegisterVariable( "csz_volcloud_density",  "1.35", FCVAR_CLIENTDLL );
+	s_cvSilver   = gEngfuncs.pfnRegisterVariable( "csz_volcloud_silver",   "0.9",  FCVAR_CLIENTDLL );
+	s_cvTint     = gEngfuncs.pfnRegisterVariable( "csz_volcloud_tint",     "0.45", FCVAR_CLIENTDLL );
+	s_cvDetail   = gEngfuncs.pfnRegisterVariable( "csz_volcloud_detail",   "0.7",  FCVAR_CLIENTDLL );
 	s_cvBackend  = gEngfuncs.pfnRegisterVariable( "csz_volcloud_backend",  "0",   FCVAR_CLIENTDLL );
 	s_cvEarlyout = gEngfuncs.pfnRegisterVariable( "csz_volcloud_earlyout", "1",   FCVAR_CLIENTDLL );
 	s_cvarsReady = true;
@@ -525,16 +525,16 @@ void VolCloudRenderer::Contribute( const ViewSetup &view )
 		{
 			// sweep finished: keep rendering a benign default so the frame is valid.
 			P.res = 4; P.steps = 32; P.light = 6; P.oct = 2; P.backend = 0; P.earlyout = 1;
-			P.cover = 0.6f; P.density = 1.0f; P.forcePhase = true; P.phase = 0.0f;
-			P.silver = 0.7f; P.tint = 0.5f; P.detail = 0.6f;
+			P.cover = 0.62f; P.density = 1.35f; P.forcePhase = true; P.phase = 0.0f;
+			P.silver = 0.9f; P.tint = 0.45f; P.detail = 0.7f;
 		}
 		else
 		{
 			const SweepCfg &c = s_sweep[ s_sweepIdx ];
 			P.res = c.res; P.steps = c.steps; P.light = c.light; P.oct = c.oct;
 			P.backend = c.backend; P.earlyout = c.earlyout;
-			P.cover = 0.6f; P.density = 1.0f;   // fixed non-trivial coverage for the preset
-			P.silver = 0.7f; P.tint = 0.5f; P.detail = 0.6f;   // dramatic-storm look = the real measured cost
+			P.cover = 0.62f; P.density = 1.35f;   // fixed non-trivial coverage for the preset
+			P.silver = 0.9f; P.tint = 0.45f; P.detail = 0.7f;   // dramatic-storm look = the real measured cost
 			P.forcePhase = true; P.phase = c.phaseMode ? 0.5f : 0.0f;
 		}
 	}
@@ -546,11 +546,11 @@ void VolCloudRenderer::Contribute( const ViewSetup &view )
 		P.oct      = clampi( (int)( ReadCvar( s_cvOct, 2.0f ) + 0.5f ), 1, 6 );
 		P.backend  = clampi( (int)( ReadCvar( s_cvBackend, 0.0f ) + 0.5f ), 0, 3 );
 		P.earlyout = ( ReadCvar( s_cvEarlyout, 1.0f ) >= 0.5f ) ? 1 : 0;
-		P.cover    = clampf( ReadCvar( s_cvCover, 0.58f ), 0.0f, 1.0f );
-		P.density  = clampf( ReadCvar( s_cvDensity, 1.15f ), 0.0f, 4.0f );
-		P.silver   = clampf( ReadCvar( s_cvSilver, 0.7f ), 0.0f, 1.5f );
-		P.tint     = clampf( ReadCvar( s_cvTint,   0.5f ), 0.0f, 1.0f );
-		P.detail   = clampf( ReadCvar( s_cvDetail, 0.6f ), 0.0f, 1.0f );
+		P.cover    = clampf( ReadCvar( s_cvCover, 0.62f ), 0.0f, 1.0f );
+		P.density  = clampf( ReadCvar( s_cvDensity, 1.35f ), 0.0f, 4.0f );
+		P.silver   = clampf( ReadCvar( s_cvSilver, 0.9f ), 0.0f, 1.5f );
+		P.tint     = clampf( ReadCvar( s_cvTint,   0.45f ), 0.0f, 1.0f );
+		P.detail   = clampf( ReadCvar( s_cvDetail, 0.7f ), 0.0f, 1.0f );
 	}
 	if( P.backend == 3 && !s_gpu.tex3dOk )
 		P.backend = 0;   // 3D unavailable: fall back to procedural (never sample an unbound 3D tex)
