@@ -44,6 +44,7 @@
 #include "fog/csz_fog_godrays.h"
 #include "geom/csz_sky.h"
 #include "geom/csz_sky_compose.h"
+#include "geom/csz_volcloud.h"
 #include "geom/csz_sprite.h"
 #include "geom/csz_studio.h"
 #include "geom/csz_studio_texture.h"
@@ -286,6 +287,7 @@ void Renderer::OnHudInit()
 	SunMoonRegisterCvars();		// csz_moon/sun + gain/size/halo/aureole/debug (C3)
 	StarsRegisterCvars();		// csz_stars/intensity/size/color_sat/twinkle/pano_twinkle_maglimit/diag (C4)
 	PanoramaRegisterCvars();	// MW-rework: csz_pano/pano_intensity/pano_lon_offset (must follow StarsRegisterCvars: fetches the moon-wash cvar pointers it registers)
+	g_volcloud.RegisterCvars();	// spike/cloud-volumetric: csz_volcloud (default 0) + _perf/_res/_steps/_light/_oct/_cover/_density/_backend/_earlyout
 	FogVolumeRegisterCvars();	// fog M1 Step 3: csz_fog_quality/steps/halfres/march_intensity/march_g
 	FogGodraysRegisterCvars();	// fog M1 Step 4: csz_fog_godrays/_intensity/_dev (sun/moon god rays)
 	CszRegisterMoonShaftCvar();	// fog M1 L4: csz_moonshaft (default 0 = off, S3 HG owns moon glow; 1 = L4 cloud-gap shaft, clouds milestone)
@@ -319,6 +321,7 @@ void Renderer::Shutdown()
 		AtmosShutdown();	// atmosphere LUTs + programs + GPU timer (C2, generation-safe)
 		StarsShutdown();	// star field twinkle VAOs/VBO/programs (C4, generation-safe)
 		PanoramaShutdown();	// MW-rework panorama texture/VAO/program (generation-safe)
+		g_volcloud.Shutdown();	// spike/cloud-volumetric: quarter-res FBO + programs + timer ring + 3D tex (generation-safe)
 		SkyComposeShutdown();	// HDR FBO + resolve program + GPU timer (C1, generation-safe)
 		m_glReady = false;
 	}
@@ -541,9 +544,13 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	StarsContribute( view );
 	if( glCheck )
 		SkyGlCheck( atmos ? "sky background (atmos dome + stars)" : "sky background (legacy fallback)" );
-	// (old L3a night cloud dome deleted here -- spike/cloud-volumetric clean slate.
-	// The new volumetric raymarch cloud pass slots in at this same seam: AFTER the
-	// panorama backdrop + live stars, BEFORE the moon disc.)
+	// spike/cloud-volumetric: volumetric raymarch clouds at the old L3a seam -- AFTER
+	// the panorama backdrop + live stars (clouds occlude the Milky Way / stars), BEFORE
+	// the moon disc (drawn crisply on top). csz_volcloud 0 early-outs on the first line
+	// (production byte-identical). Carries the spike measurement harness (csz_volcloud_perf).
+	g_volcloud.Contribute( view );
+	if( glCheck )
+		SkyGlCheck( "volumetric clouds (spike)" );
 	// C3 sun/moon bodies draw additively after EITHER sky background. The legacy
 	// fallback FS retired its own discs (C3 owns the physically-based bodies), so
 	// without this the sun/moon would VANISH whenever the atmosphere path is not
