@@ -94,41 +94,9 @@ float hash13( vec3 p )
 	return fract( ( p.x + p.y ) * p.z );
 }
 
-// Cheap trilinear value noise on the world-direction lattice (public-domain
-// technique; world-direction input => rotation stable, like the star field).
-float vnoise( vec3 p )
-{
-	vec3 i = floor( p );
-	vec3 f = fract( p );
-	f = f * f * ( 3.0 - 2.0 * f );                       // Hermite smoothing
-	float n000 = hash13( i + vec3( 0.0, 0.0, 0.0 ) );
-	float n100 = hash13( i + vec3( 1.0, 0.0, 0.0 ) );
-	float n010 = hash13( i + vec3( 0.0, 1.0, 0.0 ) );
-	float n110 = hash13( i + vec3( 1.0, 1.0, 0.0 ) );
-	float n001 = hash13( i + vec3( 0.0, 0.0, 1.0 ) );
-	float n101 = hash13( i + vec3( 1.0, 0.0, 1.0 ) );
-	float n011 = hash13( i + vec3( 0.0, 1.0, 1.0 ) );
-	float n111 = hash13( i + vec3( 1.0, 1.0, 1.0 ) );
-	float nx00 = mix( n000, n100, f.x );
-	float nx10 = mix( n010, n110, f.x );
-	float nx01 = mix( n001, n101, f.x );
-	float nx11 = mix( n011, n111, f.x );
-	return mix( mix( nx00, nx10, f.y ), mix( nx01, nx11, f.y ), f.z );
-}
-
-// 3-octave fBm (kept cheap: octaves low, math is plain mul/add). Output ~0..0.94.
-float fbm3( vec3 p )
-{
-	float s = 0.0;
-	float a = 0.5;
-	for( int o = 0; o < 3; o++ )
-	{
-		s += a * vnoise( p );
-		p *= 2.02;
-		a *= 0.5;
-	}
-	return s;
-}
+// (vnoise + fbm3 value-noise helpers DELETED with the moonlit-wisp cloud layer --
+// spike/cloud-volumetric, 2026-06-25. hash13 above is RETAINED: the hash star field
+// in main() still references it.)
 
 // Three keyframe sky color sets (zenith, horizon), lerped by phase. Linear
 // space; the renderer is not gamma-managed past this point (matches world FS).
@@ -237,39 +205,20 @@ void main()
 		col += vec3( star ) * u_starAmount * horizonFade * starBright;
 	}
 
-	// Moon visibility + angular position, computed here so the cloud layer below
-	// can light its wisps by the moon before the disc is drawn on top.
-	float cm = dot( dir, u_moonDir );
-	float moonVis = clamp( ( u_moonDir.z + 0.10 ) * 4.0, 0.0, 1.0 );  // fade in as the moon rises above the horizon
-
-	// --- Moonlit wispy clouds: cheap 3-octave fBm over the view direction, upper
-	// sky only, low coverage (wispy, not overcast), tinted by the moonlight color.
-	// SILVER where lit -- near the moon (proximity) and at the cloud's leading edge
-	// (rim) -- DARK/subtle far from it. Drawn UNDER the moon disc/halo so it never
-	// competes with the moon as the focal point. Night-only (gated by moonVis), so
-	// the fBm cost is paid only when the moon is up. Single default path (no tier). ---
-	if( up > 0.05 && moonVis > 0.01 )
-	{
-		float n = fbm3( dir * 3.0 );                                   // low freq => large soft wisps
-		float cloud = smoothstep( 0.46, 0.82, n );                     // lowered threshold => wider contiguous wisps (still not overcast)
-		cloud *= smoothstep( 0.05, 0.45, up );                         // live in the upper sky
-		float nearMoon = pow( max( cm, 0.0 ), 6.0 );                   // lit toward the moon, dark away
-		float rim = smoothstep( 0.56, 0.66, n ) * ( 1.0 - smoothstep( 0.74, 0.92, n ) );  // bright leading edge
-		float lit = 0.18 + 0.55 * nearMoon + 0.32 * rim * nearMoon;    // silver edges near the moon (subtle; clearly dimmer than the moon disc)
-		vec3 cloudCol = u_moonColor * lit;
-		col = mix( col, cloudCol, clamp( cloud, 0.0, 1.0 ) * moonVis * 0.9 );
-	}
+	// --- Moonlit wispy clouds REMOVED (spike/cloud-volumetric, 2026-06-25): the
+	// in-sky fBm wisp layer (and its cm/moonVis moon-direction locals + the fbm3/
+	// vnoise helpers) was deleted with the rest of the old cloud system; the new
+	// volumetric raymarch pass (geom/csz_volcloud) owns clouds now. ---
 
 	// --- Legacy moon/sun disc + halo RETIRED (Chunk A, FIX-PLAN 2026-06-18). ---
 	// The physically-based bodies are now owned by C3 (geom/csz_sunmoon.cpp, real
 	// phases + NASA surface + atmospheric extinction + soft-knee) and the stars by
 	// C4. This legacy fallback FS keeps only the gradient dome + warm horizon glow +
-	// hash stars + moonlit clouds + fog as the C1-identity baseline; drawing a SECOND
-	// disc/halo set here (different radii) risked compositing a real annulus and a
-	// double-body when the dev fullscreen overlay was armed. The moon-direction
-	// fields (cm / moonVis above) are kept because the moonlit-cloud lighting uses
-	// them. The legacy disc uniforms (u_sunColor / u_bloodMoon / u_sunCosR /
-	// u_moonCosR / u_moonHalo) and their CPU plumbing were fully removed (DEAD-1).
+	// hash stars + fog as the C1-identity baseline; drawing a SECOND disc/halo set
+	// here (different radii) risked compositing a real annulus and a double-body when
+	// the dev fullscreen overlay was armed. The legacy disc uniforms (u_sunColor /
+	// u_bloodMoon / u_sunCosR / u_moonCosR / u_moonHalo) and their CPU plumbing were
+	// fully removed (DEAD-1).
 
 	// --- 1/4 fog fusion (analytic base fog, fog M1 Step 2): the horizon band now
 	// uses the SAME natural-exp extinction as world/studio (e^(-a*0.25*dist)), so

@@ -87,12 +87,13 @@ struct AmbienceParams
 	// publisher applies it to moonLit so surface-direct, the blended directional, and
 	// the exposed channels all dim coherently from one knob. Sun term is untouched.
 	float cloudDim;
-	// --- L3a OWNED cloud-state scalars (sky-base D layer L3a). The cloud dome
-	// (geom/csz_clouds.cpp) computes these coarse GLOBAL average-cloud-state hints
-	// each frame for DOWNSTREAM layers L3b (world/moon darkening) and L4 (light
-	// shafts). SINGLE OWNERSHIP: L3a only WRITES them; it does NOT read them back to
-	// dim anything, so at every default (clouds off / day) they are computed-but-
-	// unconsumed and the approved look is unchanged. Identity = 1.0 (clear sky).
+	// --- OWNED cloud-state scalars (clean data contract for L3b world/moon darkening
+	// + L4 light shafts). The old L3a cloud dome that wrote these was DELETED
+	// (spike/cloud-volumetric, 2026-06-25); nothing writes them now, so they stay at
+	// their AmbienceNeutral() identity (1.0 = clear sky) and every downstream consumer
+	// (fog / god-rays / dust / moon-dimming) sees safe, unchanged clear-sky behavior.
+	// The new volumetric cloud system (geom/csz_volcloud) will repopulate them later.
+	// Identity = 1.0 (clear sky).
 	//   * directTransmittance = moonlight direct transmission through cloud (1=clear)
 	//   * skyAmbientScale     = sky-ambient multiplier (1=clear; dims gently to ~0.6)
 	//   * shaftMask           = light-shaft gating (cloud-gap=1 / thick cloud=0)
