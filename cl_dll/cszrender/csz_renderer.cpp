@@ -45,6 +45,7 @@
 #include "geom/csz_sky.h"
 #include "geom/csz_sky_compose.h"
 #include "geom/csz_volcloud.h"
+#include "geom/clouds/csz_cloudvol.h"
 #include "geom/csz_sprite.h"
 #include "geom/csz_studio.h"
 #include "geom/csz_studio_texture.h"
@@ -288,6 +289,7 @@ void Renderer::OnHudInit()
 	StarsRegisterCvars();		// csz_stars/intensity/size/color_sat/twinkle/pano_twinkle_maglimit/diag (C4)
 	PanoramaRegisterCvars();	// MW-rework: csz_pano/pano_intensity/pano_lon_offset (must follow StarsRegisterCvars: fetches the moon-wash cvar pointers it registers)
 	g_volcloud.RegisterCvars();	// spike/cloud-volumetric: csz_volcloud (default 0) + _perf/_res/_steps/_light/_oct/_cover/_density/_backend/_earlyout
+	g_cloudvol.RegisterCvars();	// clouds REBUILD v2 (Phase 0): csz_clouds (default 0) + _tod/_res/_perf (depth-composited at kTmVolume)
 	FogVolumeRegisterCvars();	// fog M1 Step 3: csz_fog_quality/steps/halfres/march_intensity/march_g
 	FogGodraysRegisterCvars();	// fog M1 Step 4: csz_fog_godrays/_intensity/_dev (sun/moon god rays)
 	CszRegisterMoonShaftCvar();	// fog M1 L4: csz_moonshaft (default 0 = off, S3 HG owns moon glow; 1 = L4 cloud-gap shaft, clouds milestone)
@@ -322,7 +324,8 @@ void Renderer::Shutdown()
 		StarsShutdown();	// star field twinkle VAOs/VBO/programs (C4, generation-safe)
 		PanoramaShutdown();	// MW-rework panorama texture/VAO/program (generation-safe)
 		g_volcloud.Shutdown();	// spike/cloud-volumetric: quarter-res FBO + programs + timer ring + 3D tex (generation-safe)
-		SkyComposeShutdown();	// HDR FBO + resolve program + GPU timer (C1, generation-safe)
+			g_cloudvol.Shutdown();	// clouds REBUILD v2 (Phase 0): quarter-res FBO + programs + timer ring + baked 3D tex (generation-safe)
+			SkyComposeShutdown();	// HDR FBO + resolve program + GPU timer (C1, generation-safe)
 		m_glReady = false;
 	}
 
@@ -603,6 +606,15 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	// the HDR FBO; motes materialise ONLY inside a flashlight cone or the moon Tyndall
 	// shaft (gate in the CPU spawn/cull fill -> unlit motes never reach the VBO).
 	DustRender( view );
+	// clouds REBUILD v2 (Phase 0 LOOK slice): WORLD-SPACE, scene-depth composited
+	// volumetric clouds at the kTmVolume seam -- AFTER opaque world geometry (depth
+	// populated, HDR FBO bound) so TERRAIN OCCLUDES the clouds and the cloud SIDES are
+	// visible (the root fix for the rejected "flat 2D" look). A bounded hero AABB is
+	// ray-marched against baked 3D Perlin-Worley density, lit by a sun/moon celestial
+	// abstraction (smooth nightness). csz_clouds 0 early-outs on its first line
+	// (production byte-identical). Distinct seam from the default-off csz_volcloud (sky
+	// seam), so only one cloud system composites at a time.
+	g_cloudvol.Contribute( view );
 	EndPass( kTmVolume );
 
 	BeginPass( kTmTrans );
