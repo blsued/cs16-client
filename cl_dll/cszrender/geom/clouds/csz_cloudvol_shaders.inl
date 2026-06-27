@@ -85,6 +85,7 @@ uniform vec3  u_lightDir;      // world dir toward the LIT body (sun by day / mo
 uniform vec3  u_lightColor;    // linear HDR radiance of the lit body
 uniform vec3  u_ambGround;     // ambient skylight toward the cloud UNDERSIDE (darker)
 uniform vec3  u_ambSky;        // ambient skylight toward the cloud TOP (sky/zenith)
+uniform float u_skyVisFloor;   // P3: overcast skylight floor for skyVis (weather-gated; 0 = clear NORMAL, no floor)
 uniform vec3  u_boxMin;        // hero AABB min corner (world)
 uniform vec3  u_boxMax;        // hero AABB max corner (world)
 uniform float u_time;          // bounded client time (s) for slow wind scroll
@@ -118,9 +119,17 @@ uniform float u_sunForward;    // DIRECT-sun forward-scatter strength (blows sun
 uniform float u_sunG;          // direct-sun forward HG anisotropy g (0.78-0.85)
 uniform float u_lightReach;    // TOTAL cone light-march reach toward the lit body (world units)
 uniform float u_marchFar;      // hard distance cap (world units)
+uniform float u_stepLenMax;    // P0: target MAX world-space step length; the view step COUNT is derived from this (grazing-ray under-sampling cap)
 uniform vec2  u_targetSize;    // quarter-res target size in pixels
 uniform int   u_steps;         // view march steps
 uniform int   u_lightSteps;    // cone light march steps
+uniform float u_domainWarp;    // R1/R3: world-space low-freq domain-warp amplitude (decorrelate grazing rays / step planes); 0 = off
+uniform float u_horizonFadeLo; // R2: screen-elevation fade LOW threshold (sin elev; fully faded at/below)
+uniform float u_horizonFadeHi; // R2: screen-elevation fade HIGH threshold (sin elev; fully present at/above)
+uniform int   u_dbgMode;       // R5: debug viz (0 off / 1 density / 2 transmittance / 3 stepcount / 4 first-hit / 5 scatter / 6 raw-nearest-upsample)
+uniform int   u_weatherKind;   // iter5: EXPLICIT weather hard-gate (0 = clear NORMAL => old path byte-identical; 1 = rain; 2 = snow). Gates ALL overcast-structure behavior (NOT coverage inference).
+uniform float u_overcastVar;   // iter5 P1: low-freq billow injected into the coverage field (overcast only; 0 = off)
+uniform float u_lowHaze;       // iter5 P2: cold low-band horizon-haze amplitude (overcast only; 0 = off)
 
 // scene depth + reconstruct (standard inverse-viewproj; re-derived, no fog include)
 uniform sampler2D u_depthTex;  // raw window-space scene depth (compare-mode NONE)
@@ -135,7 +144,7 @@ uniform sampler3D u_detail3d;  // 32^3 RGBA8: high-freq Worley detail (RGB octav
 const float PI = 3.14159265358979323846;
 // Compile-time caps so the driver can bound the uniform-controlled loops (codex #2/#10);
 // the live uniforms clamp BELOW these on the CPU side.
-const int MAX_STEPS = 96;
+const int MAX_STEPS = 128;   // R3 iter4: 80->128 (finer grazing march; CPU clamp still governs cost)
 const int MAX_LIGHT = 8;
 
 // Reconstruct world-space position from screen uv + raw depth d.
@@ -173,7 +182,11 @@ float HeightGradient( float hf )
 	float topR  = 1.0 - smoothstep( clamp( u_hTop, u_hBase + 0.05, 0.98 ), 1.0, hf );
 	return clamp( baseR * topR, 0.0, 1.0 );
 }
-
+)GLSL"
+// MSVC C2026 (iter5): the per-step structure additions grew SampleCloudDensity past the ~16 KB
+// single-literal cap, so split the first march-FS literal here too (the compiler concatenates the
+// adjacent raw literals into one contiguous GLSL source -- identical text, no semantic change).
+R"GLSL(
 // SampleCloudDensity -- the SINGLE density function used by BOTH the view march AND the cone
 // light / sky-visibility marches (no hidden "delete density / keep lighting" coupling). The
 // coverage-remap Perlin-Worley chain sets the silhouette; the high-freq Worley only ERODES
@@ -200,6 +213,15 @@ float SampleCloudDensity( vec3 p, int detail )
 	vec3 evolve = vec3( 0.18, -0.13, 1.0 ) * ( u_evolveRate * u_time );
 	vec3 ps     = p + drift + evolve;
 
+	// R1/R3 (iter4): LOW-FREQ WORLD-SPACE DOMAIN WARP. Two near-parallel grazing rays otherwise
+	// march the SAME coarse noise lane -> radial fan; coherent step planes -> corduroy. A world-
+	// stable low-freq offset field makes the noise PHASE at a given world point diverge after a
+	// short distance, breaking both. Applied CONSISTENTLY as ONE shared offset to base + mid +
+	// detail (NOT the rejected ps-only partial). u_domainWarp=0 disables it (capture A/B isolates
+	// it vs the per-step dither). World-stable (no screen-space term) => no shimmer.
+	vec3 warpOff = ( texture( u_base3d, ps * ( u_baseFreq * 0.37 ) ).gba * 2.0 - 1.0 ) * u_domainWarp;
+	ps += warpOff;
+
 	vec4 b     = texture( u_base3d, ps * u_baseFreq );
 	float wfbm = dot( b.gba, vec3( 0.625, 0.25, 0.125 ) );
 
@@ -212,16 +234,56 @@ float SampleCloudDensity( vec3 p, int detail )
 	// COVERAGE GATE: slide the existence threshold (low => isolated puffs, high => overcast),
 	// then re-scale by coverage to anchor the round billow look (Schneider).
 	float cov   = clamp( u_coverage, 0.0, 1.0 );
+	// P1 iter5 (OVERCAST only, HARD-GATED by u_weatherKind != 0 -- NOT coverage inference): inject a
+	// LOW-FREQ billow into the EFFECTIVE coverage. At high cov the gate window [1-cov,1] spans almost
+	// the whole base range so the base field stops carving thick/thin patches => featureless deck. A
+	// coarse, slowly-drifting base3d tap dips cov in patches so the window narrows and the base carves
+	// again => stratiform thick/thin breaks. World-stable scale => morphs with the volume, no shimmer.
+	// u_weatherKind==0 (clear NORMAL) skips this entirely => byte-identical old path.
+	if( u_weatherKind != 0 && u_overcastVar > 0.001 )
+	{
+		float lowf = texture( u_base3d, ( ps + evolve * 0.5 ) * ( u_baseFreq * 0.45 ) ).r;
+		cov = clamp( cov - u_overcastVar * ( 1.0 - lowf ), 0.0, 1.0 );
+	}
 	float cloud = remap( baseCloud, 1.0 - cov, 1.0, 0.0, 1.0 ) * cov;
+	// P2 FIX (popcorn/flat): FATTEN mid densities so the body fills out instead of being
+	// treated as thin "edge" material. The coverage gate caps cloud at <=cov (0.40 for NORMAL)
+	// while the erosion masks below use ABSOLUTE thresholds -- so without this most of the cloud
+	// read as edge => wispy flakes. pow(.,0.6) lifts the body into the masks' interior range
+	// (effectively making the absolute thresholds relative to coverage) and leaves clear sky
+	// (cloud==0) untouched. NOT smoothstep -- that LOWERS density for cloud<=0.5 (backwards).
+	// P1 iter5: coverage-AWARE body curve, HARD-GATED to overcast (weather != 0). pow(0.6) fattens
+	// SPARSE cumulus bodies (good at low cov) but is concave => it CRUSHES contrast at high cov (the
+	// 0.5..0.95 band the overcast deck lives in collapses to a uniform plateau). Relax the exponent
+	// toward ~0.95 as coverage rises so overcast keeps its tonal range. weather==0 => exp 0.60 exactly
+	// => pow(.,0.6) byte-identical to the old clear-NORMAL path.
+	float bodyExp = ( u_weatherKind != 0 ) ? mix( 0.60, 0.95, smoothstep( 0.55, 0.92, cov ) ) : 0.60;
+	cloud = pow( max( cloud, 0.0 ), bodyExp );
 
 	// MID-FREQUENCY cauliflower bumps on the OUTER half only (the (1-smoothstep) outer mask keeps
 	// thick interiors smooth = the anti-popcorn rule); scrolls at a different rate so the lumps
 	// live/breathe with the morph.
 	if( u_mid > 0.001 && cloud > 0.01 )
 	{
-		vec3  mb    = texture( u_base3d, ( p + drift * 1.3 + evolve * 1.7 ) * u_midFreq ).gba;
+		vec3  mb    = texture( u_base3d, ( p + drift * 1.3 + evolve * 1.7 + warpOff ) * u_midFreq ).gba;
 		float mid   = dot( mb, vec3( 0.6, 0.3, 0.1 ) );          // round billow (NOT raw cells)
-		float outer = 1.0 - smoothstep( 0.25, 0.70, cloud );     // outer half only (interiors safe)
+		// P1 iter5: keep the MID cauliflower alive in the OVERCAST interior (HARD-GATED). The absolute
+		// [0.25,0.70] mask zeroes for cloud>0.70, but the overcast deck is ALL cloud>0.70 => no mid =>
+		// smooth slate. Ride the band up with coverage and FLOOR it with max() (BLOCKER 1: the spec's
+		// mix(0.25,expr,1.0) is a no-op that returns expr -- a real floor must use max) so mid never
+		// fully vanishes in the dense interior. weather==0 => the exact old [0.25,0.70] mask.
+		float outer;
+		if( u_weatherKind != 0 )
+		{
+			float covT  = smoothstep( 0.55, 0.92, cov );
+			float midLo = mix( 0.25, 0.55, covT );
+			float midHi = mix( 0.70, 1.20, covT );
+			outer = max( 1.0 - smoothstep( midLo, midHi, cloud ), 0.25 * covT );
+		}
+		else
+		{
+			outer = 1.0 - smoothstep( 0.25, 0.70, cloud );   // clear NORMAL: byte-identical
+		}
 		cloud = remap( cloud, mid * u_mid * outer, 1.0, 0.0, 1.0 );
 	}
 
@@ -230,13 +292,25 @@ float SampleCloudDensity( vec3 p, int detail )
 	// without bumping dense interiors. Detail evolves FASTER so edges continuously fray/morph.
 	if( detail == 1 && cloud > 0.01 && u_detailAmt > 0.001 )
 	{
-		vec3 dt = texture( u_detail3d, ( p + drift * 1.5 + evolve * 2.3 ) * u_detailFreq ).rgb;
+		vec3 dt = texture( u_detail3d, ( p + drift * 1.5 + evolve * 2.3 + warpOff ) * u_detailFreq ).rgb;
 		float dfbm = dt.r;
 		float norm = 1.0, amp = 0.5;
 		if( u_erodeOct >= 2 ) { dfbm += dt.g * amp; norm += amp; amp *= 0.5; }
 		if( u_erodeOct >= 3 ) { dfbm += dt.b * amp; norm += amp; }
 		dfbm /= norm;
-		float edge     = 1.0 - smoothstep( 0.15, 0.45, cloud );
+		// P1 iter5: coverage-relative high-freq erosion (HARD-GATED) so the overcast deck gets a
+		// torn, turbulent underside instead of a glassy shell; a small floor keeps fine erosion even
+		// in dense cores (rain undersides are RAGGED). weather==0 => the exact old [0.15,0.45] mask.
+		float edge;
+		if( u_weatherKind != 0 )
+		{
+			float covT = smoothstep( 0.55, 0.92, cov );
+			edge = max( 1.0 - smoothstep( mix( 0.15, 0.45, covT ), mix( 0.45, 1.15, covT ), cloud ), 0.12 * covT );
+		}
+		else
+		{
+			edge = 1.0 - smoothstep( 0.15, 0.45, cloud );   // clear NORMAL: byte-identical
+		}
 		float erodeAmt = u_detailAmt * u_erodeDepth * edge * mix( 0.55, 1.0, hf );
 		cloud = remap( cloud, dfbm * erodeAmt, 1.0, 0.0, 1.0 );
 	}
@@ -246,14 +320,23 @@ float SampleCloudDensity( vec3 p, int detail )
 
 // Cheap UPWARD density trace (Quake Z-up) for sky-visibility ambient occlusion: accumulates
 // optical-depth toward the sky so deep/under-cloud samples receive LESS sky ambient (AO).
-float TraceDensityUp( vec3 p, int steps, float reach )
+float TraceDensityUp( vec3 p, int steps, float reach, vec2 tilt )
 {
 	float stepLen = reach / float( max( steps, 1 ) );
 	float acc = 0.0;
 	for( int i = 0; i < 4; i++ )
 	{
 		if( i >= steps ) break;
-		vec3 sp = p + vec3( 0.0, 0.0, 1.0 ) * ( stepLen * ( float( i ) + 0.5 ) );
+		// P3 iter6 (ZENITH-KNOT DECORRELATE): tilt the upward trace horizontally by a small per-pixel,
+		// per-step (i) amount. A near-vertical VIEW ray marches ONE noise column; a PURE (0,0,1) AO trace
+		// is COLLINEAR with it and re-darkens that SAME dense column => a persistent zenith "knot". The
+		// (i+0.5) growth spreads the 3 taps across adjacent lanes so the AO stops doubling the view column.
+		// `tilt` is ZERO for oblique/grazing rays (gated by verticality at the call site) => byte-identical
+		// away from zenith, no fan (the anti-fan dither lives on grazing rays). The trace stays physically
+		// "up" (z keeps the original advance); we only nudge XY. Deterministic (no frame/random term) =>
+		// no shimmer. This DECORRELATES (does NOT fade) the AO, so overhead clouds stay legitimately dark.
+		float h  = stepLen * ( float( i ) + 0.5 );
+		vec3  sp = p + vec3( tilt * h, h );
 		acc += SampleCloudDensity( sp, 0 ) * stepLen;
 	}
 	return acc;
@@ -319,11 +402,29 @@ void main()
 		return;
 	}
 
-	int steps = u_steps;
+	// P0 FIX (radial horizon streak): adaptive step COUNT from a target step LENGTH (codex-
+	// corrected; NOT the inverted fix-spec `max(marchLen/steps, stepLenMax)`). A grazing ray
+	// stays inside the thin slab for a huge horizontal distance, so a FIXED count gave ~940u
+	// steps at the horizon = radial spoke aliasing. Derive the count from u_stepLenMax; clamp
+	// the FLOOR to u_steps (steep rays keep the old quality) and the CEILING to MAX_STEPS (the
+	// worst-case grazing cost is bounded). stepLen is then the exact even division.
 	float marchLen = t1 - t0;
-	float stepLen = marchLen / float( steps );
+	int   steps    = int( ceil( marchLen / max( u_stepLenMax, 1.0 ) ) );
+	steps          = clamp( steps, u_steps, MAX_STEPS );
+	float stepLen  = marchLen / float( steps );
 	float jit = ign( gl_FragCoord.xy, u_frame );
 	float t = t0 + stepLen * jit;
+	// R1 (iter4) PRIMARY FAN/RIB KILLER: per-step stratified dither of the SAMPLE position.
+	// pixPhase is a FRAME-STABLE per-pixel blue-noise-ish phase (ign WITHOUT u_frame => identical
+	// every frame => NO shimmer, NO temporal history). In the loop each step adds a golden-ratio
+	// increment of pixPhase, so the step cadence is decorrelated per-pixel AND per-step -> adjacent
+	// grazing rays no longer share a coarse noise lane (kills the radial fan) and the slab planes
+	// stop aliasing into corduroy ribs. Applied to the sample position only; t += stepLen cadence
+	// (and thus the Beer-Lambert slab thickness) is unchanged, so transmittance stays energy-exact.
+	float pixPhase = ign( gl_FragCoord.xy, 0.0 );
+
+	// R5 debug accumulators (near-free; consumed only when u_dbgMode>0).
+	float dbgDens = 0.0; int dbgSteps = 0; float dbgFirstHitT = -1.0; vec3 dbgScatter = vec3( 0.0 );
 
 	float cosT   = dot( rd, u_lightDir );   // +1 => view looks TOWARD the lit body (forward scatter / BACKLIT cloud)
 	// Toward-light gate for the silver lining: rises as the view turns INTO the light (the real
@@ -338,8 +439,16 @@ void main()
 	for( int i = 0; i < MAX_STEPS; i++ )
 	{
 		if( i >= steps ) break;
-		vec3 p = ro + rd * t;
+		// R1: per-step blue-noise-ish dither of the SAMPLE position (within +/-0.5 step cell).
+		float stepJit = fract( pixPhase + float( i ) * 0.61803398875 ) - 0.5;
+		vec3 p = ro + rd * ( t + stepLen * stepJit );
 		float dens = SampleCloudDensity( p, 1 );
+		// P0 HORIZON FADE: ramp the coarsely-sampled far tail to nothing over the last ~30% of
+		// the march so any residual grazing-ray step aliasing near u_marchFar is invisible (the
+		// thin deck is sub-pixel out there anyway). Fades opacity AND in-scatter together.
+		dens *= 1.0 - smoothstep( u_marchFar * 0.70, u_marchFar, t );
+		dbgSteps++; dbgDens += dens * stepLen;
+		if( dens > 0.0015 && dbgFirstHitT < 0.0 ) dbgFirstHitT = t;
 		if( dens > 0.0015 )
 		{
 			float hf = clamp( ( p.z - u_boxMin.z ) / max( u_boxMax.z - u_boxMin.z, 1.0 ), 0.0, 1.0 );
@@ -384,14 +493,64 @@ void main()
 
 			// SKY-VISIBILITY AMBIENT: cheap upward density trace -> ambient occlusion; sky term scaled
 			// by sky-vis * height gradient, plus a dim ground-bounce term (undersides not black).
-			float skyVis = exp( -0.5 * u_sigmaT * TraceDensityUp( p, 3, 900.0 ) );
+			// P3 iter6: decorrelate the upward AO trace from a near-vertical VIEW ray (which integrates ONE
+			// noise column) by tilting the trace XY a small, deterministic per-pixel amount. vertAO gates it
+			// to near-vertical rays only (abs(rd.z) in [0.85,0.99]) => oblique/grazing views get tilt=0 =>
+			// BYTE-IDENTICAL there + no fan risk. pixPhase (frame-stable per-pixel, see inl:415) picks a
+			// temporally-stable direction (no shimmer); magnitude max ~0.40 (= ~22deg off vertical) so the
+			// trace stays "up" but samples fresh lanes => the knot dissolves WITHOUT fading AO.
+			// P2 iter7 FIX-1: the iter6 gate smoothstep(0.85,0.99) NEVER FIRED at the knot's elevation
+			// (knot sits near top-center at abs(rd.z)~0.82-0.88, BELOW the 0.85 onset => vertAO~0 =>
+			// tilt~0 => w0 byte-identical, knot persisted). Lower the onset to 0.72 (saturate 0.92) so
+			// the EXISTING AO-direction tilt engages over the knot WITHOUT grabbing the broad upper sky
+			// (codex: 0.55 = ~33deg = upper third = over-reach; do NOT use 0.55). abs(rd.z)<0.72
+			// (oblique/grazing, the gameplay norm) still gets vertAO=0 => byte-identical there + NO fan
+			// (the anti-fan dither lives on grazing rays, untouched). Intentionally touches near-zenith
+			// w0 pixels only (the zenith fix). FIX-2 (primary-ray XY jitter) DEFERRED this pass.
+			float vertAO = smoothstep( 0.72, 0.92, abs( rd.z ) );
+			float aoAng  = pixPhase * 6.2831853;
+			vec2  aoTilt = vec2( cos( aoAng ), sin( aoAng ) ) * ( vertAO * 0.40 );
+			float skyVis = exp( -0.5 * u_sigmaT * TraceDensityUp( p, 3, 900.0, aoTilt ) );
+				// P3: WEATHER-GATED overcast skylight floor. In a dense overcast deck skyVis collapses
+				// toward 0 => ambient -> black ceiling (rejected rain/snow look). Floor it ONLY for
+				// overcast (u_skyVisFloor>0 set CPU-side for rain/snow); clear NORMAL keeps floor 0 so
+				// its lit/shadow contrast is NOT flattened (codex: no GLOBAL skyVis clamp).
+					// P1-FIX iter6 (AO VARIANCE RESTORE -- the key rain lever): the hard max(skyVis,floor)
+				// clamped EVERY overcast AO sample flat to 0.40 => zero spatial variation => rain read as a
+				// smooth dark dome (skyLumaSD~4). Replace with a variance-PRESERVING LIFT into [F,1]: deep
+				// cores stay near F, thin breaks rise toward 1 => the shelf-banding returns. F=0.18 (= the
+				// 0.40 floor * 0.45) keeps the floor LOW so the deck MEAN does NOT rise (codex: lifting at
+				// 0.40 raised mean ~ skyVis 0.2 -> 0.52). weather==0 => u_skyVisFloor=0 => aoFloor=0 =>
+				// skyVis unchanged (BYTE-IDENTICAL clear NORMAL). u_skyVisFloor stays 0.40 for the inl:505
+				// ambient term (untouched); only THIS AO lift uses the lower 0.18 floor.
+				// P1 iter7 (2): drop the AO-lift pedestal 0.45->0.25 (F 0.18->0.10). The 0.18 pedestal
+				// added a constant floor to every overcast skyVis, RAISING the ambient base and diluting
+				// the AO swing's relative contrast => deep cores could not go dark enough (SD stuck ~7).
+				// 0.10 lets cores sit lower (wider AO range = more variance) and can only LOWER the mean,
+				// never raise it. weather==0 => u_skyVisFloor=0 => aoFloor=0 => skyVis unchanged (BYTE-IDENTICAL).
+				float aoFloor = u_skyVisFloor * 0.25;
+				skyVis = aoFloor + ( 1.0 - aoFloor ) * skyVis;
 			vec3  ambient = u_ambSky * skyVis * mix( 0.35, 1.0, hf )
 			              + u_ambGround * 0.35 * ( 1.0 - hf );
+				// R4 (iter4): OVERCAST UNDERSIDE LIFT. The mix(0.35,1.0,hf) height scale crushes the
+				// underside even with the weather-gated skyVis floor => RAIN/SNOW read black at a low
+				// upward vantage. Add a skylight floor GATED TOWARD THE UNDERSIDE (1-smoothstep over hf)
+				// so the dark base lifts to a readable blue-grey WITHOUT washing out the lit tops / cap
+				// contrast. Weather-gated: u_skyVisFloor=0 for clear NORMAL => term vanishes (untouched).
+				// P1 iter5: DENSITY-MODULATE the underside lift so dark turbulent cores stay darker than
+				// the thin breaks (rain reads layered, not a flat panel) instead of a spatially-constant
+				// glow that re-fills the contrast P1-FIX-1..3 just restored. u_skyVisFloor=0 for clear
+				// NORMAL => the whole term is 0 => byte-identical. dens already includes u_density.
+				float floorMod = 1.0 - 0.75 * smoothstep( 0.05, 0.55, dens );   // P1-FIX iter6: deepen overcast underside swing 0.55->0.75 => dark turbulent cores read distinctly darker than thin breaks (more band contrast; holds/lowers mean). weather-gated via u_skyVisFloor below (=0 for NORMAL => term vanishes, byte-identical).
+				ambient += u_ambSky * u_skyVisFloor * 0.5 * ( 1.0 - smoothstep( 0.0, 0.45, hf ) ) * floorMod;
 			// DESATURATE the cool sky-ambient inside dense / shadowed cloud (codex #6): shadows must
 			// read NEUTRAL GREY, not blue. Blend the ambient toward its own luminance where density is
 			// high (deep cores) so we lose the "blue-grey smoke" cast without flattening the lit caps.
 			float ambGrey = dot( ambient, vec3( 0.3333 ) );
 			ambient = mix( ambient, vec3( ambGrey ), 0.40 * smoothstep( 0.10, 0.55, dens ) );
+)GLSL"
+// (split raw-string literal: MSVC C2026 caps a single string literal ~16KB; adjacent literals concat)
+R"GLSL(
 
 			// energy-conserving in-scatter slice (Beer-Lambert)
 			float stepT = exp( -u_sigmaT * dens * stepLen );
@@ -418,7 +577,7 @@ void main()
 					float gl = length( g );
 					vec3  N  = ( gl > 1e-6 ) ? ( -g / gl ) : vec3( 0.0, 0.0, 1.0 );   // outward (toward thinner cloud)
 					float wrap = clamp( dot( N, u_lightDir ) * 0.5 + 0.5, 0.0, 1.0 );
-					capLight = u_capLight * pow( wrap, 2.0 ) * sunVis * mix( 0.25, 1.0, hf );
+					capLight = u_capLight * pow( wrap, 1.3 ) * sunVis * mix( 0.25, 1.0, hf );   // P1: pow 2.0->1.3 = broader sun-facing FACE (not just a thin edge lobe)
 				}
 
 				// neutral-warm cloud ALBEDO on the DIRECT-lit response (codex #6): sun-lit caps read
@@ -426,6 +585,7 @@ void main()
 				// capLight is added OUTSIDE the powder term so the broad faces are not edge-darkened.
 				vec3 capAlbedo = vec3( 1.0, 0.94, 0.84 );
 				vec3 S = u_lightColor * capAlbedo * ( ( scatter + directBeam ) * powderTerm + capLight + rim ) + ambient;
+			dbgScatter += Tview * ( 1.0 - stepT ) * u_lightColor * ( scatter + directBeam );   // R5 mode 5
 			L += Tview * ( 1.0 - stepT ) * S;
 			Tview *= stepT;
 			if( Tview < 0.01 )
@@ -434,8 +594,79 @@ void main()
 		t += stepLen;
 	}
 
-	float alpha = 1.0 - Tview;
-	fragColor = vec4( L, alpha );   // premultiplied (L weighted by coverage along the march)
+	// R5: DEBUG VIZ (modes 1-5). Branch AFTER the early-outs (empty pixels stayed black) and
+	// BEFORE the final premultiplied write, so the diagnostic is the RAW quarter-res signal (no
+	// elevation fade). Mode 6 falls through to the normal cloud output and is handled by the
+	// upsample pass (nearest, no bilinear). u_dbgMode==0 => zero cost (single uniform compare).
+	if( u_dbgMode > 0 && u_dbgMode <= 5 )
+	{
+		vec3 dbg = vec3( 0.0 );
+		if( u_dbgMode == 1 )      dbg = vec3( clamp( dbgDens * 0.002, 0.0, 1.0 ) );                                              // density (accumulated)
+		else if( u_dbgMode == 2 ) dbg = vec3( Tview );                                                                          // transmittance
+		else if( u_dbgMode == 3 ) dbg = vec3( float( dbgSteps ) / float( MAX_STEPS ) );                                         // step-count heatmap
+		else if( u_dbgMode == 4 ) dbg = vec3( clamp( ( dbgFirstHitT < 0.0 ? u_marchFar : dbgFirstHitT ) / u_marchFar, 0.0, 1.0 ) ); // first-hit depth
+		else                      dbg = dbgScatter;                                                                             // 5 scatter-only
+		fragColor = vec4( dbg, 1.0 );
+		return;
+	}
+
+	// R2 (iter4): HORIZON FADE BY SCREEN-ELEVATION (not world distance). rd is normalized so
+	// rd.z = sin(elevation). Fade the cloud to nothing across the thin near-horizon band where the
+	// grazing-ray fan/ribs live, independent of march distance. Applied to in-scatter L AND alpha
+	// together (stay premultiplied). The existing distance fade (above) is kept as far-tail insurance.
+	// P4 iter5: LUMINANCE-PRESERVING soft-knee tonemap on the cloud in-scatter. Identity BELOW the
+	// knee (mids/shadows byte-stable, incl. clear NORMAL non-clipping deck) -- only the blown sun-lit
+	// caps above the knee roll off toward W instead of clipping flat. Scaled by luminance (NOT
+	// per-channel) so hue/saturation are preserved (codex: per-channel desaturates/flattens). This
+	// bounds only the cloud's OWN highlight energy; the HDR resolve still owns final exposure.
+	{
+		float lum = max( dot( L, vec3( 0.2126, 0.7152, 0.0722 ) ), 1e-4 );
+		const float kneeK = 1.0;   // below this luminance: linear, no change
+		const float kneeW = 6.0;   // shoulder asymptote (max output luminance)
+		if( lum > kneeK )
+		{
+			float x      = lum - kneeK;
+			float mapped  = kneeK + ( kneeW - kneeK ) * ( x / ( x + ( kneeW - kneeK ) ) );
+			L *= mapped / lum;
+		}
+	}
+
+	// P1 iter7 (3) — codex's DIRECT SD lever: weather-gated CONTRAST S-curve on the final cloud luma.
+	// The rain deck's integrated luma L clusters in a narrow LOW band (~0.10-0.40) => low skyLumaSD
+	// (~7) even after the AO/selfShadow levers. Expand contrast around a LOW midpoint so dark turbulent
+	// structure spreads (variance UP) while the pivot stays dark (mean NOT washed out): cores below
+	// midR darken, breaks above it lift, symmetric about a dark pivot. max(0) clamps so empty/black sky
+	// stays black. Gated u_weatherKind!=0 => clear NORMAL (w0) skips this branch entirely => BYTE-
+	// IDENTICAL. Tuning dial (capture-gated, per directive): if w1 skyLumaSD<15 raise gain toward 1.5;
+	// if w1 mean creeps >~70 lower midR toward 0.15. selfShadow 1.10->0.95 is the next staged lever
+	// (NOT pre-applied here).
+	if( u_weatherKind != 0 )
+	{
+		const float scGain = 1.35;   // contrast expansion factor
+		const float scMidR = 0.18;   // low pivot (inside the rain luma band) => spreads dark structure
+		L = max( vec3( 0.0 ), scMidR + ( L - scMidR ) * scGain );
+	}
+
+	// R2 (iter4): horizon fade by screen-elevation. iter5 P2: for OVERCAST the CPU lowers
+	// u_horizonFadeHi (->0.03) so the storm deck stays opaque lower toward the horizon and COVERS the
+	// warm sky band; clear NORMAL keeps the cvar value unchanged.
+	float elevFade = smoothstep( u_horizonFadeLo, u_horizonFadeHi, rd.z );
+	float alpha = ( 1.0 - Tview ) * elevFade;
+	vec3  Lout  = L * elevFade;
+
+	// P2 iter5 (OVERCAST only): cold low-band haze so any residual sky bleed at the horizon reads as
+	// cold rain/snow haze, not a warm sunset gap. Codex BLOCKER-4 form: hazeCov fills ONLY the
+	// UNcovered fraction (hazeA*(1-alpha)) -- no double-apply of uncovered coverage. weather==0 skips.
+	if( u_weatherKind != 0 && u_lowHaze > 0.0 )
+	{
+		float lowBand  = 1.0 - smoothstep( 0.02, 0.16, rd.z );    // strongest at the horizon, gone by ~9 deg
+		vec3  coldHaze = u_ambSky * 0.6;                          // cold grey from the (already cool) sky ambient
+		float hazeA    = clamp( u_lowHaze * lowBand, 0.0, 1.0 );
+		float hazeCov  = hazeA * ( 1.0 - alpha );
+		Lout  += coldHaze * hazeCov;
+		alpha += hazeCov;
+	}
+	fragColor = vec4( Lout, alpha );   // premultiplied (L weighted by coverage along the march)
 }
 )GLSL";
 
@@ -449,9 +680,18 @@ static const char kCloudUpsampleFs[] = R"GLSL(#version 330 core
 out vec4 fragColor;
 uniform sampler2D u_cloudTex;   // quarter-res march result (LINEAR, CLAMP)
 uniform vec2 u_fullSize;        // full viewport size (px)
+uniform int  u_dbgMode;         // R5: 6 = RAW nearest-neighbour upsample (no bilinear), else bilinear
 void main()
 {
 	vec2 uv = gl_FragCoord.xy / u_fullSize;
+	// R5 mode 6: nearest-neighbour fetch so the capture can separate the RAW quarter-res ray-phase
+	// fan from bilinear magnification (texelFetch snaps to the source texel, no interpolation).
+	if( u_dbgMode == 6 )
+	{
+		ivec2 qs = textureSize( u_cloudTex, 0 );
+		fragColor = texelFetch( u_cloudTex, ivec2( clamp( uv, 0.0, 0.999999 ) * vec2( qs ) ), 0 );
+		return;
+	}
 	fragColor = texture( u_cloudTex, uv );   // bilinear upsample, premultiplied
 }
 )GLSL";

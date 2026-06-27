@@ -87,6 +87,12 @@ cvar_t *s_cvDbgBoxY;    // csz_clouds_dbg_box_y       world center Y
 cvar_t *s_cvDbgBoxZ;    // csz_clouds_dbg_box_z       world center Z (high in open sky)
 cvar_t *s_cvDbgBoxRad;  // csz_clouds_dbg_box_radius  X/Y half-extent (storm footprint width)
 cvar_t *s_cvDbgBoxZRad; // csz_clouds_dbg_box_zrad    Z (vertical) half-extent; <0 => cube (use radius). Tall storm build-up.
+// iter4 grazing-angle rework knobs (R1 domain-warp / R2 elevation fade / R5 debug viz).
+cvar_t *s_cvDomainWarp;    // csz_clouds_domainwarp      "1"   R1 SECONDARY: low-freq noise domain-warp on/off (per-step dither is the PRIMARY fan killer)
+cvar_t *s_cvDomainWarpAmp; // csz_clouds_domainwarp_amp  "220" R1 domain-warp world-space amplitude (live tune)
+cvar_t *s_cvHorizonFadeLo; // csz_clouds_horizon_fade_lo "0.01" R2 screen-elevation fade LOW threshold (sin elev)
+cvar_t *s_cvHorizonFadeHi; // csz_clouds_horizon_fade_hi "0.07" R2 screen-elevation fade HIGH threshold (sin elev)
+cvar_t *s_cvDbgMode;       // csz_clouds_dbg_mode        "0"   R5 debug viz: 0 off / 1 density / 2 transmittance / 3 stepcount / 4 first-hit / 5 scatter / 6 raw-nearest-upsample
 
 // ---- LOOK hot cvars (csz_clouds_*): the form/lighting controls, READ LIVE each frame so
 // the look can be swept WITHOUT a rebuild. Each is clamped to a sane [min,max] on read;
@@ -163,6 +169,12 @@ void RegisterCvarsImpl()
 	s_cvDbgBoxZ    = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_z",      "3000", FCVAR_CLIENTDLL );
 	s_cvDbgBoxRad  = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_radius", "6000", FCVAR_CLIENTDLL );
 	s_cvDbgBoxZRad = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_zrad",   "5000", FCVAR_CLIENTDLL );
+	// iter4 grazing-angle rework: R1 domain-warp toggle+amp, R2 elevation-fade thresholds, R5 debug viz.
+	s_cvDomainWarp    = gEngfuncs.pfnRegisterVariable( "csz_clouds_domainwarp",      "1",    FCVAR_CLIENTDLL );
+	s_cvDomainWarpAmp = gEngfuncs.pfnRegisterVariable( "csz_clouds_domainwarp_amp",  "220",  FCVAR_CLIENTDLL );
+	s_cvHorizonFadeLo = gEngfuncs.pfnRegisterVariable( "csz_clouds_horizon_fade_lo", "0.01", FCVAR_CLIENTDLL );
+	s_cvHorizonFadeHi = gEngfuncs.pfnRegisterVariable( "csz_clouds_horizon_fade_hi", "0.07", FCVAR_CLIENTDLL );
+	s_cvDbgMode       = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_mode",        "0",    FCVAR_CLIENTDLL );
 	// LOOK hot cvars (swept live, no rebuild). Defaults = the iter-2 SUBSTANCE-LOCK target:
 	// coverage 0.6 + density 2.5 + basescale 2200 gave a substantial, rounded, billowy cumulus
 	// (confirmed from the oblique vantage); X/Y face falloff + erosion keep the AABB silhouette GONE.
@@ -179,7 +191,7 @@ void RegisterCvarsImpl()
 	s_cvCoverage    = gEngfuncs.pfnRegisterVariable( "csz_clouds_coverage",    "0.40",  FCVAR_CLIENTDLL );
 	s_cvDensity     = gEngfuncs.pfnRegisterVariable( "csz_clouds_density",     "1.15",  FCVAR_CLIENTDLL );
 	s_cvSigma       = gEngfuncs.pfnRegisterVariable( "csz_clouds_sigma",       "0.0045",FCVAR_CLIENTDLL );
-	s_cvBaseScale   = gEngfuncs.pfnRegisterVariable( "csz_clouds_basescale",   "4200",  FCVAR_CLIENTDLL );
+	s_cvBaseScale   = gEngfuncs.pfnRegisterVariable( "csz_clouds_basescale",   "3000",  FCVAR_CLIENTDLL );  // P2: finer base period (4200 was too coarse/flat for the thin slab => 2D-slice popcorn)
 	s_cvDetail      = gEngfuncs.pfnRegisterVariable( "csz_clouds_detail",      "0.70",  FCVAR_CLIENTDLL );
 	s_cvDetailScale = gEngfuncs.pfnRegisterVariable( "csz_clouds_detailscale", "1400",  FCVAR_CLIENTDLL );
 	s_cvHBase       = gEngfuncs.pfnRegisterVariable( "csz_clouds_hbase",       "0.15",  FCVAR_CLIENTDLL );  // v5: cumulus height-gradient base ramp-in fraction
@@ -200,9 +212,12 @@ void RegisterCvarsImpl()
 	// codex compare2 #7: DEFAULT the cloud-only sun so the broad sunlit caps FACE the camera. The
 	// elev55 capture hid the lit faces (sun behind/over the top); elev~35 + azim~180 lights the
 	// camera-facing side so the warm-white cap faces show. Still HOT/overridable (-1 = follow tod).
-	s_cvSunElev     = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun_elev",    "35",    FCVAR_CLIENTDLL );
-	s_cvSunAzim     = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun_azim",    "180",   FCVAR_CLIENTDLL );
-	s_cvMoon        = gEngfuncs.pfnRegisterVariable( "csz_clouds_moon",        "2.4",   FCVAR_CLIENTDLL );
+	// P1: defaults UNFROZEN to -1 (follow the per-tod direction below) so day/sunset/night move the
+	// lit side. The old frozen 35/180 made tod NEVER change the light direction. -1 => use the
+	// per-tod elev/azim defaults (still camera-facing lit caps); a user value >=0 still hard-overrides.
+	s_cvSunElev     = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun_elev",    "-1",    FCVAR_CLIENTDLL );
+	s_cvSunAzim     = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun_azim",    "-1",    FCVAR_CLIENTDLL );
+	s_cvMoon        = gEngfuncs.pfnRegisterVariable( "csz_clouds_moon",        "1.9",   FCVAR_CLIENTDLL );  // R4 (iter4): 2.4->1.9 so the moon doesn't re-lift the (lowered) night floor
 	s_cvMoonTint    = gEngfuncs.pfnRegisterVariable( "csz_clouds_moontint",    "1.0",   FCVAR_CLIENTDLL );
 	// STRUCTURE hot cvars (iter-3): stacked cauliflower turrets + shadowed valleys + irregular base.
 	// Defaults already show clearly separated lobes with internal shadow pockets out of the box.
@@ -211,7 +226,7 @@ void RegisterCvarsImpl()
 	s_cvErodeOct    = gEngfuncs.pfnRegisterVariable( "csz_clouds_erode_oct",   "3",     FCVAR_CLIENTDLL );
 	// codex compare2: LOWER selfshadow (1.6 -> 0.85) so cores read DEEP GREY, not the black-smoke
 	// charcoal the prior 1.6 produced; the cap-light + tonal range keep the lit/shadow contrast.
-	s_cvSelfShadow  = gEngfuncs.pfnRegisterVariable( "csz_clouds_selfshadow",  "0.85",  FCVAR_CLIENTDLL );
+	s_cvSelfShadow  = gEngfuncs.pfnRegisterVariable( "csz_clouds_selfshadow",  "1.4",   FCVAR_CLIENTDLL );  // P1: 0.85->1.4 deeper cone shadow = real lit-top/shadowed-underside contrast (paired w/ lower day ambient)
 	s_cvBaseIrreg   = gEngfuncs.pfnRegisterVariable( "csz_clouds_base_irreg",  "0.6",   FCVAR_CLIENTDLL );  // DEPRECATED (v3)
 	s_cvTowerVar    = gEngfuncs.pfnRegisterVariable( "csz_clouds_tower_var",   "0.28",  FCVAR_CLIENTDLL );  // DEPRECATED (v3)
 	s_cvEnvWarp     = gEngfuncs.pfnRegisterVariable( "csz_clouds_envwarp",     "0.12",  FCVAR_CLIENTDLL );
@@ -423,10 +438,13 @@ struct VolGpu
 	int mBillow, mErodeDepth, mErodeOct, mSelfShadow, mBaseIrreg, mTowerVar, mEnvWarp;
 	int mMid, mMidFreq, mVirga, mSunForward, mSunG;
 	int mCapLight, mShelf, mMammatus, mCapEps;
+	int mStepLenMax, mSkyVisFloor;   // P0 grazing-ray step-length cap + P3 weather-gated skyVis floor
 	int mWindVec, mEvolveRate;   // v5 layer animation: wind drift + volume evolve
+	int mDomainWarp, mHorizonFadeLo, mHorizonFadeHi, mDbgMode;   // iter4: R1 warp / R2 elevation fade / R5 debug
+	int mWeatherKind, mOvercastVar, mLowHaze;   // iter5: weather hard-gate + P1 overcast billow + P2 cold low-band haze
 	int mDepthTex, mZNear, mZFar, mInvViewProj, mBase3d, mDetail3d;
 	// upsample uniforms
-	int uCloudTex, uFullSize;
+	int uCloudTex, uFullSize, uUpDbgMode;
 
 	// baked 3D textures
 	GLuint base3d, detail3d;
@@ -660,8 +678,17 @@ void BuildPrograms()
 	s_gpu.mShelf       = UniformLoc( s_gpu.march, "u_shelf" );
 	s_gpu.mMammatus    = UniformLoc( s_gpu.march, "u_mammatus" );
 	s_gpu.mCapEps      = UniformLoc( s_gpu.march, "u_capEps" );
+	s_gpu.mStepLenMax  = UniformLoc( s_gpu.march, "u_stepLenMax" );   // P0
+	s_gpu.mSkyVisFloor = UniformLoc( s_gpu.march, "u_skyVisFloor" );  // P3
 	s_gpu.mWindVec     = UniformLoc( s_gpu.march, "u_windVec" );
 	s_gpu.mEvolveRate  = UniformLoc( s_gpu.march, "u_evolveRate" );
+	s_gpu.mDomainWarp    = UniformLoc( s_gpu.march, "u_domainWarp" );      // R1
+	s_gpu.mHorizonFadeLo = UniformLoc( s_gpu.march, "u_horizonFadeLo" );  // R2
+	s_gpu.mHorizonFadeHi = UniformLoc( s_gpu.march, "u_horizonFadeHi" );  // R2
+	s_gpu.mDbgMode       = UniformLoc( s_gpu.march, "u_dbgMode" );        // R5
+	s_gpu.mWeatherKind   = UniformLoc( s_gpu.march, "u_weatherKind" );    // iter5 hard-gate
+	s_gpu.mOvercastVar   = UniformLoc( s_gpu.march, "u_overcastVar" );    // iter5 P1
+	s_gpu.mLowHaze       = UniformLoc( s_gpu.march, "u_lowHaze" );        // iter5 P2
 	s_gpu.mLightReach  = UniformLoc( s_gpu.march, "u_lightReach" );
 	s_gpu.mMarchFar    = UniformLoc( s_gpu.march, "u_marchFar" );
 	s_gpu.mTargetSize  = UniformLoc( s_gpu.march, "u_targetSize" );
@@ -676,6 +703,7 @@ void BuildPrograms()
 
 	s_gpu.uCloudTex    = UniformLoc( s_gpu.upsample, "u_cloudTex" );
 	s_gpu.uFullSize    = UniformLoc( s_gpu.upsample, "u_fullSize" );
+	s_gpu.uUpDbgMode   = UniformLoc( s_gpu.upsample, "u_dbgMode" );   // R5 mode 6: raw nearest upsample
 
 	glGenQueries( kRing, s_gpu.query );
 	for( int i = 0; i < kRing; i++ ) { s_gpu.qInFlight[i] = false; s_gpu.qFrame[i] = 0; }
@@ -731,10 +759,17 @@ void DeriveCelestial( float phase, float nightness, float sunI, float moonI, flo
 
 	// Height-aware ambient skylight: darker ground bounce vs cool sky zenith, cross-faded.
 	// Night ambient is raised off the floor (iter 0 was ~black) and scaled by the ambient hot cvar.
-	const float dayG[3] = { 0.18f, 0.20f, 0.24f }; const float dayS[3] = { 0.45f, 0.55f, 0.75f };
+	// P1: day ambient LOWERED ~25% (dayS {0.45,0.55,0.75}->{0.34,0.42,0.56}, dayG ~*0.74) so the
+	// flat sky floor no longer dominates the gated direct term => sun-facing caps read against
+	// shadowed undersides. Overcast rain/snow compensate via their preset ambientMul + the
+	// weather-gated skyVis floor, so this does NOT re-black the overcast states.
+	const float dayG[3] = { 0.13f, 0.15f, 0.18f }; const float dayS[3] = { 0.34f, 0.42f, 0.56f };
 	// Night ambient floor RAISED (iter-2): the moon cloud must read as a dim-but-defined COOL mass,
 	// not a black void. Kept cool-biased (blue > red) so the unlit body stays moonlit, not grey.
-	const float ngG[3]  = { 0.065f, 0.080f, 0.120f }; const float ngS[3] = { 0.160f, 0.205f, 0.300f };
+	// R4 (iter4): night ambient floor LOWERED so night reads clearly DIMMER than overcast day (the
+	// iter-2 raise to {0.160,0.205,0.300} now exceeded the lowered day floor => "pale lavender,
+	// brighter than overcast day"). Kept cool-biased (blue>red) => a defined cool mass, not a void.
+	const float ngG[3]  = { 0.035f, 0.045f, 0.070f }; const float ngS[3] = { 0.090f, 0.120f, 0.185f };
 	for( int i = 0; i < 3; i++ )
 	{
 		out.ambGround[i] = mixf( dayG[i], ngG[i], nightness ) * ambientMul;
@@ -756,12 +791,46 @@ void DeriveCelestial( float phase, float nightness, float sunI, float moonI, flo
 // =============================================================================
 void ApplyWeatherPreset( int w )
 {
-	struct P { float cov, dens, sigma, amb, sun, sunfwd, cap, silver, powder, height, thick; };
+	// iter5: detail/erode/selfsh added so P5 (NORMAL edge crispen) + P1-FIX-5 (per-weather selfShadow)
+	// are wired PER-PRESET WITH RESET (BLOCKER 5): every weather change re-pushes ALL preset cvars, so
+	// a NORMAL-only edge tune cannot leak into rain/snow and vice-versa.
+	struct P { float cov, dens, sigma, amb, sun, sunfwd, cap, silver, powder, height, thick, detail, erode, selfsh; };
 	const P presets[3] = {
-		// cov   dens   sigma    amb    sun    sunfwd cap    silver powder height  thick
-		{ 0.40f, 1.15f, 0.0045f, 1.00f, 3.40f, 1.70f, 1.10f, 0.50f, 0.40f, 2600.f,  850.f },  // 0 NORMAL
-		{ 0.96f, 2.10f, 0.0110f, 0.42f, 0.95f, 0.30f, 0.35f, 0.10f, 0.65f, 1700.f, 1150.f },  // 1 RAIN
-		{ 0.91f, 1.70f, 0.0075f, 1.35f, 1.80f, 0.70f, 0.70f, 0.25f, 0.45f, 2100.f, 1000.f },  // 2 SNOW
+		// cov   dens   sigma    amb    sun    sunfwd cap    silver powder height  thick   detail erode  selfsh
+		// P2: NORMAL thick 850->1500 so the height gradient produces REAL rounded vertical form (a
+		//     850u deck was too thin for the gradient to read => flat sheet). capEps is now derived
+		//     from the SMALLEST box dim (below) so the cap-light normal still resolves at this thickness.
+		// P5 iter5: NORMAL silver 0.50->0.80, detail 0.70->0.85, erode 0.30->0.55 = crisper torn cumulus
+		//     edges (per-preset; overcast keeps smooth-stratiform 0.70/0.30). selfShadow 1.40 (was global).
+		{ 0.40f, 1.15f, 0.0045f, 1.00f, 3.40f, 1.70f, 1.10f, 0.80f, 0.40f, 2600.f, 1500.f, 0.85f, 0.55f, 1.40f },  // 0 NORMAL
+		// P3 RAIN: was near-BLACK (sigma .011 + amb .42 + sun .95 + skyVis->0). Rebalanced to a
+		//     legible dark blue-GREY rainy DAY: sigma .011->.0060 (not an opaque void), amb .42->1.00
+		//     + weather-gated skyVis floor (undersides read), sun .95->1.40 / cap .35->.60 (lighter
+		//     top than base = form), dens 2.10->1.80 (not pitch-opaque). Cool-neutral tint via ApplyWeatherTint.
+		// R4 (iter4): readable dark blue-GREY rainy DAY (not a black ceiling). amb 1.00->1.30 +
+		//     sigma 0.0060->0.0050 (less opaque, structure stays visible); paired with the shader's
+		//     overcast underside-lift floor so a LOW upward vantage reads grey, not black.
+		// P1-FIX-5 iter5: RAIN selfShadow 1.40->1.90 = deeper cone shadow => darker carved turbulent
+		//     undersides on the (now structured) deck. detail/erode kept smooth-stratiform 0.70/0.30.
+		// P1-FIX iter6: RAIN selfShadow 1.90->1.40 ONLY (NOT 0.95 -- codex: 0.95 ~halves cone extinction =>
+		//     brightens rain toward snow). 1.40 lets sunVis=exp(-tauL*selfShadow) VARY (cores stay darker
+		//     than breaks) instead of flat-zeroing the whole cov=0.95 deck => lit/shadow contrast returns
+		//     WITHOUT raising the mean. cap (0.60) / sunfwd (0.30) / sun (1.40) / amb (1.30) deliberately
+		//     UNCHANGED -- those raise mean; the goal is VARIANCE (skyLumaSD 4.3->~20), rain STAYS DARK.
+		// P1 iter7 (1): RAIN selfShadow 1.40->1.10 (selfsh field, RAIN row ONLY). The physical lit-top/
+		//     shadowed-underside contrast lever: lower cone self-shadow => sunVis=exp(-tauL*selfShadow)
+		//     varies MORE across the deck => real volumetric lit/shadow structure (variance up). Small
+		//     mean rise acceptable per directive (w1 must stay <=~70). NORMAL/SNOW rows untouched.
+		{ 0.95f, 1.80f, 0.0050f, 1.30f, 1.40f, 0.30f, 0.60f, 0.10f, 0.55f, 1700.f, 1150.f, 0.70f, 0.30f, 1.10f },  // 1 RAIN
+		// P3 SNOW: bright cold cool-WHITE. amb 1.35->1.70, sun 1.80->2.40, cap .70->1.00, sigma
+		//     .0075->.0055 (light penetrates => the deck glows). Cool-white tint via ApplyWeatherTint.
+		// R4 (iter4): brighter COLD cool-WHITE. amb 1.70->2.10, sun 2.40->2.80, cap 1.00->1.30,
+		//     sigma 0.0055->0.0048 (light penetrates => the deck glows white, not dull mid-grey).
+		// P3 iter5: SNOW amb 2.10->2.50, cap 1.30->1.50 = brighter cold high-albedo deck (paired with
+		//     P4 tonemap to hold highlight detail + the ApplyWeatherTint cool ambient/base below).
+		// P1-FIX-5: SNOW selfShadow 1.40->1.20 = shallower cone shadow => bright diffuse undersides
+		//     (not carved-dark). detail/erode kept smooth 0.70/0.30.
+		{ 0.90f, 1.55f, 0.0048f, 2.50f, 2.80f, 0.70f, 1.50f, 0.25f, 0.45f, 2100.f, 1000.f, 0.70f, 0.30f, 1.20f },  // 2 SNOW
 	};
 	const P &p = presets[ clampi( w, 0, 2 ) ];
 	gEngfuncs.Cvar_SetValue( "csz_clouds_coverage",     p.cov );
@@ -775,6 +844,10 @@ void ApplyWeatherPreset( int w )
 	gEngfuncs.Cvar_SetValue( "csz_clouds_powder",       p.powder );
 	gEngfuncs.Cvar_SetValue( "csz_clouds_layer_height", p.height );
 	gEngfuncs.Cvar_SetValue( "csz_clouds_layer_thick",  p.thick );
+	// iter5 P5 / P1-FIX-5: per-preset edge + self-shadow (reset on every weather change => no leak).
+	gEngfuncs.Cvar_SetValue( "csz_clouds_detail",       p.detail );
+	gEngfuncs.Cvar_SetValue( "csz_clouds_erode_depth",  p.erode );
+	gEngfuncs.Cvar_SetValue( "csz_clouds_selfshadow",   p.selfsh );
 	CSZ_LogInfo( "cloudvol",
 		"[csz_clouds] weather preset %d applied (cov=%.2f dens=%.2f sigma=%.4f amb=%.2f sun=%.2f sunfwd=%.2f cap=%.2f height=%.0f thick=%.0f)",
 		w, p.cov, p.dens, p.sigma, p.amb, p.sun, p.sunfwd, p.cap, p.height, p.thick );
@@ -790,9 +863,9 @@ void ApplyWeatherTint( int w, CelLight &c )
 		return;
 	float lum = c.color[0] * 0.30f + c.color[1] * 0.59f + c.color[2] * 0.11f;
 	const float coolRain[3] = { 0.97f, 1.00f, 1.05f };
-	const float coolSnow[3] = { 0.95f, 1.00f, 1.10f };
+	const float coolSnow[3] = { 0.90f, 1.00f, 1.16f };  // P3 iter5: bluer chroma (was {0.95,1.00,1.10})
 	const float *cool   = ( w == 1 ) ? coolRain : coolSnow;
-	float        kColor = ( w == 1 ) ? 0.72f : 0.55f;
+	float        kColor = ( w == 1 ) ? 0.72f : 0.78f;   // P3 iter5: SNOW 0.68->0.78 = reads distinctly cold-blue, not neutral
 	for( int i = 0; i < 3; i++ )
 		c.color[i] = mixf( c.color[i], lum * cool[i], kColor );
 	if( w == 1 )   // RAIN: desaturate the ambient toward neutral grey.
@@ -803,6 +876,19 @@ void ApplyWeatherTint( int w, CelLight &c )
 		{
 			c.ambGround[i] = mixf( c.ambGround[i], ag, 0.55f );
 			c.ambSky[i]    = mixf( c.ambSky[i],    as, 0.45f );
+		}
+	}
+	else if( w == 2 )   // P3 iter5 SNOW: cool the AMBIENT/BASE too (not only the direct-light tint).
+	{
+		// Shift the ambient chroma toward blue-white at ~constant luminance (coolAmb mean ~1.0 => the
+		// snow deck goes COLDER without dimming -- the warm-ish dayS base was leaving it mid-grey).
+		const float coolAmb[3] = { 0.90f, 1.00f, 1.16f };
+		float ag = ( c.ambGround[0] + c.ambGround[1] + c.ambGround[2] ) / 3.0f;
+		float as = ( c.ambSky[0]    + c.ambSky[1]    + c.ambSky[2] )    / 3.0f;
+		for( int i = 0; i < 3; i++ )
+		{
+			c.ambGround[i] = mixf( c.ambGround[i], ag * coolAmb[i], 0.45f );
+			c.ambSky[i]    = mixf( c.ambSky[i],    as * coolAmb[i], 0.45f );
 		}
 	}
 }
@@ -890,13 +976,25 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	}
 
 	// time-of-day: live (engine phase + ambience nightness) or forced for capture.
-	float phase, nightness;
+	// P1: each tod also sets a per-tod light ELEVATION/AZIMUTH (todElev/todAzim) so day/sunset/
+	// night light a DISTINCT, camera-facing side => the lit side MOVES with tod (the old frozen
+	// 35/180 never moved it). tod 0 follows the map sun (-1 => use the skymath dir already in
+	// cel.dir). A user csz_clouds_sun_elev/azim >=0 still hard-overrides this below.
+	float phase, nightness, todElev, todAzim;
 	switch( tod )
 	{
-		case 1:  phase = 0.92f; nightness = 0.0f;  break;   // day (sun high)
-		case 2:  phase = 0.02f; nightness = 0.12f; break;   // sunset (sun near horizon, warm)
-		case 3:  phase = 0.50f; nightness = 1.0f;  break;   // full-moon night
-		default: phase = g_sky.ComputePhase(); nightness = clampf( view.ambience.nightness, 0.0f, 1.0f ); break;
+		case 1:  phase = 0.92f; nightness = 0.0f;  todElev = 58.0f; todAzim = 180.0f; break;  // day: high sun, top-lit caps face camera
+		case 2:  phase = 0.02f; nightness = 0.12f; todElev = 14.0f; todAzim = 165.0f; break;  // sunset: low warm sidelight
+		case 3:  phase = 0.50f; nightness = 1.0f;  todElev = 42.0f; todAzim = 200.0f; break;  // full-moon night: moon mid-high, opposite side
+		default: phase = g_sky.ComputePhase(); nightness = clampf( view.ambience.nightness, 0.0f, 1.0f ); todElev = -1.0f; todAzim = -1.0f; break;  // follow map sun
+	}
+	// P3 DECOUPLE: overcast (rain/snow) is FLAT daylight, NOT the map's golden-hour. When following
+	// the map (tod 0), pin the cloud's own phase + a high flat-day direction for overcast so a rainy/
+	// snowy sky does not inherit an orange sunset; keep map nightness so NIGHT overcast still reads
+	// dark. Clear NORMAL weather keeps the map's intentional mood (no GLOBAL neutral-phase force).
+	if( tod == 0 && weather != 0 )
+	{
+		phase = 0.92f; todElev = 60.0f; todAzim = 180.0f;
 	}
 	// --- LOOK hot params: read live + clamp; logged on change (no per-frame spam). These are
 	//     the swept-without-rebuild controls. The defaults are the iter-1 STRUCTURE-first target.
@@ -914,7 +1012,7 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	float powder      = clampf( ReadCvar( s_cvPowder,      0.4f   ), 0.0f,    3.0f    );
 	float ambientMul  = clampf( ReadCvar( s_cvAmbient,     0.9f   ), 0.0f,    4.0f    );
 	float sunI        = clampf( ReadCvar( s_cvSun,         3.2f   ), 0.0f,    12.0f   );
-	float moonI       = clampf( ReadCvar( s_cvMoon,        2.4f   ), 0.0f,    12.0f   );
+	float moonI       = clampf( ReadCvar( s_cvMoon,        1.9f   ), 0.0f,    12.0f   );
 	float moonTint    = clampf( ReadCvar( s_cvMoonTint,    1.0f   ), 0.0f,    2.0f    );
 	// STRUCTURE hot params (iter-3): stacked turrets / multi-octave valleys / self-shadow pockets /
 	// irregular base / ragged crown. Read live + clamp; folded into the LOOK change-log below.
@@ -985,10 +1083,15 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	// instead of being backlit by a near-horizon golden-hour sun. The light COLOR/intensity and
 	// ambient are unchanged (still the tod-derived warm sun / cool moon). azim<0 => a fixed
 	// default azimuth (the skymath east rise node).
-	if( sunElevOvr >= 0.0f )
+	// P1: user cvar override wins (>=0); otherwise fall back to the per-tod elevation/azimuth so the
+	// cloud is lit from a DISTINCT, camera-facing side per tod (the lit side MOVES with tod). When
+	// elevSel<0 (tod 0 with no user override) cel.dir is left at the skymath map-sun direction.
+	float elevSel = ( sunElevOvr >= 0.0f ) ? sunElevOvr : todElev;
+	float azimSel = ( sunAzimOvr >= 0.0f ) ? sunAzimOvr : todAzim;
+	if( elevSel >= 0.0f )
 	{
-		float elev = clampf( sunElevOvr, 0.0f, 90.0f );
-		float azim = ( sunAzimOvr < 0.0f ) ? skymath::kNodeYawDeg : sunAzimOvr;
+		float elev = clampf( elevSel, 0.0f, 90.0f );
+		float azim = ( azimSel < 0.0f ) ? skymath::kNodeYawDeg : azimSel;
 		skymath::ElevYawDir( elev, azim, cel.dir );
 	}
 
@@ -1069,23 +1172,60 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 		boxMax[0] = view.origin[0] + kHalfXY; boxMax[1] = view.origin[1] + kHalfXY; boxMax[2] = baseZ + layerThick;
 	}
 
-	// world-space epsilon for the broad cap-light density-gradient normal: ~1.2% of the largest
-	// box dimension so the central differences capture macro turret/cap FACE orientation (well
-	// below a turret diameter) rather than per-voxel noise. Scales with the storm footprint.
-	float boxExt = boxMax[0] - boxMin[0];
-	if( boxMax[1] - boxMin[1] > boxExt ) boxExt = boxMax[1] - boxMin[1];
-	if( boxMax[2] - boxMin[2] > boxExt ) boxExt = boxMax[2] - boxMin[2];
-	float capEps = boxExt * 0.012f;
+	// P2 FIX: world-space epsilon for the broad cap-light density-gradient normal. It MUST be a
+	// CLOUD-FEATURE scale (turret/lobe face), NOT the huge XY march-bound extent: the old
+	// `largest dim * 0.012` gave ~1440u in LAYER mode (XY=120000) = ~ the WHOLE deck, so the Z
+	// gradient tap fell OUTSIDE the slab and the cap normal had no vertical component (no lit
+	// top / shadowed underside). Derive it from the SMALLEST box dimension (the deck thickness in
+	// LAYER mode) and clamp to a sane feature-scale band so the central differences resolve real
+	// face orientation within the deck.
+	float boxMinExt = boxMax[0] - boxMin[0];
+	if( boxMax[1] - boxMin[1] < boxMinExt ) boxMinExt = boxMax[1] - boxMin[1];
+	if( boxMax[2] - boxMin[2] < boxMinExt ) boxMinExt = boxMax[2] - boxMin[2];
+	float capEps = clampf( boxMinExt * 0.20f, 60.0f, 400.0f );
 
 	// --- march constants (NOT look cvars: cost/quality knobs, fixed this phase) -----------
 	// iter-3: longer cone reach + more taps so the self-shadow spans whole turrets and lands
 	// real shadow in the valleys between stacked lobes (paired with the u_selfShadow weight).
 	const float lightReach = 3200.0f;          // cone self-shadow over several feature-diameters
-	// LAYER mode marches a thin deck to near the horizon (grazing rays are far => a big far-cap is
-	// only a resolution knob, NOT a cost knob: cost is fixed by `steps`). dbg single-box stays tight.
-	const float marchFar   = ( dbgNear >= 1 ) ? 12000.0f : 45000.0f;
-	const int   steps      = 48;
+	// LAYER mode marches a thin deck toward the horizon. The view step COUNT is ADAPTIVE (the shader
+	// derives it from stepLenMax, floored at `steps`, capped at MAX_STEPS) so grazing rays stay
+	// sampled without the fixed-940u/step horizon singularity. R3 (iter4): far cap 33000->22000 (the
+	// deck is sub-pixel well before 22000u at gameplay altitude AND the R2 elevation fade now hides
+	// the far horizon) + stepLenMax 400->220 (resolve the mid/detail cells at grazing) + MAX_STEPS
+	// 80->128 (shader). Worst case (grazing): ceil(22000/220)=100 -> <=128, ~220u/step, bounded. The
+	// R1 per-step dither + domain-warp convert any residual coarse-step banding into noise.
+	// PERF iter5 (STAGED, codex): marchFar 22000->20000, stepLenMax 220->260 (NOT 300/18000 yet).
+	// Worst case grazing: ceil(20000/260)=77 steps (<=128). The R1 per-step dither + domain-warp are
+	// step-count-INDEPENDENT, so they keep carrying the anti-fan at the coarser step. marchFar also
+	// feeds the shader far-fade at 0.70*u_marchFar (inl) -- kept coherent (reads u_marchFar). A capture
+	// must verify worst-case cloud_pass_ms (<5ms) + R5 mode1/mode3 show NO fan/rib return before any
+	// further coarsening (260/20000 -> 300/18000 is a later capture-gated pass).
+	const float marchFar   = ( dbgNear >= 1 ) ? 12000.0f : 20000.0f;
+	const int   steps      = 48;               // P0: now the MIN step count (quality floor for steep / short rays)
+	const float stepLenMax = 260.0f;           // R3/iter5: target MAX world-space step length (grazing-ray under-sampling cap)
 	const int   lightSteps = 8;                // == MAX_LIGHT cap in the shader
+	// iter4 grazing-angle knobs (read live). R1 domain-warp amplitude = toggle ? amp : 0 (0 => the
+	// shader disables the warp, for capture A/B against the per-step dither). R2 elevation fade band.
+	const bool  domainWarpOn  = ( ReadCvar( s_cvDomainWarp, 1.0f ) >= 0.5f );
+	const float domainWarpAmp = clampf( ReadCvar( s_cvDomainWarpAmp, 220.0f ), 0.0f, 2000.0f );
+	const float domainWarp    = domainWarpOn ? domainWarpAmp : 0.0f;
+	const float horizonFadeLo = clampf( ReadCvar( s_cvHorizonFadeLo, 0.01f ), -1.0f, 1.0f );
+	const float horizonFadeHi = clampf( ReadCvar( s_cvHorizonFadeHi, 0.07f ), horizonFadeLo + 1e-3f, 1.0f );
+	// P2-FIX-1 iter5: overcast decks reach the horizon (a rainy/snowy day has NO bright horizon gap),
+	// so relax the elevation fade for rain/snow => the deck stays opaque lower and COVERS the warm sky
+	// band. codex: START 0.03 (NOT 0.02 -- 0.02 re-exposes the grazing band => fan-regression risk;
+	// require an R5 grazing capture before going below 0.03). Clear NORMAL keeps the cvar value.
+	float hFadeHi = horizonFadeHi;
+	if( weather != 0 ) hFadeHi = 0.03f;
+	const int   dbgMode       = clampi( (int)( ReadCvar( s_cvDbgMode, 0.0f ) + 0.5f ), 0, 6 );
+	// P3: overcast skylight floor for skyVis -- applied ONLY for rain/snow (weather != 0) so a dense
+	// overcast deck's undersides never collapse to black; clear NORMAL keeps 0 (no contrast flattening).
+	const float skyVisFloor = ( weather != 0 ) ? 0.40f : 0.0f;
+	// iter5 P1/P2 overcast-structure controls. CPU-gated to 0 for clear NORMAL (belt-and-suspenders
+	// alongside the shader's u_weatherKind hard-gate) so weather==0 takes the byte-identical old path.
+	const float overcastVar = ( weather != 0 ) ? 0.22f : 0.0f;   // P1: low-freq billow into the coverage field
+	const float lowHaze     = ( weather != 0 ) ? 0.85f : 0.0f;   // P4-FIX iter6: 0.6->0.85 cool the residual warm engine-sky strip under the overcast deck; weather==0 stays 0 (day/w0 horizon = engine-sky scope, untouched). P2-orig: cold low-band horizon haze amplitude
 
 	float t = fmodf( ClientTime(), 3600.0f );
 	float frame = (float)( s_frame & 1023u );
@@ -1235,6 +1375,15 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	if( s_gpu.mEvolveRate >= 0 )  glUniform1f( s_gpu.mEvolveRate, evolveRate );
 	if( s_gpu.mLightReach >= 0 )  glUniform1f( s_gpu.mLightReach, lightReach );
 	if( s_gpu.mMarchFar >= 0 )    glUniform1f( s_gpu.mMarchFar, marchFar );
+	if( s_gpu.mStepLenMax >= 0 )  glUniform1f( s_gpu.mStepLenMax, stepLenMax );    // P0
+	if( s_gpu.mSkyVisFloor >= 0 ) glUniform1f( s_gpu.mSkyVisFloor, skyVisFloor );  // P3
+	if( s_gpu.mDomainWarp >= 0 )    glUniform1f( s_gpu.mDomainWarp, domainWarp );       // R1
+	if( s_gpu.mHorizonFadeLo >= 0 ) glUniform1f( s_gpu.mHorizonFadeLo, horizonFadeLo ); // R2
+	if( s_gpu.mHorizonFadeHi >= 0 ) glUniform1f( s_gpu.mHorizonFadeHi, hFadeHi );       // R2 / iter5 P2 (overcast => 0.03)
+	if( s_gpu.mDbgMode >= 0 )       glUniform1i( s_gpu.mDbgMode, dbgMode );             // R5
+	if( s_gpu.mWeatherKind >= 0 )   glUniform1i( s_gpu.mWeatherKind, weather );         // iter5 hard-gate
+	if( s_gpu.mOvercastVar >= 0 )   glUniform1f( s_gpu.mOvercastVar, overcastVar );     // iter5 P1
+	if( s_gpu.mLowHaze >= 0 )       glUniform1f( s_gpu.mLowHaze, lowHaze );             // iter5 P2
 	if( s_gpu.mTargetSize >= 0 )  glUniform2fv( s_gpu.mTargetSize, 1, fTarget );
 	if( s_gpu.mSteps >= 0 )       glUniform1i( s_gpu.mSteps, steps );
 	if( s_gpu.mLightSteps >= 0 )  glUniform1i( s_gpu.mLightSteps, lightSteps );
@@ -1263,6 +1412,7 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	float fSize[2] = { (float)fullW, (float)fullH };
 	if( s_gpu.uCloudTex >= 0 ) glUniform1i( s_gpu.uCloudTex, kSkyTmuBase + 0 );
 	if( s_gpu.uFullSize >= 0 ) glUniform2fv( s_gpu.uFullSize, 1, fSize );
+	if( s_gpu.uUpDbgMode >= 0 ) glUniform1i( s_gpu.uUpDbgMode, dbgMode );   // R5 mode 6: raw nearest upsample
 
 	glDrawArrays( GL_TRIANGLES, 0, 3 );
 	BindVao( 0 );
