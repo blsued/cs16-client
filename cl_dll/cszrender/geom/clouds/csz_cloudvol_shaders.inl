@@ -106,6 +106,10 @@ uniform float u_envWarp;       // organic silhouette perturbation amount (low-fr
 uniform float u_mid;           // MID-frequency cauliflower strength (rounded packed bumps on the OUTER half)
 uniform float u_midFreq;       // mid-frequency 3D-noise frequency (1/world-units)
 uniform float u_virga;         // faint rain/virga shaft hanging under the darkest core (0 = off)
+uniform float u_capLight;      // BROAD sun-facing CAP light (density-gradient normal); 0 = off (skips the gradient taps)
+uniform float u_shelf;         // storm BASE flatten/shelf strength (scales the underside clip-band width)
+uniform float u_mammatus;      // small downward MAMMATUS lobes hanging under the base (0 = off)
+uniform float u_capEps;        // world-space epsilon for the density-gradient cap normal (set CPU-side ~ box feature scale)
 uniform float u_sunForward;    // DIRECT-sun forward-scatter strength (blows sun-facing upper lobes to near-white)
 uniform float u_sunG;          // direct-sun forward HG anisotropy g (0.78-0.85)
 uniform float u_lightReach;    // TOTAL cone light-march reach toward the lit body (world units)
@@ -173,7 +177,7 @@ float CloudShapeEnvelope( vec3 p, out float h )
 	vec3 q  = ( p - bc ) / bh;                          // box-normalized [-1,1]^3
 
 	float bound = max( max( abs( q.x ), abs( q.y ) ), abs( q.z ) );
-	h = clamp( ( q.z + 0.52 ) / 1.35, 0.0, 1.0 );       // 0 at flat storm base .. 1 at anvil crown
+	h = clamp( ( q.z + 0.55 ) / 1.32, 0.0, 1.0 );       // 0 at flat storm base .. 1 at anvil crown
 	if( bound > 0.999 )
 		return 0.0;
 
@@ -181,40 +185,45 @@ float CloudShapeEnvelope( vec3 p, out float h )
 	// body-noise frequency, used to warp the lobe shell into an organic silhouette.
 	float low = texture( u_base3d, ( p + vec3( u_time * 0.25, 0.0, 0.0 ) ) * ( 1.0 / 8500.0 ) ).r;
 
-	// ============================ STORM-CELL ENVELOPE (codex #1) ============================
-	// ~18 lobes laid out as a cumulonimbus, NOT a single puff: a wide flat shelf BASE +
-	// stacked vertical TOWER groups + a cluster of small crown TURRETS (low smin k so the
-	// individual cauliflower forms SURVIVE instead of melting into one blob) + a flattened,
-	// edge-broken ANVIL near the top. Tower reaches ~q.z 0.7-0.85 (much taller) and the base
-	// spreads to ~q.x/q.y 0.8 (much wider) than the old 7-lobe puff.
+	// ===================== WIDE STORM-CELL ENVELOPE (codex compare2 #1) =====================
+	// The old "v4 storm" still read as a vertical PLUME: the bright mass (towers+crown turrets)
+	// was packed onto a near-central column (x in [-0.3,0.3]) while only the dark flat base spread
+	// wide. This rebuild lays the cloud out as a WIDE WEATHER SYSTEM -- a broad flat base shelf, a
+	// wide mother body, and THREE turret GROUPS pushed out to the LEFT / CENTER / RIGHT (so the lit
+	// crown is a cluster of cauliflower towers strung ACROSS the width, not one stack) topped by a
+	// flat, downwind-dragged ANVIL. 17 lobes; small smin on the turrets so each form survives.
 
-	// ---- WIDE FLAT STORM BASE: 4 broad, flattened lobes = the dark anvil-cloud shelf ----
-	float d = sdEllipsoid( q - vec3(  0.00,  0.00, -0.42 ), vec3( 0.82, 0.70, 0.22 ) );
-	d = smin( d, sdEllipsoid( q - vec3( -0.30,  0.18, -0.40 ), vec3( 0.50, 0.46, 0.20 ) ), 0.20 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.34, -0.16, -0.40 ), vec3( 0.48, 0.44, 0.20 ) ), 0.20 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.10,  0.34, -0.38 ), vec3( 0.44, 0.40, 0.20 ) ), 0.20 );
+	// ---- WIDE FLAT BASE SHELF: the broadest element (~3x a tower wide), height squished to a thin
+	//      slab -> the dark arcus/shelf that presses on the horizon (low smin = one continuous slab).
+	float d = sdEllipsoid( q - vec3(  0.00,  0.00, -0.46 ), vec3( 0.92, 0.74, 0.17 ) );
+	d = smin( d, sdEllipsoid( q - vec3( -0.48,  0.10, -0.44 ), vec3( 0.46, 0.42, 0.15 ) ), 0.22 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.50, -0.08, -0.44 ), vec3( 0.46, 0.42, 0.15 ) ), 0.22 );
 
-	// ---- STACKED TOWER GROUPS: the vertical cumulonimbus build-up (tall ellipsoids) ----
-	d = smin( d, sdEllipsoid( q - vec3(  0.00, -0.04,  0.10 ), vec3( 0.40, 0.36, 0.62 ) ), 0.18 );
-	d = smin( d, sdEllipsoid( q - vec3( -0.30,  0.10, -0.02 ), vec3( 0.32, 0.30, 0.46 ) ), 0.18 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.30,  0.06,  0.00 ), vec3( 0.30, 0.28, 0.44 ) ), 0.18 );
+	// ---- WIDE MOTHER BODY: a broad rounded bulk low-center, the mass the towers grow out of. ----
+	d = smin( d, sdEllipsoid( q - vec3(  0.00, -0.02, -0.14 ), vec3( 0.66, 0.56, 0.34 ) ), 0.24 );
 
-	// ---- CROWN TURRETS: 8 smaller lobes clustered on the upper towers, SMALL smin k=0.11
-	//      so each cauliflower turret stays distinct (codex: reduce blend so forms survive). ----
-	d = smin( d, sdEllipsoid( q - vec3(  0.02, -0.06,  0.55 ), vec3( 0.24, 0.22, 0.28 ) ), 0.11 );
-	d = smin( d, sdEllipsoid( q - vec3( -0.16,  0.08,  0.48 ), vec3( 0.20, 0.19, 0.24 ) ), 0.11 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.18, -0.02,  0.46 ), vec3( 0.21, 0.20, 0.25 ) ), 0.11 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.00,  0.16,  0.40 ), vec3( 0.19, 0.18, 0.22 ) ), 0.11 );
-	d = smin( d, sdEllipsoid( q - vec3( -0.26, -0.04,  0.30 ), vec3( 0.18, 0.17, 0.22 ) ), 0.11 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.28,  0.12,  0.28 ), vec3( 0.18, 0.17, 0.22 ) ), 0.11 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.08, -0.22,  0.34 ), vec3( 0.18, 0.17, 0.21 ) ), 0.11 );
-	d = smin( d, sdEllipsoid( q - vec3( -0.06,  0.02,  0.70 ), vec3( 0.18, 0.16, 0.20 ) ), 0.11 );
+	// ---- THREE TURRET GROUPS offset LEFT / CENTER / RIGHT (kill the single-axis column). Each
+	//      group = a tall stem ellipsoid + 2-3 cauliflower turrets climbing it; small smin (0.12)
+	//      so the individual turrets stay distinct instead of melting into one blob. ----
+	// -- LEFT group (lower / shorter) --
+	d = smin( d, sdEllipsoid( q - vec3( -0.44,  0.06,  0.02 ), vec3( 0.30, 0.28, 0.40 ) ), 0.16 );
+	d = smin( d, sdEllipsoid( q - vec3( -0.48,  0.02,  0.24 ), vec3( 0.20, 0.19, 0.22 ) ), 0.12 );
+	d = smin( d, sdEllipsoid( q - vec3( -0.34, -0.08,  0.32 ), vec3( 0.16, 0.15, 0.18 ) ), 0.12 );
+	// -- CENTER group (tallest = the main cumulonimbus tower) --
+	d = smin( d, sdEllipsoid( q - vec3(  0.02,  0.00,  0.16 ), vec3( 0.34, 0.32, 0.52 ) ), 0.16 );
+	d = smin( d, sdEllipsoid( q - vec3( -0.02,  0.06,  0.46 ), vec3( 0.22, 0.21, 0.26 ) ), 0.12 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.10, -0.04,  0.52 ), vec3( 0.19, 0.18, 0.22 ) ), 0.12 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.00,  0.10,  0.62 ), vec3( 0.17, 0.16, 0.19 ) ), 0.12 );
+	// -- RIGHT group (medium) --
+	d = smin( d, sdEllipsoid( q - vec3(  0.42, -0.04,  0.04 ), vec3( 0.30, 0.28, 0.42 ) ), 0.16 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.46,  0.06,  0.28 ), vec3( 0.20, 0.19, 0.23 ) ), 0.12 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.32, -0.02,  0.38 ), vec3( 0.17, 0.16, 0.20 ) ), 0.12 );
 
-	// ---- ANVIL / SHELF lobe near the top, offset downwind (+x), its rim BROKEN by two small
-	//      turrets so it reads as a ragged spreading shelf, NOT a smooth mushroom cap. ----
-	d = smin( d, sdEllipsoid( q - vec3(  0.34,  0.20,  0.62 ), vec3( 0.50, 0.34, 0.13 ) ), 0.16 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.50,  0.16,  0.60 ), vec3( 0.16, 0.15, 0.12 ) ), 0.10 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.20,  0.30,  0.62 ), vec3( 0.15, 0.14, 0.12 ) ), 0.10 );
+	// ---- TOP ANVIL / SHELF: wide (x ~3.5x a tower), flattened, dragged DOWNWIND (+x), its rim
+	//      broken by two small turrets so it reads as a ragged spreading anvil, NOT a mushroom cap.
+	d = smin( d, sdEllipsoid( q - vec3(  0.14,  0.04,  0.66 ), vec3( 0.74, 0.54, 0.12 ) ), 0.20 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.58,  0.10,  0.64 ), vec3( 0.20, 0.18, 0.11 ) ), 0.12 );
+	d = smin( d, sdEllipsoid( q - vec3( -0.36, -0.06,  0.62 ), vec3( 0.18, 0.16, 0.11 ) ), 0.12 );
 
 	// perturb the implicit surface with low-freq noise -> ragged, organic, non-symmetric edge.
 	d += ( 0.5 - low ) * u_envWarp;
@@ -222,17 +231,30 @@ float CloudShapeEnvelope( vec3 p, out float h )
 	// SDF -> soft 0..1 mask (deep inside -> 1, outside the shell -> 0).
 	float env = smoothstep( 0.12, -0.10, d );
 
-	// FLAT WIDE STORM-DARK BASE (codex #2): a SHARP underside band (flat shelf, only faint
-	// noise wobble) keeps density high just above a defined flat base, then cuts hard below it.
-	float baseZ = -0.50 + ( low - 0.5 ) * 0.05;
-	env *= smoothstep( baseZ, baseZ + 0.07, q.z );
+	// FLAT WIDE STORM-DARK BASE (codex #2): a SHARP underside band keeps density high just above a
+	// defined flat base, then cuts hard below it. u_shelf scales the band width (1 = default flat
+	// shelf; higher = softer/thicker shelf transition).
+	float baseZ  = -0.54 + ( low - 0.5 ) * 0.05;
+	float softH  = 0.06 * clamp( u_shelf, 0.1, 4.0 );
+	env *= smoothstep( baseZ, baseZ + softH, q.z );
 
-	// optional faint VIRGA / rain shaft hanging under the darkest core (hot toggle, codex #2).
+	// optional faint VIRGA / rain shaft hanging under the darkest core (hot toggle, codex #2): a
+	// WIDE low-alpha cool-grey streak covering ~40-70% of the base width (not a thin pencil column).
 	if( u_virga > 0.001 )
 	{
-		float shaftXY = exp( -dot( q.xy, q.xy ) / 0.12 );          // narrow column on the core axis
-		float below   = smoothstep( baseZ, baseZ - 0.50, q.z );    // only below the base, fading down
-		env = max( env, u_virga * 0.16 * shaftXY * below * mix( 0.5, 1.0, low ) );
+		float shaftXY = exp( -dot( q.xy, q.xy ) / 0.34 );          // wide column (~0.55 radius) under the core
+		float below   = smoothstep( baseZ, baseZ - 0.55, q.z );    // only below the base, fading down
+		env = max( env, u_virga * 0.14 * shaftXY * below * mix( 0.5, 1.0, low ) );
+	}
+
+	// optional MAMMATUS: a few small low-alpha downward bumps hanging under the base (hot toggle,
+	// codex #2). Worley-billow lumps gated to a thin band just below the shelf and the core width.
+	if( u_mammatus > 0.001 )
+	{
+		float lump    = texture( u_base3d, ( p + vec3( 0.0, 0.0, u_time * 0.1 ) ) * ( 1.0 / 1500.0 ) ).g;
+		float mamBand = smoothstep( baseZ + 0.03, baseZ - 0.12, q.z );   // just under the shelf
+		float mamWide = 1.0 - smoothstep( 0.45, 0.80, length( q.xy ) );  // under the core footprint
+		env = max( env, u_mammatus * 0.16 * mamBand * mamWide * smoothstep( 0.45, 0.82, lump ) );
 	}
 
 	// SAFETY fade ONLY: guarantee density -> 0 before the box faces over the outer u_falloff band.
@@ -445,6 +467,11 @@ void main()
 			float skyVis = exp( -0.5 * u_sigmaT * TraceDensityUp( p, 3, 900.0 ) );
 			vec3  ambient = u_ambSky * skyVis * mix( 0.35, 1.0, hf )
 			              + u_ambGround * 0.35 * ( 1.0 - hf );
+			// DESATURATE the cool sky-ambient inside dense / shadowed cloud (codex #6): shadows must
+			// read NEUTRAL GREY, not blue. Blend the ambient toward its own luminance where density is
+			// high (deep cores) so we lose the "blue-grey smoke" cast without flattening the lit caps.
+			float ambGrey = dot( ambient, vec3( 0.3333 ) );
+			ambient = mix( ambient, vec3( ambGrey ), 0.40 * smoothstep( 0.10, 0.55, dens ) );
 
 			// energy-conserving in-scatter slice (Beer-Lambert)
 			float stepT = exp( -u_sigmaT * dens * stepLen );
@@ -455,10 +482,30 @@ void main()
 				float sunVis     = exp( -tauL * u_selfShadow );
 				float directBeam = u_sunForward * sunVis * hg( cosT, u_sunG );
 
+				// BROAD SUNLIT CAP (codex compare2 lighting #1): the bright areas were only thin EDGES
+				// (silver rim) -- not broad sun-facing FACES. Estimate a surface NORMAL from the density
+				// gradient (central differences on SampleCloudDensity) and add a broad wrap-light on the
+				// SUN-FACING cap/turret faces. Gated by u_capLight (0 => skip the 6 gradient taps), by sun
+				// visibility (shadowed cores stay dark) and by height (the base shelf stays a dark slab).
+				float capLight = 0.0;
+				if( u_capLight > 0.001 )
+				{
+					float e  = u_capEps;
+					float gx = SampleCloudDensity( p + vec3( e, 0.0, 0.0 ), 0 ) - SampleCloudDensity( p - vec3( e, 0.0, 0.0 ), 0 );
+					float gy = SampleCloudDensity( p + vec3( 0.0, e, 0.0 ), 0 ) - SampleCloudDensity( p - vec3( 0.0, e, 0.0 ), 0 );
+					float gz = SampleCloudDensity( p + vec3( 0.0, 0.0, e ), 0 ) - SampleCloudDensity( p - vec3( 0.0, 0.0, e ), 0 );
+					vec3  g  = vec3( gx, gy, gz );
+					float gl = length( g );
+					vec3  N  = ( gl > 1e-6 ) ? ( -g / gl ) : vec3( 0.0, 0.0, 1.0 );   // outward (toward thinner cloud)
+					float wrap = clamp( dot( N, u_lightDir ) * 0.5 + 0.5, 0.0, 1.0 );
+					capLight = u_capLight * pow( wrap, 2.0 ) * sunVis * mix( 0.25, 1.0, hf );
+				}
+
 				// neutral-warm cloud ALBEDO on the DIRECT-lit response (codex #6): sun-lit caps read
 				// warm-white; the cool sky AMBIENT below stays separate so shadows go grey, not blue.
-				vec3 capAlbedo = vec3( 1.0, 0.96, 0.90 );
-				vec3 S = u_lightColor * capAlbedo * ( ( scatter + directBeam ) * powderTerm + rim ) + ambient;
+				// capLight is added OUTSIDE the powder term so the broad faces are not edge-darkened.
+				vec3 capAlbedo = vec3( 1.0, 0.94, 0.84 );
+				vec3 S = u_lightColor * capAlbedo * ( ( scatter + directBeam ) * powderTerm + capLight + rim ) + ambient;
 			L += Tview * ( 1.0 - stepT ) * S;
 			Tview *= stepT;
 			if( Tview < 0.01 )

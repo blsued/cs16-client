@@ -125,6 +125,10 @@ cvar_t *s_cvMidScale;    // csz_clouds_midscale    2200  [800..6000] mid-freq ti
 cvar_t *s_cvVirga;       // csz_clouds_virga       0.0   [0..1]      faint rain/virga shaft under the darkest core (0=off)
 cvar_t *s_cvSunFwd;      // csz_clouds_sunfwd      1.6   [0..5]      DIRECT-sun forward-scatter strength (near-white sun-lit caps)
 cvar_t *s_cvSunG;        // csz_clouds_sung        0.82  [0..0.95]   direct-sun forward HG anisotropy g
+// CAP-LIGHT / BASE hot cvars (codex compare2 iter): broad sun-facing cap faces + storm-base shelf/mammatus.
+cvar_t *s_cvCapLight;    // csz_clouds_caplight    1.0   [0..4]      BROAD sun-facing cap light (density-gradient normal); 0=off (skips gradient taps)
+cvar_t *s_cvShelf;       // csz_clouds_shelf       1.0   [0.1..4]    storm-base flatten/shelf band width scale
+cvar_t *s_cvMammatus;    // csz_clouds_mammatus    0.35  [0..1]      small downward mammatus lobes under the base (0=off)
 
 void RegisterCvarsImpl()
 {
@@ -140,11 +144,13 @@ void RegisterCvarsImpl()
 	// fixed sky-vantage capture camera's view (see recommended capture args in the handoff).
 	s_cvDbgBoxX   = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_x",      "150",  FCVAR_CLIENTDLL );
 	s_cvDbgBoxY   = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_y",      "2850", FCVAR_CLIENTDLL );
-	// STORM-SCALE default debug box (codex #7): a WEATHER SYSTEM over the map, not a prop. Wider
-	// X/Y footprint (radius 4000) + a TALLER vertical extent (zrad 5000) so the base sits near the
-	// horizon and the towers/anvil reach the upper sky. box_z raised so the flat base clears terrain.
-	s_cvDbgBoxZ    = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_z",      "3200", FCVAR_CLIENTDLL );
-	s_cvDbgBoxRad  = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_radius", "4000", FCVAR_CLIENTDLL );
+	// STORM-SCALE default debug box (codex compare2 #7): a WIDE WEATHER SYSTEM over the map, not a
+	// prop or a plume. The plume read came partly from a box that was TALLER than wide -- so widen
+	// the X/Y footprint to 6000 (12000u across, ~2x the old) while keeping a tall vertical extent
+	// (zrad 5000), so width > height and the silhouette reads as a storm cell across the background.
+	// box_z lowered so the flat base sits closer to the horizon (still above terrain at the vantage).
+	s_cvDbgBoxZ    = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_z",      "3000", FCVAR_CLIENTDLL );
+	s_cvDbgBoxRad  = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_radius", "6000", FCVAR_CLIENTDLL );
 	s_cvDbgBoxZRad = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_box_zrad",   "5000", FCVAR_CLIENTDLL );
 	// LOOK hot cvars (swept live, no rebuild). Defaults = the iter-2 SUBSTANCE-LOCK target:
 	// coverage 0.6 + density 2.5 + basescale 2200 gave a substantial, rounded, billowy cumulus
@@ -161,20 +167,27 @@ void RegisterCvarsImpl()
 	s_cvSigma       = gEngfuncs.pfnRegisterVariable( "csz_clouds_sigma",       "0.0050",FCVAR_CLIENTDLL );
 	s_cvBaseScale   = gEngfuncs.pfnRegisterVariable( "csz_clouds_basescale",   "8000",  FCVAR_CLIENTDLL );
 	s_cvDetail      = gEngfuncs.pfnRegisterVariable( "csz_clouds_detail",      "0.70",  FCVAR_CLIENTDLL );
-	s_cvDetailScale = gEngfuncs.pfnRegisterVariable( "csz_clouds_detailscale", "1100",  FCVAR_CLIENTDLL );
+	s_cvDetailScale = gEngfuncs.pfnRegisterVariable( "csz_clouds_detailscale", "1400",  FCVAR_CLIENTDLL );
 	s_cvHBase       = gEngfuncs.pfnRegisterVariable( "csz_clouds_hbase",       "0.12",  FCVAR_CLIENTDLL );  // DEPRECATED (v3)
 	s_cvHTop        = gEngfuncs.pfnRegisterVariable( "csz_clouds_htop",        "0.5",   FCVAR_CLIENTDLL );  // DEPRECATED (v3)
 	s_cvFalloff     = gEngfuncs.pfnRegisterVariable( "csz_clouds_falloff",     "0.12",  FCVAR_CLIENTDLL );  // safety fade only now
-	s_cvSilver      = gEngfuncs.pfnRegisterVariable( "csz_clouds_silver",      "0.6",   FCVAR_CLIENTDLL );
-	s_cvSilverWidth = gEngfuncs.pfnRegisterVariable( "csz_clouds_silver_width","2.0",   FCVAR_CLIENTDLL );
+	// codex compare2: REDUCE the thin silver rim (it was reading as foam/screen noise, not a cloud
+	// edge) -- silver ~0.6x, silver_width ~0.45x of the prior storm defaults -> a razor edge only.
+	s_cvSilver      = gEngfuncs.pfnRegisterVariable( "csz_clouds_silver",      "0.38",  FCVAR_CLIENTDLL );
+	s_cvSilverWidth = gEngfuncs.pfnRegisterVariable( "csz_clouds_silver_width","0.9",   FCVAR_CLIENTDLL );
 	s_cvPowder      = gEngfuncs.pfnRegisterVariable( "csz_clouds_powder",      "0.45",  FCVAR_CLIENTDLL );
-	s_cvAmbient     = gEngfuncs.pfnRegisterVariable( "csz_clouds_ambient",     "0.40",  FCVAR_CLIENTDLL );  // LOW (codex #3): dark cores, NOT flat
+	// codex compare2: ambient stays LOW (effective ~0.13 normalized after the bluish ambSky scale)
+	// so cores read deep grey; the new broad cap-light + lower selfshadow do the brightening, NOT amb.
+	s_cvAmbient     = gEngfuncs.pfnRegisterVariable( "csz_clouds_ambient",     "0.35",  FCVAR_CLIENTDLL );
 	s_cvSun         = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun",         "3.2",   FCVAR_CLIENTDLL );
 	// CLOUD-ONLY sun-direction override (does NOT touch the engine sun or any other system):
 	// -1 = follow the tod/skymath sun (production behavior UNCHANGED). When sun_elev>=0 the cloud's
 	// light direction is rebuilt from (sun_elev,sun_azim) so the lit cauliflower tops can face up/camera.
-	s_cvSunElev     = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun_elev",    "-1",    FCVAR_CLIENTDLL );
-	s_cvSunAzim     = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun_azim",    "-1",    FCVAR_CLIENTDLL );
+	// codex compare2 #7: DEFAULT the cloud-only sun so the broad sunlit caps FACE the camera. The
+	// elev55 capture hid the lit faces (sun behind/over the top); elev~35 + azim~180 lights the
+	// camera-facing side so the warm-white cap faces show. Still HOT/overridable (-1 = follow tod).
+	s_cvSunElev     = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun_elev",    "35",    FCVAR_CLIENTDLL );
+	s_cvSunAzim     = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun_azim",    "180",   FCVAR_CLIENTDLL );
 	s_cvMoon        = gEngfuncs.pfnRegisterVariable( "csz_clouds_moon",        "2.4",   FCVAR_CLIENTDLL );
 	s_cvMoonTint    = gEngfuncs.pfnRegisterVariable( "csz_clouds_moontint",    "1.0",   FCVAR_CLIENTDLL );
 	// STRUCTURE hot cvars (iter-3): stacked cauliflower turrets + shadowed valleys + irregular base.
@@ -182,7 +195,9 @@ void RegisterCvarsImpl()
 	s_cvBillow      = gEngfuncs.pfnRegisterVariable( "csz_clouds_billow",      "0.10",  FCVAR_CLIENTDLL );  // DEPRECATED (v3): turret hard-carve removed
 	s_cvErodeDepth  = gEngfuncs.pfnRegisterVariable( "csz_clouds_erode_depth", "0.30",  FCVAR_CLIENTDLL );
 	s_cvErodeOct    = gEngfuncs.pfnRegisterVariable( "csz_clouds_erode_oct",   "3",     FCVAR_CLIENTDLL );
-	s_cvSelfShadow  = gEngfuncs.pfnRegisterVariable( "csz_clouds_selfshadow",  "1.60",  FCVAR_CLIENTDLL );  // ~1.8x (codex #3): dark shadowed cores
+	// codex compare2: LOWER selfshadow (1.6 -> 0.85) so cores read DEEP GREY, not the black-smoke
+	// charcoal the prior 1.6 produced; the cap-light + tonal range keep the lit/shadow contrast.
+	s_cvSelfShadow  = gEngfuncs.pfnRegisterVariable( "csz_clouds_selfshadow",  "0.85",  FCVAR_CLIENTDLL );
 	s_cvBaseIrreg   = gEngfuncs.pfnRegisterVariable( "csz_clouds_base_irreg",  "0.6",   FCVAR_CLIENTDLL );  // DEPRECATED (v3)
 	s_cvTowerVar    = gEngfuncs.pfnRegisterVariable( "csz_clouds_tower_var",   "0.28",  FCVAR_CLIENTDLL );  // DEPRECATED (v3)
 	s_cvEnvWarp     = gEngfuncs.pfnRegisterVariable( "csz_clouds_envwarp",     "0.12",  FCVAR_CLIENTDLL );
@@ -192,6 +207,10 @@ void RegisterCvarsImpl()
 	s_cvVirga       = gEngfuncs.pfnRegisterVariable( "csz_clouds_virga",       "0.0",   FCVAR_CLIENTDLL );
 	s_cvSunFwd      = gEngfuncs.pfnRegisterVariable( "csz_clouds_sunfwd",      "1.6",   FCVAR_CLIENTDLL );
 	s_cvSunG        = gEngfuncs.pfnRegisterVariable( "csz_clouds_sung",        "0.82",  FCVAR_CLIENTDLL );
+	// CAP-LIGHT / BASE hot cvars (codex compare2): broad sun-facing cap faces + storm base shelf/mammatus.
+	s_cvCapLight    = gEngfuncs.pfnRegisterVariable( "csz_clouds_caplight",    "1.0",   FCVAR_CLIENTDLL );
+	s_cvShelf       = gEngfuncs.pfnRegisterVariable( "csz_clouds_shelf",       "1.0",   FCVAR_CLIENTDLL );
+	s_cvMammatus    = gEngfuncs.pfnRegisterVariable( "csz_clouds_mammatus",    "0.35",  FCVAR_CLIENTDLL );
 	s_cvarsReady = true;
 	CSZ_LogDev( "cloudvol", "cvars registered (csz_clouds + _tod/_res/_perf/_dbg_* + LOOK: coverage/density/sigma/basescale/detail/detailscale/hbase/htop/falloff/silver/silver_width/powder/ambient/sun/sun_elev/sun_azim/moon/moontint + STRUCTURE: billow/erode_depth/erode_oct/selfshadow/base_irreg/tower_var)" );
 }
@@ -381,6 +400,7 @@ struct VolGpu
 	int mFalloff, mHBase, mHTop, mPowder, mSilverWidth;
 	int mBillow, mErodeDepth, mErodeOct, mSelfShadow, mBaseIrreg, mTowerVar, mEnvWarp;
 	int mMid, mMidFreq, mVirga, mSunForward, mSunG;
+	int mCapLight, mShelf, mMammatus, mCapEps;
 	int mDepthTex, mZNear, mZFar, mInvViewProj, mBase3d, mDetail3d;
 	// upsample uniforms
 	int uCloudTex, uFullSize;
@@ -613,6 +633,10 @@ void BuildPrograms()
 	s_gpu.mVirga       = UniformLoc( s_gpu.march, "u_virga" );
 	s_gpu.mSunForward  = UniformLoc( s_gpu.march, "u_sunForward" );
 	s_gpu.mSunG        = UniformLoc( s_gpu.march, "u_sunG" );
+	s_gpu.mCapLight    = UniformLoc( s_gpu.march, "u_capLight" );
+	s_gpu.mShelf       = UniformLoc( s_gpu.march, "u_shelf" );
+	s_gpu.mMammatus    = UniformLoc( s_gpu.march, "u_mammatus" );
+	s_gpu.mCapEps      = UniformLoc( s_gpu.march, "u_capEps" );
 	s_gpu.mLightReach  = UniformLoc( s_gpu.march, "u_lightReach" );
 	s_gpu.mMarchFar    = UniformLoc( s_gpu.march, "u_marchFar" );
 	s_gpu.mTargetSize  = UniformLoc( s_gpu.march, "u_targetSize" );
@@ -804,6 +828,10 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	float virga       = clampf( ReadCvar( s_cvVirga,       0.0f   ), 0.0f,    1.0f    );
 	float sunFwd      = clampf( ReadCvar( s_cvSunFwd,      1.6f   ), 0.0f,    5.0f    );
 	float sunG        = clampf( ReadCvar( s_cvSunG,        0.82f  ), 0.0f,    0.95f   );
+	// CAP-LIGHT / BASE hot params (codex compare2): broad sun-facing cap faces + base shelf/mammatus.
+	float capLight    = clampf( ReadCvar( s_cvCapLight,    1.0f   ), 0.0f,    4.0f    );
+	float shelf       = clampf( ReadCvar( s_cvShelf,       1.0f   ), 0.1f,    4.0f    );
+	float mammatus    = clampf( ReadCvar( s_cvMammatus,    0.35f  ), 0.0f,    1.0f    );
 	float midFreq     = 1.0f / midScale;
 	// CLOUD-ONLY sun-direction override: -1 = follow the tod/skymath sun (production unchanged).
 	// elev>=0 rebuilds the cloud light dir from (elev,azim); azim<0 falls back to a fixed azimuth.
@@ -913,13 +941,21 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	else
 	{
 		const float kOffX = 3600.0f;   // mid-range east of spawn (visible cloud SIDE for a horizon shot)
-		const float kHalfX = 3000.0f, kHalfY = 3000.0f;   // ~6000u storm footprint (codex #7: weather system)
+		const float kHalfX = 4500.0f, kHalfY = 4500.0f;   // ~9000u WIDE storm footprint (codex compare2 #7: width > height)
 		const float kZ0 = 400.0f, kZ1 = 8000.0f;          // tall storm build-up (~7600u: base near horizon -> anvil high)
 		float cx = s_anchor[0] + kOffX;
 		float cy = s_anchor[1];
 		boxMin[0] = cx - kHalfX; boxMin[1] = cy - kHalfY; boxMin[2] = s_anchor[2] + kZ0;
 		boxMax[0] = cx + kHalfX; boxMax[1] = cy + kHalfY; boxMax[2] = s_anchor[2] + kZ1;
 	}
+
+	// world-space epsilon for the broad cap-light density-gradient normal: ~1.2% of the largest
+	// box dimension so the central differences capture macro turret/cap FACE orientation (well
+	// below a turret diameter) rather than per-voxel noise. Scales with the storm footprint.
+	float boxExt = boxMax[0] - boxMin[0];
+	if( boxMax[1] - boxMin[1] > boxExt ) boxExt = boxMax[1] - boxMin[1];
+	if( boxMax[2] - boxMin[2] > boxExt ) boxExt = boxMax[2] - boxMin[2];
+	float capEps = boxExt * 0.012f;
 
 	// --- march constants (NOT look cvars: cost/quality knobs, fixed this phase) -----------
 	// iter-3: longer cone reach + more taps so the self-shadow spans whole turrets and lands
@@ -1069,6 +1105,10 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	if( s_gpu.mVirga >= 0 )       glUniform1f( s_gpu.mVirga, virga );
 	if( s_gpu.mSunForward >= 0 )  glUniform1f( s_gpu.mSunForward, sunFwd );
 	if( s_gpu.mSunG >= 0 )        glUniform1f( s_gpu.mSunG, sunG );
+	if( s_gpu.mCapLight >= 0 )    glUniform1f( s_gpu.mCapLight, capLight );
+	if( s_gpu.mShelf >= 0 )       glUniform1f( s_gpu.mShelf, shelf );
+	if( s_gpu.mMammatus >= 0 )    glUniform1f( s_gpu.mMammatus, mammatus );
+	if( s_gpu.mCapEps >= 0 )      glUniform1f( s_gpu.mCapEps, capEps );
 	if( s_gpu.mLightReach >= 0 )  glUniform1f( s_gpu.mLightReach, lightReach );
 	if( s_gpu.mMarchFar >= 0 )    glUniform1f( s_gpu.mMarchFar, marchFar );
 	if( s_gpu.mTargetSize >= 0 )  glUniform2fv( s_gpu.mTargetSize, 1, fTarget );
