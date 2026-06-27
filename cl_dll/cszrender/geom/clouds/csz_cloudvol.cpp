@@ -127,8 +127,19 @@ cvar_t *s_cvSunFwd;      // csz_clouds_sunfwd      1.6   [0..5]      DIRECT-sun 
 cvar_t *s_cvSunG;        // csz_clouds_sung        0.82  [0..0.95]   direct-sun forward HG anisotropy g
 // CAP-LIGHT / BASE hot cvars (codex compare2 iter): broad sun-facing cap faces + storm-base shelf/mammatus.
 cvar_t *s_cvCapLight;    // csz_clouds_caplight    1.0   [0..4]      BROAD sun-facing cap light (density-gradient normal); 0=off (skips gradient taps)
-cvar_t *s_cvShelf;       // csz_clouds_shelf       1.0   [0.1..4]    storm-base flatten/shelf band width scale
-cvar_t *s_cvMammatus;    // csz_clouds_mammatus    0.35  [0..1]      small downward mammatus lobes under the base (0=off)
+cvar_t *s_cvShelf;       // csz_clouds_shelf       1.0   [0.1..4]    storm-base flatten/shelf band width scale (DEPRECATED v5: layer pivot)
+cvar_t *s_cvMammatus;    // csz_clouds_mammatus    0.35  [0..1]      small downward mammatus lobes under the base (DEPRECATED v5: layer pivot)
+// LAYER + WEATHER + ANIMATION hot cvars (v5 PIVOT: world-space coverage-driven cloud DECK).
+// csz_clouds_weather is the headline knob: switching it pushes a 3-state PRESET into the
+// individual look cvars (so each stays HOT for tuning). The layer/wind/evolve cvars place and
+// animate the deck. The old single-hero-box STORM cvars (shelf/mammatus/virga/envwarp/falloff)
+// are now inert (the layer has no sculpted envelope); kept registered so old configs don't error.
+cvar_t *s_cvWeather;     // csz_clouds_weather       0     0=normal scattered cumulus / 1=rain overcast / 2=snow overcast
+cvar_t *s_cvLayerHeight; // csz_clouds_layer_height  2600  [200..12000] cloud-BASE altitude above the spawn anchor (world-u)
+cvar_t *s_cvLayerThick;  // csz_clouds_layer_thick   850   [120..6000]  cloud-DECK thickness (world-u)
+cvar_t *s_cvWindDir;     // csz_clouds_wind_dir      45    [0..360]     wind azimuth (deg) for the horizontal drift
+cvar_t *s_cvWindSpeed;   // csz_clouds_wind_speed    60    [0..600]     horizontal drift speed (world-u/sec)
+cvar_t *s_cvEvolve;      // csz_clouds_evolve        35    [0..400]     volume-EVOLVE (morph) rate
 
 void RegisterCvarsImpl()
 {
@@ -162,23 +173,26 @@ void RegisterCvarsImpl()
 	// v4 STORM defaults (codex-compare iter): higher coverage/density/sigma + strong direct-sun tonal
 	// range + low ambient + sharper thin-shell erosion + mid-freq cauliflower = a tall, dark-based,
 	// high-contrast STORM cell, not a soft isolated puff. All still HOT (swept without a rebuild).
-	s_cvCoverage    = gEngfuncs.pfnRegisterVariable( "csz_clouds_coverage",    "0.58",  FCVAR_CLIENTDLL );
-	s_cvDensity     = gEngfuncs.pfnRegisterVariable( "csz_clouds_density",     "1.9",   FCVAR_CLIENTDLL );
-	s_cvSigma       = gEngfuncs.pfnRegisterVariable( "csz_clouds_sigma",       "0.0050",FCVAR_CLIENTDLL );
-	s_cvBaseScale   = gEngfuncs.pfnRegisterVariable( "csz_clouds_basescale",   "8000",  FCVAR_CLIENTDLL );
+	// v5 PIVOT defaults = the NORMAL scattered-cumulus preset (csz_clouds_weather 0): low coverage
+	// (isolated puffs over blue sky), moderate density, smaller base cells (a FIELD of clouds, not
+	// one mass), brighter warm ambient. csz_clouds_weather writeback re-applies these on switch.
+	s_cvCoverage    = gEngfuncs.pfnRegisterVariable( "csz_clouds_coverage",    "0.40",  FCVAR_CLIENTDLL );
+	s_cvDensity     = gEngfuncs.pfnRegisterVariable( "csz_clouds_density",     "1.15",  FCVAR_CLIENTDLL );
+	s_cvSigma       = gEngfuncs.pfnRegisterVariable( "csz_clouds_sigma",       "0.0045",FCVAR_CLIENTDLL );
+	s_cvBaseScale   = gEngfuncs.pfnRegisterVariable( "csz_clouds_basescale",   "4200",  FCVAR_CLIENTDLL );
 	s_cvDetail      = gEngfuncs.pfnRegisterVariable( "csz_clouds_detail",      "0.70",  FCVAR_CLIENTDLL );
 	s_cvDetailScale = gEngfuncs.pfnRegisterVariable( "csz_clouds_detailscale", "1400",  FCVAR_CLIENTDLL );
-	s_cvHBase       = gEngfuncs.pfnRegisterVariable( "csz_clouds_hbase",       "0.12",  FCVAR_CLIENTDLL );  // DEPRECATED (v3)
-	s_cvHTop        = gEngfuncs.pfnRegisterVariable( "csz_clouds_htop",        "0.5",   FCVAR_CLIENTDLL );  // DEPRECATED (v3)
+	s_cvHBase       = gEngfuncs.pfnRegisterVariable( "csz_clouds_hbase",       "0.15",  FCVAR_CLIENTDLL );  // v5: cumulus height-gradient base ramp-in fraction
+	s_cvHTop        = gEngfuncs.pfnRegisterVariable( "csz_clouds_htop",        "0.55",  FCVAR_CLIENTDLL );  // v5: cumulus height-gradient top round-off start
 	s_cvFalloff     = gEngfuncs.pfnRegisterVariable( "csz_clouds_falloff",     "0.12",  FCVAR_CLIENTDLL );  // safety fade only now
 	// codex compare2: REDUCE the thin silver rim (it was reading as foam/screen noise, not a cloud
 	// edge) -- silver ~0.6x, silver_width ~0.45x of the prior storm defaults -> a razor edge only.
-	s_cvSilver      = gEngfuncs.pfnRegisterVariable( "csz_clouds_silver",      "0.38",  FCVAR_CLIENTDLL );
+	s_cvSilver      = gEngfuncs.pfnRegisterVariable( "csz_clouds_silver",      "0.50",  FCVAR_CLIENTDLL );
 	s_cvSilverWidth = gEngfuncs.pfnRegisterVariable( "csz_clouds_silver_width","0.9",   FCVAR_CLIENTDLL );
 	s_cvPowder      = gEngfuncs.pfnRegisterVariable( "csz_clouds_powder",      "0.45",  FCVAR_CLIENTDLL );
 	// codex compare2: ambient stays LOW (effective ~0.13 normalized after the bluish ambSky scale)
 	// so cores read deep grey; the new broad cap-light + lower selfshadow do the brightening, NOT amb.
-	s_cvAmbient     = gEngfuncs.pfnRegisterVariable( "csz_clouds_ambient",     "0.35",  FCVAR_CLIENTDLL );
+	s_cvAmbient     = gEngfuncs.pfnRegisterVariable( "csz_clouds_ambient",     "1.00",  FCVAR_CLIENTDLL );
 	s_cvSun         = gEngfuncs.pfnRegisterVariable( "csz_clouds_sun",         "3.2",   FCVAR_CLIENTDLL );
 	// CLOUD-ONLY sun-direction override (does NOT touch the engine sun or any other system):
 	// -1 = follow the tod/skymath sun (production behavior UNCHANGED). When sun_elev>=0 the cloud's
@@ -211,6 +225,14 @@ void RegisterCvarsImpl()
 	s_cvCapLight    = gEngfuncs.pfnRegisterVariable( "csz_clouds_caplight",    "1.0",   FCVAR_CLIENTDLL );
 	s_cvShelf       = gEngfuncs.pfnRegisterVariable( "csz_clouds_shelf",       "1.0",   FCVAR_CLIENTDLL );
 	s_cvMammatus    = gEngfuncs.pfnRegisterVariable( "csz_clouds_mammatus",    "0.35",  FCVAR_CLIENTDLL );
+	// LAYER + WEATHER + ANIMATION (v5 PIVOT). Defaults = NORMAL scattered cumulus; weather 0/1/2
+	// pushes the matching preset (see ApplyWeatherPreset) into the look cvars on change.
+	s_cvWeather     = gEngfuncs.pfnRegisterVariable( "csz_clouds_weather",      "0",    FCVAR_CLIENTDLL );
+	s_cvLayerHeight = gEngfuncs.pfnRegisterVariable( "csz_clouds_layer_height", "2600", FCVAR_CLIENTDLL );
+	s_cvLayerThick  = gEngfuncs.pfnRegisterVariable( "csz_clouds_layer_thick",  "850",  FCVAR_CLIENTDLL );
+	s_cvWindDir     = gEngfuncs.pfnRegisterVariable( "csz_clouds_wind_dir",     "45",   FCVAR_CLIENTDLL );
+	s_cvWindSpeed   = gEngfuncs.pfnRegisterVariable( "csz_clouds_wind_speed",   "60",   FCVAR_CLIENTDLL );
+	s_cvEvolve      = gEngfuncs.pfnRegisterVariable( "csz_clouds_evolve",       "35",   FCVAR_CLIENTDLL );
 	s_cvarsReady = true;
 	CSZ_LogDev( "cloudvol", "cvars registered (csz_clouds + _tod/_res/_perf/_dbg_* + LOOK: coverage/density/sigma/basescale/detail/detailscale/hbase/htop/falloff/silver/silver_width/powder/ambient/sun/sun_elev/sun_azim/moon/moontint + STRUCTURE: billow/erode_depth/erode_oct/selfshadow/base_irreg/tower_var)" );
 }
@@ -401,6 +423,7 @@ struct VolGpu
 	int mBillow, mErodeDepth, mErodeOct, mSelfShadow, mBaseIrreg, mTowerVar, mEnvWarp;
 	int mMid, mMidFreq, mVirga, mSunForward, mSunG;
 	int mCapLight, mShelf, mMammatus, mCapEps;
+	int mWindVec, mEvolveRate;   // v5 layer animation: wind drift + volume evolve
 	int mDepthTex, mZNear, mZFar, mInvViewProj, mBase3d, mDetail3d;
 	// upsample uniforms
 	int uCloudTex, uFullSize;
@@ -637,6 +660,8 @@ void BuildPrograms()
 	s_gpu.mShelf       = UniformLoc( s_gpu.march, "u_shelf" );
 	s_gpu.mMammatus    = UniformLoc( s_gpu.march, "u_mammatus" );
 	s_gpu.mCapEps      = UniformLoc( s_gpu.march, "u_capEps" );
+	s_gpu.mWindVec     = UniformLoc( s_gpu.march, "u_windVec" );
+	s_gpu.mEvolveRate  = UniformLoc( s_gpu.march, "u_evolveRate" );
 	s_gpu.mLightReach  = UniformLoc( s_gpu.march, "u_lightReach" );
 	s_gpu.mMarchFar    = UniformLoc( s_gpu.march, "u_marchFar" );
 	s_gpu.mTargetSize  = UniformLoc( s_gpu.march, "u_targetSize" );
@@ -717,6 +742,71 @@ void DeriveCelestial( float phase, float nightness, float sunI, float moonI, flo
 	}
 }
 
+// =============================================================================
+// WEATHER PRESETS (v5 PIVOT). csz_clouds_weather 0/1/2 pushes a 3-state preset into the
+// INDIVIDUAL look cvars via Cvar_SetValue -- applied ON CHANGE only, so every knob stays
+// HOT for tuning afterwards (the next weather switch re-applies). ONE coverage parameter
+// spans all 3 states: low=scattered cumulus .. high=overcast.
+//   0 NORMAL : scattered drifting cumulus over blue sky -- low coverage, brighter warm light,
+//              higher cloud base, moderate density.
+//   1 RAIN   : full dark overcast -- high coverage, dense, low ambient, LOWER (oppressive)
+//              base, cool/neutral grey (chroma via ApplyWeatherTint).
+//   2 SNOW   : full overcast but LIGHTER/luminous and cooler-white -- high coverage, softer,
+//              brighter ambient than rain, cool-white chroma.
+// =============================================================================
+void ApplyWeatherPreset( int w )
+{
+	struct P { float cov, dens, sigma, amb, sun, sunfwd, cap, silver, powder, height, thick; };
+	const P presets[3] = {
+		// cov   dens   sigma    amb    sun    sunfwd cap    silver powder height  thick
+		{ 0.40f, 1.15f, 0.0045f, 1.00f, 3.40f, 1.70f, 1.10f, 0.50f, 0.40f, 2600.f,  850.f },  // 0 NORMAL
+		{ 0.96f, 2.10f, 0.0110f, 0.42f, 0.95f, 0.30f, 0.35f, 0.10f, 0.65f, 1700.f, 1150.f },  // 1 RAIN
+		{ 0.91f, 1.70f, 0.0075f, 1.35f, 1.80f, 0.70f, 0.70f, 0.25f, 0.45f, 2100.f, 1000.f },  // 2 SNOW
+	};
+	const P &p = presets[ clampi( w, 0, 2 ) ];
+	gEngfuncs.Cvar_SetValue( "csz_clouds_coverage",     p.cov );
+	gEngfuncs.Cvar_SetValue( "csz_clouds_density",      p.dens );
+	gEngfuncs.Cvar_SetValue( "csz_clouds_sigma",        p.sigma );
+	gEngfuncs.Cvar_SetValue( "csz_clouds_ambient",      p.amb );
+	gEngfuncs.Cvar_SetValue( "csz_clouds_sun",          p.sun );
+	gEngfuncs.Cvar_SetValue( "csz_clouds_sunfwd",       p.sunfwd );
+	gEngfuncs.Cvar_SetValue( "csz_clouds_caplight",     p.cap );
+	gEngfuncs.Cvar_SetValue( "csz_clouds_silver",       p.silver );
+	gEngfuncs.Cvar_SetValue( "csz_clouds_powder",       p.powder );
+	gEngfuncs.Cvar_SetValue( "csz_clouds_layer_height", p.height );
+	gEngfuncs.Cvar_SetValue( "csz_clouds_layer_thick",  p.thick );
+	CSZ_LogInfo( "cloudvol",
+		"[csz_clouds] weather preset %d applied (cov=%.2f dens=%.2f sigma=%.4f amb=%.2f sun=%.2f sunfwd=%.2f cap=%.2f height=%.0f thick=%.0f)",
+		w, p.cov, p.dens, p.sigma, p.amb, p.sun, p.sunfwd, p.cap, p.height, p.thick );
+}
+
+// Weather CHROMA tint (hue only; brightness is set by the sun/ambient preset scalars above so
+// they stay hot). NORMAL keeps the warm sun + blue-sky ambient. RAIN neutral-greys the lit
+// response and desaturates the ambient (shadows read grey, not blue). SNOW shifts the lit
+// response toward a cool luminous white. Applied AFTER DeriveCelestial + the sun-dir override.
+void ApplyWeatherTint( int w, CelLight &c )
+{
+	if( w == 0 )
+		return;
+	float lum = c.color[0] * 0.30f + c.color[1] * 0.59f + c.color[2] * 0.11f;
+	const float coolRain[3] = { 0.97f, 1.00f, 1.05f };
+	const float coolSnow[3] = { 0.95f, 1.00f, 1.10f };
+	const float *cool   = ( w == 1 ) ? coolRain : coolSnow;
+	float        kColor = ( w == 1 ) ? 0.72f : 0.55f;
+	for( int i = 0; i < 3; i++ )
+		c.color[i] = mixf( c.color[i], lum * cool[i], kColor );
+	if( w == 1 )   // RAIN: desaturate the ambient toward neutral grey.
+	{
+		float ag = ( c.ambGround[0] + c.ambGround[1] + c.ambGround[2] ) / 3.0f;
+		float as = ( c.ambSky[0]    + c.ambSky[1]    + c.ambSky[2] )    / 3.0f;
+		for( int i = 0; i < 3; i++ )
+		{
+			c.ambGround[i] = mixf( c.ambGround[i], ag, 0.55f );
+			c.ambSky[i]    = mixf( c.ambSky[i],    as, 0.45f );
+		}
+	}
+}
+
 }  // anonymous namespace
 
 CloudVolRenderer g_cloudvol;
@@ -786,6 +876,19 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	int res = clampi( (int)( ReadCvar( s_cvRes, 4.0f ) + 0.5f ), 1, 8 );
 	int tod = clampi( (int)( ReadCvar( s_cvTod, 0.0f ) + 0.5f ), 0, 3 );
 
+	// --- WEATHER PRESET (v5 PIVOT): csz_clouds_weather 0/1/2 pushes a preset into the individual
+	//     look cvars ON CHANGE only (so each knob stays HOT). Done BEFORE the look reads below so
+	//     this frame already picks up the preset values. Re-applies whenever the cvar changes. ---
+	int weather = clampi( (int)( ReadCvar( s_cvWeather, 0.0f ) + 0.5f ), 0, 2 );
+	{
+		static int s_lastWeather = -1;
+		if( weather != s_lastWeather )
+		{
+			ApplyWeatherPreset( weather );
+			s_lastWeather = weather;
+		}
+	}
+
 	// time-of-day: live (engine phase + ambience nightness) or forced for capture.
 	float phase, nightness;
 	switch( tod )
@@ -832,6 +935,14 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	float capLight    = clampf( ReadCvar( s_cvCapLight,    1.0f   ), 0.0f,    4.0f    );
 	float shelf       = clampf( ReadCvar( s_cvShelf,       1.0f   ), 0.1f,    4.0f    );
 	float mammatus    = clampf( ReadCvar( s_cvMammatus,    0.35f  ), 0.0f,    1.0f    );
+	// LAYER + ANIMATION hot params (v5 PIVOT): cloud-deck placement + wind drift + volume evolve.
+	float layerHeight = clampf( ReadCvar( s_cvLayerHeight, 2600.0f ), 200.0f, 12000.0f );
+	float layerThick  = clampf( ReadCvar( s_cvLayerThick,  850.0f  ), 120.0f, 6000.0f  );
+	float windDirDeg  = ReadCvar( s_cvWindDir,   45.0f );
+	float windSpeed   = clampf( ReadCvar( s_cvWindSpeed, 60.0f ), 0.0f, 600.0f );
+	float evolveRate  = clampf( ReadCvar( s_cvEvolve,    35.0f ), 0.0f, 400.0f );
+	float windAz      = windDirDeg * kDegToRad;
+	float windVec[3]  = { cosf( windAz ) * windSpeed, sinf( windAz ) * windSpeed, 0.0f };
 	float midFreq     = 1.0f / midScale;
 	// CLOUD-ONLY sun-direction override: -1 = follow the tod/skymath sun (production unchanged).
 	// elev>=0 rebuilds the cloud light dir from (elev,azim); azim<0 falls back to a fixed azimuth.
@@ -880,6 +991,10 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 		float azim = ( sunAzimOvr < 0.0f ) ? skymath::kNodeYawDeg : sunAzimOvr;
 		skymath::ElevYawDir( elev, azim, cel.dir );
 	}
+
+	// --- WEATHER CHROMA (v5): hue-only tint for rain (neutral grey) / snow (cool white); NORMAL
+	//     keeps the warm sun + blue-sky ambient. Brightness stays under the sun/ambient presets. ---
+	ApplyWeatherTint( weather, cel );
 
 	// --- hero AABB volume: latch a world anchor at the player's first-frame position
 	//     (per generation), so the box is WORLD-FIXED (real parallax + terrain occlusion
@@ -940,13 +1055,18 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	}
 	else
 	{
-		const float kOffX = 3600.0f;   // mid-range east of spawn (visible cloud SIDE for a horizon shot)
-		const float kHalfX = 4500.0f, kHalfY = 4500.0f;   // ~9000u WIDE storm footprint (codex compare2 #7: width > height)
-		const float kZ0 = 400.0f, kZ1 = 8000.0f;          // tall storm build-up (~7600u: base near horizon -> anvil high)
-		float cx = s_anchor[0] + kOffX;
-		float cy = s_anchor[1];
-		boxMin[0] = cx - kHalfX; boxMin[1] = cy - kHalfY; boxMin[2] = s_anchor[2] + kZ0;
-		boxMax[0] = cx + kHalfX; boxMax[1] = cy + kHalfY; boxMax[2] = s_anchor[2] + kZ1;
+		// WORLD-SPACE CLOUD DECK (v5 PIVOT, the DEFAULT csz_clouds 1 render): a thin horizontal
+		// slab at cloud altitude spanning the whole sky. XY extent is huge and CAMERA-CENTERED so
+		// the deck always fills the sky AND its XY faces sit far beyond u_marchFar (= never hit =>
+		// no box edge); the density noise is sampled in WORLD space (only TIME drifts it) so the
+		// deck is world-anchored with correct parallax. Z (Quake-up) = [anchor.z + layerHeight,
+		// + layerThick]; density -> 0 at both Z faces via the height gradient, so top/bottom of the
+		// slab are never a visible edge either. Vertical altitude is world-fixed (anchor.z based);
+		// only XY follows the player. NO single dbg box -- the layer is the sky.
+		const float kHalfXY = 60000.0f;   // >> the layer u_marchFar (45000): XY walls are never reached
+		float baseZ = s_anchor[2] + layerHeight;
+		boxMin[0] = view.origin[0] - kHalfXY; boxMin[1] = view.origin[1] - kHalfXY; boxMin[2] = baseZ;
+		boxMax[0] = view.origin[0] + kHalfXY; boxMax[1] = view.origin[1] + kHalfXY; boxMax[2] = baseZ + layerThick;
 	}
 
 	// world-space epsilon for the broad cap-light density-gradient normal: ~1.2% of the largest
@@ -961,7 +1081,9 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	// iter-3: longer cone reach + more taps so the self-shadow spans whole turrets and lands
 	// real shadow in the valleys between stacked lobes (paired with the u_selfShadow weight).
 	const float lightReach = 3200.0f;          // cone self-shadow over several feature-diameters
-	const float marchFar   = 12000.0f;         // bounded well below zFar (avoid far-depth quantization)
+	// LAYER mode marches a thin deck to near the horizon (grazing rays are far => a big far-cap is
+	// only a resolution knob, NOT a cost knob: cost is fixed by `steps`). dbg single-box stays tight.
+	const float marchFar   = ( dbgNear >= 1 ) ? 12000.0f : 45000.0f;
 	const int   steps      = 48;
 	const int   lightSteps = 8;                // == MAX_LIGHT cap in the shader
 
@@ -1109,6 +1231,8 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	if( s_gpu.mShelf >= 0 )       glUniform1f( s_gpu.mShelf, shelf );
 	if( s_gpu.mMammatus >= 0 )    glUniform1f( s_gpu.mMammatus, mammatus );
 	if( s_gpu.mCapEps >= 0 )      glUniform1f( s_gpu.mCapEps, capEps );
+	if( s_gpu.mWindVec >= 0 )     glUniform3fv( s_gpu.mWindVec, 1, windVec );
+	if( s_gpu.mEvolveRate >= 0 )  glUniform1f( s_gpu.mEvolveRate, evolveRate );
 	if( s_gpu.mLightReach >= 0 )  glUniform1f( s_gpu.mLightReach, lightReach );
 	if( s_gpu.mMarchFar >= 0 )    glUniform1f( s_gpu.mMarchFar, marchFar );
 	if( s_gpu.mTargetSize >= 0 )  glUniform2fv( s_gpu.mTargetSize, 1, fTarget );

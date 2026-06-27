@@ -89,6 +89,8 @@ uniform vec3  u_boxMin;        // hero AABB min corner (world)
 uniform vec3  u_boxMax;        // hero AABB max corner (world)
 uniform float u_time;          // bounded client time (s) for slow wind scroll
 uniform float u_frame;         // per-frame jitter lattice offset (animated IGN)
+uniform vec3  u_windVec;       // world-u/sec horizontal wind drift (dir*speed); drift = u_windVec*u_time
+uniform float u_evolveRate;    // slow volume-EVOLVE (morph) rate: advances the noise sample THROUGH the volume
 uniform float u_density;       // density multiplier
 uniform float u_coverage;      // 0..1 coverage gate (more => fuller box)
 uniform float u_silver;        // silver-lining (forward-scatter) rim strength
@@ -148,176 +150,92 @@ float remap( float v, float a, float b, float c, float d )
 }
 
 // =============================================================================
-// ORGANIC MACRO SHAPE (the anti-CUBE re-architecture). The AABB is now ONLY an
-// invisible march bound -- the visible silhouette comes from a smooth-union of
-// ellipsoid lobes: a wide flat MOTHER BODY + several cauliflower TOWERS at varied
-// heights + a rounded CAP, perturbed by low-frequency noise and cut by a ragged,
-// broken BASE. This is a believable cumulus/cumulonimbus, not a box. Density
-// reaches 0 within the outer u_falloff fraction of every AABB face (a SAFETY fade,
-// NEVER the cloud shape). Built in box-normalized coords q in [-1,1]^3 so the lobe
-// layout is independent of the hero box's world size (Quake Z-up = vertical).
+// WORLD-SPACE CLOUD LAYER (the anti-CUBE re-architecture, v5 PIVOT). The AABB is now a
+// thin HORIZONTAL SLAB spanning the whole sky (huge XY, thin Z = the cloud deck). The
+// AABB is ONLY an invisible march bound: density -> 0 at the slab top & bottom via the
+// height gradient (the Z faces are never a visible edge) and the XY faces sit far beyond
+// u_marchFar (never reached), so NO box silhouette is possible. The silhouette comes
+// ENTIRELY from the coverage-thresholded Perlin-Worley field + the cumulus height
+// gradient (Nubis/Schneider): LOW coverage => isolated puffy cumulus dotting blue sky,
+// HIGH coverage => connected overcast. Animated by a horizontal wind DRIFT + a slow
+// volume EVOLVE (the noise sample advances THROUGH the volume, so clouds form/dissipate,
+// not just translate). Quake Z-up = vertical, so the slab is thin in Z.
 // =============================================================================
-float sdEllipsoid( vec3 p, vec3 r )
+
+// Cumulus height-density gradient across the slab thickness: feathered flat-ish base
+// (ramp in over [0,u_hBase]) rounded off toward the top (fade out over [u_hTop,1]), so
+// individual clouds get a puffy vertical form instead of a flat sheet. hf in [0,1].
+float HeightGradient( float hf )
 {
-	vec3 q = p / r;
-	return ( length( q ) - 1.0 ) * min( min( r.x, r.y ), r.z );
-}
-
-// Polynomial smooth-minimum (metaball union of two SDFs over blend radius k).
-float smin( float a, float b, float k )
-{
-	float t = clamp( 0.5 + 0.5 * ( b - a ) / k, 0.0, 1.0 );
-	return mix( b, a, t ) - k * t * ( 1.0 - t );
-}
-
-float CloudShapeEnvelope( vec3 p, out float h )
-{
-	vec3 bc = 0.5 * ( u_boxMin + u_boxMax );
-	vec3 bh = max( 0.5 * ( u_boxMax - u_boxMin ), vec3( 1.0 ) );
-	vec3 q  = ( p - bc ) / bh;                          // box-normalized [-1,1]^3
-
-	float bound = max( max( abs( q.x ), abs( q.y ) ), abs( q.z ) );
-	h = clamp( ( q.z + 0.55 ) / 1.32, 0.0, 1.0 );       // 0 at flat storm base .. 1 at anvil crown
-	if( bound > 0.999 )
-		return 0.0;
-
-	// low-frequency Perlin-Worley (R) sampled at a SHAPE scale, decoupled from the
-	// body-noise frequency, used to warp the lobe shell into an organic silhouette.
-	float low = texture( u_base3d, ( p + vec3( u_time * 0.25, 0.0, 0.0 ) ) * ( 1.0 / 8500.0 ) ).r;
-
-	// ===================== WIDE STORM-CELL ENVELOPE (codex compare2 #1) =====================
-	// The old "v4 storm" still read as a vertical PLUME: the bright mass (towers+crown turrets)
-	// was packed onto a near-central column (x in [-0.3,0.3]) while only the dark flat base spread
-	// wide. This rebuild lays the cloud out as a WIDE WEATHER SYSTEM -- a broad flat base shelf, a
-	// wide mother body, and THREE turret GROUPS pushed out to the LEFT / CENTER / RIGHT (so the lit
-	// crown is a cluster of cauliflower towers strung ACROSS the width, not one stack) topped by a
-	// flat, downwind-dragged ANVIL. 17 lobes; small smin on the turrets so each form survives.
-
-	// ---- WIDE FLAT BASE SHELF: the broadest element (~3x a tower wide), height squished to a thin
-	//      slab -> the dark arcus/shelf that presses on the horizon (low smin = one continuous slab).
-	float d = sdEllipsoid( q - vec3(  0.00,  0.00, -0.46 ), vec3( 0.92, 0.74, 0.17 ) );
-	d = smin( d, sdEllipsoid( q - vec3( -0.48,  0.10, -0.44 ), vec3( 0.46, 0.42, 0.15 ) ), 0.22 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.50, -0.08, -0.44 ), vec3( 0.46, 0.42, 0.15 ) ), 0.22 );
-
-	// ---- WIDE MOTHER BODY: a broad rounded bulk low-center, the mass the towers grow out of. ----
-	d = smin( d, sdEllipsoid( q - vec3(  0.00, -0.02, -0.14 ), vec3( 0.66, 0.56, 0.34 ) ), 0.24 );
-
-	// ---- THREE TURRET GROUPS offset LEFT / CENTER / RIGHT (kill the single-axis column). Each
-	//      group = a tall stem ellipsoid + 2-3 cauliflower turrets climbing it; small smin (0.12)
-	//      so the individual turrets stay distinct instead of melting into one blob. ----
-	// -- LEFT group (lower / shorter) --
-	d = smin( d, sdEllipsoid( q - vec3( -0.44,  0.06,  0.02 ), vec3( 0.30, 0.28, 0.40 ) ), 0.16 );
-	d = smin( d, sdEllipsoid( q - vec3( -0.48,  0.02,  0.24 ), vec3( 0.20, 0.19, 0.22 ) ), 0.12 );
-	d = smin( d, sdEllipsoid( q - vec3( -0.34, -0.08,  0.32 ), vec3( 0.16, 0.15, 0.18 ) ), 0.12 );
-	// -- CENTER group (tallest = the main cumulonimbus tower) --
-	d = smin( d, sdEllipsoid( q - vec3(  0.02,  0.00,  0.16 ), vec3( 0.34, 0.32, 0.52 ) ), 0.16 );
-	d = smin( d, sdEllipsoid( q - vec3( -0.02,  0.06,  0.46 ), vec3( 0.22, 0.21, 0.26 ) ), 0.12 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.10, -0.04,  0.52 ), vec3( 0.19, 0.18, 0.22 ) ), 0.12 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.00,  0.10,  0.62 ), vec3( 0.17, 0.16, 0.19 ) ), 0.12 );
-	// -- RIGHT group (medium) --
-	d = smin( d, sdEllipsoid( q - vec3(  0.42, -0.04,  0.04 ), vec3( 0.30, 0.28, 0.42 ) ), 0.16 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.46,  0.06,  0.28 ), vec3( 0.20, 0.19, 0.23 ) ), 0.12 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.32, -0.02,  0.38 ), vec3( 0.17, 0.16, 0.20 ) ), 0.12 );
-
-	// ---- TOP ANVIL / SHELF: wide (x ~3.5x a tower), flattened, dragged DOWNWIND (+x), its rim
-	//      broken by two small turrets so it reads as a ragged spreading anvil, NOT a mushroom cap.
-	d = smin( d, sdEllipsoid( q - vec3(  0.14,  0.04,  0.66 ), vec3( 0.74, 0.54, 0.12 ) ), 0.20 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.58,  0.10,  0.64 ), vec3( 0.20, 0.18, 0.11 ) ), 0.12 );
-	d = smin( d, sdEllipsoid( q - vec3( -0.36, -0.06,  0.62 ), vec3( 0.18, 0.16, 0.11 ) ), 0.12 );
-
-	// perturb the implicit surface with low-freq noise -> ragged, organic, non-symmetric edge.
-	d += ( 0.5 - low ) * u_envWarp;
-
-	// SDF -> soft 0..1 mask (deep inside -> 1, outside the shell -> 0).
-	float env = smoothstep( 0.12, -0.10, d );
-
-	// FLAT WIDE STORM-DARK BASE (codex #2): a SHARP underside band keeps density high just above a
-	// defined flat base, then cuts hard below it. u_shelf scales the band width (1 = default flat
-	// shelf; higher = softer/thicker shelf transition).
-	float baseZ  = -0.54 + ( low - 0.5 ) * 0.05;
-	float softH  = 0.06 * clamp( u_shelf, 0.1, 4.0 );
-	env *= smoothstep( baseZ, baseZ + softH, q.z );
-
-	// optional faint VIRGA / rain shaft hanging under the darkest core (hot toggle, codex #2): a
-	// WIDE low-alpha cool-grey streak covering ~40-70% of the base width (not a thin pencil column).
-	if( u_virga > 0.001 )
-	{
-		float shaftXY = exp( -dot( q.xy, q.xy ) / 0.34 );          // wide column (~0.55 radius) under the core
-		float below   = smoothstep( baseZ, baseZ - 0.55, q.z );    // only below the base, fading down
-		env = max( env, u_virga * 0.14 * shaftXY * below * mix( 0.5, 1.0, low ) );
-	}
-
-	// optional MAMMATUS: a few small low-alpha downward bumps hanging under the base (hot toggle,
-	// codex #2). Worley-billow lumps gated to a thin band just below the shelf and the core width.
-	if( u_mammatus > 0.001 )
-	{
-		float lump    = texture( u_base3d, ( p + vec3( 0.0, 0.0, u_time * 0.1 ) ) * ( 1.0 / 1500.0 ) ).g;
-		float mamBand = smoothstep( baseZ + 0.03, baseZ - 0.12, q.z );   // just under the shelf
-		float mamWide = 1.0 - smoothstep( 0.45, 0.80, length( q.xy ) );  // under the core footprint
-		env = max( env, u_mammatus * 0.16 * mamBand * mamWide * smoothstep( 0.45, 0.82, lump ) );
-	}
-
-	// SAFETY fade ONLY: guarantee density -> 0 before the box faces over the outer u_falloff band.
-	env *= 1.0 - smoothstep( 1.0 - u_falloff, 1.0, bound );
-
-	return env;
+	float baseR = smoothstep( 0.0, max( u_hBase, 0.02 ), hf );
+	float topR  = 1.0 - smoothstep( clamp( u_hTop, u_hBase + 0.05, 0.98 ), 1.0, hf );
+	return clamp( baseR * topR, 0.0, 1.0 );
 }
 
 // SampleCloudDensity -- the SINGLE density function used by BOTH the view march AND the cone
 // light / sky-visibility marches (no hidden "delete density / keep lighting" coupling). The
-// organic macro envelope sets the silhouette; the baked noise only FILLS and ERODES WITHIN it:
-//   * low-freq Perlin-Worley (R) dilated by the Worley FBM = the SOFT billowy body (anti-popcorn,
-//     never raw Worley), coverage slides the existence threshold;
-//   * high-freq Worley = EDGE-ONLY erosion (the (1-smoothstep) edge weight keeps dense interiors
-//     smooth -- the anti-popcorn rule). detail=0 skips ONLY the fine erosion (cheap shadow taps).
+// coverage-remap Perlin-Worley chain sets the silhouette; the high-freq Worley only ERODES
+// edges WITHIN it (anti-popcorn):
+//   * Perlin-Worley base (R) DILATED by the Worley FBM (G/B/A) = the SOFT billowy body
+//     (NEVER raw Worley = popcorn); the coverage gate slides the existence threshold;
+//   * the cumulus height gradient gives vertical puffy form (flat base, rounded top);
+//   * high-freq Worley = EDGE-ONLY erosion (the (1-smoothstep) edge weight keeps dense
+//     interiors smooth). detail=0 skips ONLY the fine erosion (cheap shadow taps).
 float SampleCloudDensity( vec3 p, int detail )
 {
-	float h;
-	float macro = CloudShapeEnvelope( p, h );
-	if( macro <= 0.001 )
+	// in-slab height fraction (Quake Z-up): 0 at the cloud base, 1 at the deck top.
+	float hf = ( p.z - u_boxMin.z ) / max( u_boxMax.z - u_boxMin.z, 1.0 );
+	if( hf <= 0.0 || hf >= 1.0 )
 		return 0.0;
 
-	vec3 wind = vec3( u_time * 0.6, u_time * 0.25, 0.0 );   // SLOW wind (do not swamp parallax)
-	vec4 b    = texture( u_base3d, ( p + wind ) * u_baseFreq );
-	// Worley billow FBM from the increasing-frequency G/B/A octaves: dilates the Perlin base.
+	// --- ANIMATION (first-class): horizontal wind DRIFT + slow volume EVOLVE/morph. ---
+	// drift scrolls the whole field along the wind; evolve advances the noise sample THROUGH
+	// the volume (dominant Z march in noise-space, decoupled from the fixed height gradient) so
+	// at a fixed world XY the coverage pattern slowly forms & dissipates -- clouds change shape,
+	// not just translate. Detail & mid scroll at DIFFERENT rates so the silhouette frays/morphs
+	// rather than sliding as one rigid texture.
+	vec3 drift  = u_windVec * u_time;
+	vec3 evolve = vec3( 0.18, -0.13, 1.0 ) * ( u_evolveRate * u_time );
+	vec3 ps     = p + drift + evolve;
+
+	vec4 b     = texture( u_base3d, ps * u_baseFreq );
 	float wfbm = dot( b.gba, vec3( 0.625, 0.25, 0.125 ) );
 
-	// Nubis-style: coherent Perlin-Worley base (R), coverage slides the existence threshold,
-	// the Worley FBM DILATES it into round soft billows (NOT raw Worley = popcorn).
-	float base = remap( b.r, 1.0 - u_coverage, 1.0, 0.0, 1.0 );
-	base = mix( base, remap( base, wfbm * 0.35, 1.0, 0.0, 1.0 ), 0.35 );
+	// Perlin-Worley base (R) DILATED by the Worley billow FBM => round connected billows.
+	float baseCloud = remap( b.r, wfbm - 1.0, 1.0, 0.0, 1.0 );
 
-	float cloud = macro * base;
+	// cumulus vertical form (flat base, rounded top).
+	baseCloud *= HeightGradient( hf );
 
-	// MID-FREQUENCY CAULIFLOWER (codex #5): a rounded Worley-billow term at a MID scale
-	// (~1500-3500 world-u via u_midFreq) carves rounded packed BUMPS into the OUTER HALF of
-	// the density only (the (1 - smoothstep) outer mask keeps thick interiors smooth -> the
-	// anti-popcorn rule). This is the medium-scale "packed cauliflower" the refs show, DISTINCT
-	// from the high-freq edge wisps below.
+	// COVERAGE GATE: slide the existence threshold (low => isolated puffs, high => overcast),
+	// then re-scale by coverage to anchor the round billow look (Schneider).
+	float cov   = clamp( u_coverage, 0.0, 1.0 );
+	float cloud = remap( baseCloud, 1.0 - cov, 1.0, 0.0, 1.0 ) * cov;
+
+	// MID-FREQUENCY cauliflower bumps on the OUTER half only (the (1-smoothstep) outer mask keeps
+	// thick interiors smooth = the anti-popcorn rule); scrolls at a different rate so the lumps
+	// live/breathe with the morph.
 	if( u_mid > 0.001 && cloud > 0.01 )
 	{
-		vec3  mb    = texture( u_base3d, ( p + wind * 1.2 ) * u_midFreq ).gba;
+		vec3  mb    = texture( u_base3d, ( p + drift * 1.3 + evolve * 1.7 ) * u_midFreq ).gba;
 		float mid   = dot( mb, vec3( 0.6, 0.3, 0.1 ) );          // round billow (NOT raw cells)
 		float outer = 1.0 - smoothstep( 0.25, 0.70, cloud );     // outer half only (interiors safe)
 		cloud = remap( cloud, mid * u_mid * outer, 1.0, 0.0, 1.0 );
 	}
 
+	// HIGH-FREQUENCY Worley EDGE-ONLY erosion (anti-popcorn): the (1-smoothstep) edge mask is ~0
+	// inside thick cloud and 1 only on the thin outer shell, so detail TEARS the silhouette edge
+	// without bumping dense interiors. Detail evolves FASTER so edges continuously fray/morph.
 	if( detail == 1 && cloud > 0.01 && u_detailAmt > 0.001 )
 	{
-		// high-freq Worley detail, EDGE-WEIGHTED so dense interiors are untouched (the anti-popcorn
-		// rule): the (1 - smoothstep) edge mask -> 0 inside thick cloud, 1 only near the thin edge.
-		// u_erodeOct blends 1..3 detail octaves; u_erodeDepth scales how far it bites; wispy at the
-		// base -> firmer toward the crown via h.
-		vec3 dt = texture( u_detail3d, ( p + wind * 1.7 ) * u_detailFreq ).rgb;
+		vec3 dt = texture( u_detail3d, ( p + drift * 1.5 + evolve * 2.3 ) * u_detailFreq ).rgb;
 		float dfbm = dt.r;
 		float norm = 1.0, amp = 0.5;
 		if( u_erodeOct >= 2 ) { dfbm += dt.g * amp; norm += amp; amp *= 0.5; }
 		if( u_erodeOct >= 3 ) { dfbm += dt.b * amp; norm += amp; }
 		dfbm /= norm;
-		// SHARPER EROSION BAND (codex #4): bite only the THIN outer shell (~15-25%) so the
-		// silhouette gets torn/scalloped while interiors stay smooth (anti-popcorn preserved).
 		float edge     = 1.0 - smoothstep( 0.15, 0.45, cloud );
-		float erodeAmt = u_detailAmt * u_erodeDepth * edge * mix( 0.55, 1.0, h );
+		float erodeAmt = u_detailAmt * u_erodeDepth * edge * mix( 0.55, 1.0, hf );
 		cloud = remap( cloud, dfbm * erodeAmt, 1.0, 0.0, 1.0 );
 	}
 
