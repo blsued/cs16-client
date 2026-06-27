@@ -103,6 +103,11 @@ uniform float u_erodeDepth;    // high-freq edge-erosion DEPTH (how far the deta
 uniform int   u_erodeOct;      // detail erosion octave count 1..3
 uniform float u_selfShadow;    // cone-march self-shadow / multi-scatter extinction weight (internal pockets)
 uniform float u_envWarp;       // organic silhouette perturbation amount (low-freq noise warp of the lobe shell)
+uniform float u_mid;           // MID-frequency cauliflower strength (rounded packed bumps on the OUTER half)
+uniform float u_midFreq;       // mid-frequency 3D-noise frequency (1/world-units)
+uniform float u_virga;         // faint rain/virga shaft hanging under the darkest core (0 = off)
+uniform float u_sunForward;    // DIRECT-sun forward-scatter strength (blows sun-facing upper lobes to near-white)
+uniform float u_sunG;          // direct-sun forward HG anisotropy g (0.78-0.85)
 uniform float u_lightReach;    // TOTAL cone light-march reach toward the lit body (world units)
 uniform float u_marchFar;      // hard distance cap (world units)
 uniform vec2  u_targetSize;    // quarter-res target size in pixels
@@ -168,7 +173,7 @@ float CloudShapeEnvelope( vec3 p, out float h )
 	vec3 q  = ( p - bc ) / bh;                          // box-normalized [-1,1]^3
 
 	float bound = max( max( abs( q.x ), abs( q.y ) ), abs( q.z ) );
-	h = clamp( ( q.z + 0.55 ) / 1.25, 0.0, 1.0 );       // 0 at ragged base .. 1 at crown
+	h = clamp( ( q.z + 0.52 ) / 1.35, 0.0, 1.0 );       // 0 at flat storm base .. 1 at anvil crown
 	if( bound > 0.999 )
 		return 0.0;
 
@@ -176,16 +181,40 @@ float CloudShapeEnvelope( vec3 p, out float h )
 	// body-noise frequency, used to warp the lobe shell into an organic silhouette.
 	float low = texture( u_base3d, ( p + vec3( u_time * 0.25, 0.0, 0.0 ) ) * ( 1.0 / 8500.0 ) ).r;
 
-	// mother body: wide, flat, sitting low in the box.
-	float d = sdEllipsoid( q - vec3(  0.00,  0.00, -0.34 ), vec3( 0.74, 0.60, 0.26 ) );
-	// stacked cauliflower towers at varied positions / heights / sizes (the billowing crown).
-	d = smin( d, sdEllipsoid( q - vec3( -0.34,  0.06, -0.04 ), vec3( 0.32, 0.27, 0.40 ) ), 0.20 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.06, -0.12,  0.16 ), vec3( 0.40, 0.32, 0.58 ) ), 0.22 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.38,  0.10,  0.06 ), vec3( 0.31, 0.26, 0.46 ) ), 0.20 );
-	d = smin( d, sdEllipsoid( q - vec3( -0.10,  0.30,  0.30 ), vec3( 0.30, 0.24, 0.34 ) ), 0.18 );
-	d = smin( d, sdEllipsoid( q - vec3(  0.20, -0.26,  0.22 ), vec3( 0.27, 0.23, 0.36 ) ), 0.18 );
-	// rounded cap riding the central tower.
-	d = smin( d, sdEllipsoid( q - vec3( -0.06,  0.10,  0.50 ), vec3( 0.26, 0.22, 0.30 ) ), 0.16 );
+	// ============================ STORM-CELL ENVELOPE (codex #1) ============================
+	// ~18 lobes laid out as a cumulonimbus, NOT a single puff: a wide flat shelf BASE +
+	// stacked vertical TOWER groups + a cluster of small crown TURRETS (low smin k so the
+	// individual cauliflower forms SURVIVE instead of melting into one blob) + a flattened,
+	// edge-broken ANVIL near the top. Tower reaches ~q.z 0.7-0.85 (much taller) and the base
+	// spreads to ~q.x/q.y 0.8 (much wider) than the old 7-lobe puff.
+
+	// ---- WIDE FLAT STORM BASE: 4 broad, flattened lobes = the dark anvil-cloud shelf ----
+	float d = sdEllipsoid( q - vec3(  0.00,  0.00, -0.42 ), vec3( 0.82, 0.70, 0.22 ) );
+	d = smin( d, sdEllipsoid( q - vec3( -0.30,  0.18, -0.40 ), vec3( 0.50, 0.46, 0.20 ) ), 0.20 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.34, -0.16, -0.40 ), vec3( 0.48, 0.44, 0.20 ) ), 0.20 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.10,  0.34, -0.38 ), vec3( 0.44, 0.40, 0.20 ) ), 0.20 );
+
+	// ---- STACKED TOWER GROUPS: the vertical cumulonimbus build-up (tall ellipsoids) ----
+	d = smin( d, sdEllipsoid( q - vec3(  0.00, -0.04,  0.10 ), vec3( 0.40, 0.36, 0.62 ) ), 0.18 );
+	d = smin( d, sdEllipsoid( q - vec3( -0.30,  0.10, -0.02 ), vec3( 0.32, 0.30, 0.46 ) ), 0.18 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.30,  0.06,  0.00 ), vec3( 0.30, 0.28, 0.44 ) ), 0.18 );
+
+	// ---- CROWN TURRETS: 8 smaller lobes clustered on the upper towers, SMALL smin k=0.11
+	//      so each cauliflower turret stays distinct (codex: reduce blend so forms survive). ----
+	d = smin( d, sdEllipsoid( q - vec3(  0.02, -0.06,  0.55 ), vec3( 0.24, 0.22, 0.28 ) ), 0.11 );
+	d = smin( d, sdEllipsoid( q - vec3( -0.16,  0.08,  0.48 ), vec3( 0.20, 0.19, 0.24 ) ), 0.11 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.18, -0.02,  0.46 ), vec3( 0.21, 0.20, 0.25 ) ), 0.11 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.00,  0.16,  0.40 ), vec3( 0.19, 0.18, 0.22 ) ), 0.11 );
+	d = smin( d, sdEllipsoid( q - vec3( -0.26, -0.04,  0.30 ), vec3( 0.18, 0.17, 0.22 ) ), 0.11 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.28,  0.12,  0.28 ), vec3( 0.18, 0.17, 0.22 ) ), 0.11 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.08, -0.22,  0.34 ), vec3( 0.18, 0.17, 0.21 ) ), 0.11 );
+	d = smin( d, sdEllipsoid( q - vec3( -0.06,  0.02,  0.70 ), vec3( 0.18, 0.16, 0.20 ) ), 0.11 );
+
+	// ---- ANVIL / SHELF lobe near the top, offset downwind (+x), its rim BROKEN by two small
+	//      turrets so it reads as a ragged spreading shelf, NOT a smooth mushroom cap. ----
+	d = smin( d, sdEllipsoid( q - vec3(  0.34,  0.20,  0.62 ), vec3( 0.50, 0.34, 0.13 ) ), 0.16 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.50,  0.16,  0.60 ), vec3( 0.16, 0.15, 0.12 ) ), 0.10 );
+	d = smin( d, sdEllipsoid( q - vec3(  0.20,  0.30,  0.62 ), vec3( 0.15, 0.14, 0.12 ) ), 0.10 );
 
 	// perturb the implicit surface with low-freq noise -> ragged, organic, non-symmetric edge.
 	d += ( 0.5 - low ) * u_envWarp;
@@ -193,9 +222,18 @@ float CloudShapeEnvelope( vec3 p, out float h )
 	// SDF -> soft 0..1 mask (deep inside -> 1, outside the shell -> 0).
 	float env = smoothstep( 0.12, -0.10, d );
 
-	// ragged, noise-broken BASE (no flat plane): density fades below a perturbed base height.
-	float baseZ = -0.52 + ( low - 0.5 ) * 0.12;
-	env *= smoothstep( baseZ, baseZ + 0.12, q.z );
+	// FLAT WIDE STORM-DARK BASE (codex #2): a SHARP underside band (flat shelf, only faint
+	// noise wobble) keeps density high just above a defined flat base, then cuts hard below it.
+	float baseZ = -0.50 + ( low - 0.5 ) * 0.05;
+	env *= smoothstep( baseZ, baseZ + 0.07, q.z );
+
+	// optional faint VIRGA / rain shaft hanging under the darkest core (hot toggle, codex #2).
+	if( u_virga > 0.001 )
+	{
+		float shaftXY = exp( -dot( q.xy, q.xy ) / 0.12 );          // narrow column on the core axis
+		float below   = smoothstep( baseZ, baseZ - 0.50, q.z );    // only below the base, fading down
+		env = max( env, u_virga * 0.16 * shaftXY * below * mix( 0.5, 1.0, low ) );
+	}
 
 	// SAFETY fade ONLY: guarantee density -> 0 before the box faces over the outer u_falloff band.
 	env *= 1.0 - smoothstep( 1.0 - u_falloff, 1.0, bound );
@@ -229,6 +267,19 @@ float SampleCloudDensity( vec3 p, int detail )
 
 	float cloud = macro * base;
 
+	// MID-FREQUENCY CAULIFLOWER (codex #5): a rounded Worley-billow term at a MID scale
+	// (~1500-3500 world-u via u_midFreq) carves rounded packed BUMPS into the OUTER HALF of
+	// the density only (the (1 - smoothstep) outer mask keeps thick interiors smooth -> the
+	// anti-popcorn rule). This is the medium-scale "packed cauliflower" the refs show, DISTINCT
+	// from the high-freq edge wisps below.
+	if( u_mid > 0.001 && cloud > 0.01 )
+	{
+		vec3  mb    = texture( u_base3d, ( p + wind * 1.2 ) * u_midFreq ).gba;
+		float mid   = dot( mb, vec3( 0.6, 0.3, 0.1 ) );          // round billow (NOT raw cells)
+		float outer = 1.0 - smoothstep( 0.25, 0.70, cloud );     // outer half only (interiors safe)
+		cloud = remap( cloud, mid * u_mid * outer, 1.0, 0.0, 1.0 );
+	}
+
 	if( detail == 1 && cloud > 0.01 && u_detailAmt > 0.001 )
 	{
 		// high-freq Worley detail, EDGE-WEIGHTED so dense interiors are untouched (the anti-popcorn
@@ -241,7 +292,9 @@ float SampleCloudDensity( vec3 p, int detail )
 		if( u_erodeOct >= 2 ) { dfbm += dt.g * amp; norm += amp; amp *= 0.5; }
 		if( u_erodeOct >= 3 ) { dfbm += dt.b * amp; norm += amp; }
 		dfbm /= norm;
-		float edge     = 1.0 - smoothstep( 0.35, 0.85, cloud );
+		// SHARPER EROSION BAND (codex #4): bite only the THIN outer shell (~15-25%) so the
+		// silhouette gets torn/scalloped while interiors stay smooth (anti-popcorn preserved).
+		float edge     = 1.0 - smoothstep( 0.15, 0.45, cloud );
 		float erodeAmt = u_detailAmt * u_erodeDepth * edge * mix( 0.55, 1.0, h );
 		cloud = remap( cloud, dfbm * erodeAmt, 1.0, 0.0, 1.0 );
 	}
@@ -290,7 +343,10 @@ bool intersectBox( vec3 ro, vec3 rd, vec3 bmin, vec3 bmax, out float t0, out flo
 	t1 = min( min( tmax.x, tmax.y ), tmax.z );
 	return t1 > max( t0, 0.0 );
 }
-
+)GLSL"
+// MSVC C2026: a single string literal caps at ~16 KB -- split the march FS into two adjacent
+// raw literals here (the compiler concatenates them into one contiguous GLSL source).
+R"GLSL(
 void main()
 {
 	vec2 uv = gl_FragCoord.xy / u_targetSize;
@@ -392,7 +448,17 @@ void main()
 
 			// energy-conserving in-scatter slice (Beer-Lambert)
 			float stepT = exp( -u_sigmaT * dens * stepLen );
-			vec3 S = u_lightColor * ( scatter * powderTerm + rim ) + ambient;
+			// DIRECT-SUN FORWARD SCATTER (codex #3): a punchy forward lobe gated by SUN EXPOSURE
+				// (low cone optical depth => sun-facing). Blows sun-lit upper turrets toward near-WHITE
+				// while shadowed cores (high tauL) stay dark grey/near-black -- the HARD storm tonal
+				// range (do NOT chase this by lowering ambient, which would re-flatten the cloud).
+				float sunVis     = exp( -tauL * u_selfShadow );
+				float directBeam = u_sunForward * sunVis * hg( cosT, u_sunG );
+
+				// neutral-warm cloud ALBEDO on the DIRECT-lit response (codex #6): sun-lit caps read
+				// warm-white; the cool sky AMBIENT below stays separate so shadows go grey, not blue.
+				vec3 capAlbedo = vec3( 1.0, 0.96, 0.90 );
+				vec3 S = u_lightColor * capAlbedo * ( ( scatter + directBeam ) * powderTerm + rim ) + ambient;
 			L += Tview * ( 1.0 - stepT ) * S;
 			Tview *= stepT;
 			if( Tview < 0.01 )
