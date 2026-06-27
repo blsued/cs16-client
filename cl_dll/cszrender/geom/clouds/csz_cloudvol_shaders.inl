@@ -93,6 +93,8 @@ uniform vec3  u_windVec;       // world-u/sec horizontal wind drift (dir*speed);
 uniform float u_evolveRate;    // slow volume-EVOLVE (morph) rate: advances the noise sample THROUGH the volume
 uniform float u_density;       // density multiplier
 uniform float u_coverage;      // 0..1 coverage gate (more => fuller box)
+uniform float u_hBase;         // cumulus height gradient: flat-ish base ramp-in fraction [0,u_hBase]
+uniform float u_hTop;          // cumulus height gradient: rounded top fade-out start fraction [u_hTop,1]
 uniform float u_silver;        // silver-lining (forward-scatter) rim strength
 uniform float u_silverWidth;   // rim band width: LOW=broad glow reaching inward, HIGH=razor edge only
 uniform float u_sigmaT;        // extinction coefficient (1/world-units along the march)
