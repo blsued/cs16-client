@@ -142,7 +142,11 @@ uniform sampler3D u_detail3d;  // 32^3 RGBA8: high-freq Worley detail (RGB octav
 const float PI = 3.14159265358979323846;
 // Compile-time caps so the driver can bound the uniform-controlled loops; the CPU clamps below them.
 const int MAX_COARSE = 128;   // adaptive COARSE-count ceiling (worst-case grazing cost bound)
-const int MAX_ITER   = 256;   // TOTAL march iterations (coarse + fine) hard cap (Tview/horizon fade end it sooner)
+const int MAX_ITER   = 176;   // PERF: TOTAL march iterations (coarse + fine) hard cap. 256->176 caps the GRAZING
+                              // worst-case (acctB flagged the 128->256 doubling as the main worst-case driver);
+                              // paired with fineDiv 4->2 the worst LEGIT ray (vertical full-slab ~96 fine, grazing
+                              // ~156) sits well under 176 so the dense scattered-cumulus deck is fully marched (no
+                              // flat back-cutoff) while pathological long rays stay bounded. (Tview/horizon fade end sooner.)
 const int MAX_LIGHT  = 8;     // cone light tap compile cap (u_lightSteps clamps below)
 
 // Reconstruct world-space position from screen uv + raw depth d.

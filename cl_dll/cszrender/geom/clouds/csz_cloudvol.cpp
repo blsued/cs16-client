@@ -95,7 +95,7 @@ cvar_t *s_cvHorizonFadeHi; // csz_clouds_horizon_fade_hi "0.07" R2 screen-elevat
 cvar_t *s_cvDbgMode;       // csz_clouds_dbg_mode        "0"   R5 debug viz: 0 off / 1 density / 2 transmittance / 3 stepcount / 4 first-hit / 5 scatter / 6 raw-nearest-upsample
 // REBUILD v2: single nightness luminance authority + half-res sharpness pipeline (bilateral upscale + CAS).
 cvar_t *s_cvNightLum;      // csz_clouds_night_lum    "0.06" [0.01..0.5] midnight cloud luma fraction of day (the ONE night dimming dial)
-cvar_t *s_cvFineDiv;       // csz_clouds_fine_div     "4"    [2..8]      ESS in-cloud fine-step divisor (dtFine = stepLenMax/fine_div)
+cvar_t *s_cvFineDiv;       // csz_clouds_fine_div     "2"    [2..8]      ESS in-cloud fine-step divisor (dtFine = dtCoarse/fine_div); PERF default 4->2 (halves in-cloud iters, preserves dtCoarse/sharpness)
 cvar_t *s_cvCas;           // csz_clouds_cas          "0.5"  [0..1]      CAS sharpen amount in the upsample pass
 cvar_t *s_cvDepthSigma;    // csz_clouds_depth_sigma  "0.01"             bilateral DEPTH edge-stop falloff
 cvar_t *s_cvAlphaSigma;    // csz_clouds_alpha_sigma  "8.0"              bilateral cloud-ALPHA edge-stop falloff
@@ -192,7 +192,7 @@ void RegisterCvarsImpl()
 	s_cvDbgMode       = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_mode",        "0",    FCVAR_CLIENTDLL );
 	// REBUILD v2 NEW cvars: the single nightness luminance authority + the half-res sharpness pipeline.
 	s_cvNightLum    = gEngfuncs.pfnRegisterVariable( "csz_clouds_night_lum",    "0.06", FCVAR_CLIENTDLL );  // midnight cloud luma as a fraction of day (set EQUAL to the world day-for-night floor). Single night dimming authority.
-	s_cvFineDiv     = gEngfuncs.pfnRegisterVariable( "csz_clouds_fine_div",     "4",    FCVAR_CLIENTDLL );  // in-cloud fine-step divisor for ESS refine (dtFine = stepLenMax / fine_div)
+	s_cvFineDiv     = gEngfuncs.pfnRegisterVariable( "csz_clouds_fine_div",     "2",    FCVAR_CLIENTDLL );  // PERF: in-cloud fine-step divisor (dtFine = dtCoarse / fine_div). 4->2 HALVES in-cloud iters (the looking-up 9-10ms peak driver) while leaving dtCoarse -- hence first-hit/silhouette precision + thin-wisp catching (SHARPNESS) -- untouched. dtFine 4.4->8.9u stays ~34x oversampled vs the 300u detail field; energy-conserving Beer-Lambert keeps density/transmittance. Live cvar: A/B 2/3/4 without a rebuild.
 	s_cvCas         = gEngfuncs.pfnRegisterVariable( "csz_clouds_cas",          "0.5",  FCVAR_CLIENTDLL );  // CAS contrast-adaptive sharpen amount in the upsample pass (0 = bilateral only)
 	s_cvDepthSigma  = gEngfuncs.pfnRegisterVariable( "csz_clouds_depth_sigma",  "0.01", FCVAR_CLIENTDLL );  // joint-bilateral DEPTH edge-stop falloff (1/world-u of linear depth) -> crisp vs terrain
 	s_cvAlphaSigma  = gEngfuncs.pfnRegisterVariable( "csz_clouds_alpha_sigma",  "8.0",  FCVAR_CLIENTDLL );  // joint-bilateral cloud-ALPHA edge-stop falloff -> crisp cloud-vs-sky silhouette
