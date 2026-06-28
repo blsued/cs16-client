@@ -168,10 +168,13 @@ float remap( float v, float a, float b, float c, float d )
 // top (over [u_hTop,1]), ->0 at both slab faces so neither Z face is a visible edge. hf in [0,1].
 float HeightGradient( float hf )
 {
-	float hb = clamp( hf / max( u_hBase, 1e-3 ), 0.0, 1.0 );             // feathered flat base
-	float ht = clamp( ( 1.0 - hf ) / max( 1.0 - u_hTop, 1e-3 ), 0.0, 1.0 );
-	ht = ht * ht * ( 3.0 - 2.0 * ht );                                  // smoothstep -> ROUNDED dome top
-	return clamp( hb * ht, 0.0, 1.0 );
+	// M3 cumulus gradient: smoothstep flat base + rounded domed top (R1 §1b). The SOLID body lives
+	// between u_hBase and u_hTop (defaults 0.16 / 0.88), rounding off above -> flat LCL base + heaped
+	// crown. The smoothstep base (vs the old linear ramp) pushes the core toward 1.0, FEEDING the M1
+	// precondition so the canonical edge erosion can localize to the rim instead of shredding the body.
+	float base = smoothstep( 0.0, max( u_hBase, 1e-3 ), hf );           // flat feathered base
+	float top  = 1.0 - smoothstep( u_hTop, 1.0, hf );                   // rounded dome fade-out
+	return clamp( base * top, 0.0, 1.0 );
 }
 )GLSL"
 // MSVC C2026: a single raw string literal caps ~16 KB -- split into adjacent literals (the
@@ -190,15 +193,16 @@ float CoverageField( vec2 wxy )
 }
 
 // SampleCloudDensity -- the SINGLE density function shared by the view march, the cone light
-// march AND the AO trace. REBUILD v2 chain (order is load-bearing):
+// march AND the AO trace. REBUILD v2 chain, M1/M2/M3 fix (order is load-bearing):
 //   animate(drift+evolve) -> domain-warp + incommensurate de-tile taps
 //   STAGE 1 DILATE  : base = remap(perlinWorley.r, worleyFBM-1, 1, 0,1)        (round billows)
-//                     x HeightGradient (flat feathered base, rounded dome, ->0 at both faces)
-//   STAGE 2 CARVE   : cloud = remap(base, 1-cov, 1, 0,1) * cov                 (CRISP existence edge, NO pow-lift)
-//   STAGE 3 ERODE   : edge-ONLY high-freq Worley, height-varying (wispy base / cauliflower top)
-// The pow(cloud,0.6) body-lift and the outer-shell `mid` cauliflower pass are DELETED (they
-// flattened the 0->1 silhouette = soft halo / popcorn). Fullness is recovered optically via
-// u_density/u_sigmaT, NEVER by re-lifting low densities. detail=0 skips ONLY the fine erosion.
+//                     x HeightGradient (M3: smoothstep flat base, rounded dome, ->0 at both faces)
+//   STAGE 2 CARVE+LIFT : cloud = pow( remap(base, 1-cov, 1, 0,1), 0.6 )        (crisp edge, core re-LIFTED to ~1.0)
+//   STAGE 3 ERODE   : canonical remap-subtract (M2), self-localizing to the rim (billow base / wispy top)
+// M1 restores the pow(.,0.6) body-lift the v2 rebuild had deleted: WITHOUT a ~1.0 core the canonical
+// erosion's remap range collapses and erases the whole body into smoke-threads (Skybolt's documented
+// failure mode). Optical fullness via u_density/u_sigmaT is ON TOP of this, not a substitute for it.
+// detail=0 skips ONLY the fine erosion.
 float SampleCloudDensity( vec3 p, int detail )
 {
 	// in-slab height fraction (Quake Z-up): 0 at the cloud base, 1 at the deck top.
@@ -235,20 +239,23 @@ float SampleCloudDensity( vec3 p, int detail )
 	float covMean = clamp( u_coverage, 0.0, 1.0 );
 	float cov     = clamp( covMean + ( CoverageField( p.xy ) - 0.5 ) * u_covContrast, 0.0, 1.0 );
 
-	// STAGE 2 CARVE: the CRISP existence edge (Schneider coverage carve). NO pow-lift, NO mid pass.
-	float cloud = remap( base, 1.0 - cov, 1.0, 0.0, 1.0 ) * cov;
+	// STAGE 2 CARVE + BODY-LIFT (M1): the coverage carve gives the crisp existence edge, then the
+	// pow(.,0.6) RE-LIFTS interiors so the core plateaus near 1.0. The deleted `* cov` cap (cov~0.55)
+	// used to pin the whole body at ~0.55, which broke STAGE-3's edge localization. The pow-lift is the
+	// Nubis coverage-dilation precondition: interior solid, only the feathery boundary stays low.
+	float cloud = pow( remap( base, 1.0 - cov, 1.0, 0.0, 1.0 ), 0.6 );
 
-	// STAGE 3 EDGE-ONLY high-freq erosion (anti-popcorn): the (1-smoothstep) edge mask is ~0 inside
-	// thick cloud and 1 only on the thin outer shell, so detail TEARS the silhouette without bumping
-	// dense interiors. Height-varying chroma: wispy base -> billowy cauliflower top. Detail evolves
-	// FASTER so edges continuously fray/morph.
+	// STAGE 3 CANONICAL remap-subtract erosion (M2, Schneider/Nubis): self-localizing -- now that M1
+	// lifts the core to ~1.0, raising the remap's lower input bound by `modifier*erode` eats ONLY the
+	// low-valued rim and leaves the solid interior intact (no smoothstep hinge for the body to miss).
+	// `modifier` mixes the high-freq detail FBM with its inverse over height -> billowy base, wispy top.
+	// Detail evolves FASTER so the eroded edges continuously fray/morph.
 	if( detail == 1 && cloud > 0.0 && u_detailAmt > 0.001 )
 	{
 		vec3  dt   = texture( u_detail3d, ( p + drift * 1.5 + evolve * 2.3 + warpOff ) * u_detailFreq ).rgb;
-		float dfbm = dot( dt, vec3( 0.625, 0.25, 0.125 ) );
-		float chr  = mix( 1.0 - dfbm, dfbm, clamp( hf * 1.5, 0.0, 1.0 ) );   // wispy base -> cauliflower top
-		float edge = 1.0 - smoothstep( 0.0, 0.55, cloud );                  // erosion confined to the outer shell
-		cloud = remap( cloud, chr * ( u_detailAmt * u_erodeDepth ) * edge, 1.0, 0.0, 1.0 );
+		float dfbm = dot( dt, vec3( 0.625, 0.25, 0.125 ) );                       // high-freq detail FBM
+		float modifier = mix( dfbm, 1.0 - dfbm, clamp( hf * 4.0, 0.0, 1.0 ) );    // billow base -> wisp top
+		cloud = remap( cloud, modifier * ( u_detailAmt * u_erodeDepth ), 1.0, 0.0, 1.0 );
 	}
 
 	return clamp( cloud, 0.0, 1.0 ) * u_density;

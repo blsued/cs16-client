@@ -73,6 +73,7 @@ cvar_t *s_cvMaster;   // csz_clouds        "0"  master on/off (0 = production by
 cvar_t *s_cvTod;      // csz_clouds_tod    "0"  0 live / 1 day / 2 sunset / 3 full-moon night
 cvar_t *s_cvRes;      // csz_clouds_res    "4"  resolution divisor (quarter-res)
 cvar_t *s_cvPerf;     // csz_clouds_perf   "0"  0 off / 1 per-frame GPU-ms timer log
+cvar_t *s_cvGlDebug;  // csz_gl_debug      "0"  A1: 0 off / 1 per-stage glGetError checkpoints in the cloud frame path (dev; pinpoints the 0x502 at runtime)
 // TEST-ONLY judgeability knob (NOT a production/look cvar): relocate the hero box to an
 // ABSOLUTE WORLD position so a clamped/headless capture camera (which cannot freecam/setpos
 // in the rig) can place the cloud wherever the fixed sky-vantage camera is already looking,
@@ -170,6 +171,7 @@ void RegisterCvarsImpl()
 	// joint depth+alpha bilateral + CAS sharpen (see kCloudUpsampleFs).
 	s_cvRes     = gEngfuncs.pfnRegisterVariable( "csz_clouds_res", "2", FCVAR_CLIENTDLL );
 	s_cvPerf    = gEngfuncs.pfnRegisterVariable( "csz_clouds_perf","0", FCVAR_CLIENTDLL );
+	s_cvGlDebug = gEngfuncs.pfnRegisterVariable( "csz_gl_debug",   "0", FCVAR_CLIENTDLL );  // A1: per-stage glGetError checkpoints in the cloud frame path (dev, default off)
 	s_cvDbgNear   = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_nearbox",    "0",    FCVAR_CLIENTDLL );
 	// Absolute-world hero-box placement (active only when csz_clouds_dbg_nearbox 1). Defaults
 	// frame a big cumulus HIGH in open sky over the de_dust2 playable area, sited to land in the
@@ -193,7 +195,7 @@ void RegisterCvarsImpl()
 	// REBUILD v2 NEW cvars: the single nightness luminance authority + the half-res sharpness pipeline.
 	s_cvNightLum    = gEngfuncs.pfnRegisterVariable( "csz_clouds_night_lum",    "0.06", FCVAR_CLIENTDLL );  // midnight cloud luma as a fraction of day (set EQUAL to the world day-for-night floor). Single night dimming authority.
 	s_cvFineDiv     = gEngfuncs.pfnRegisterVariable( "csz_clouds_fine_div",     "2",    FCVAR_CLIENTDLL );  // PERF: in-cloud fine-step divisor (dtFine = dtCoarse / fine_div). 4->2 HALVES in-cloud iters (the looking-up 9-10ms peak driver) while leaving dtCoarse -- hence first-hit/silhouette precision + thin-wisp catching (SHARPNESS) -- untouched. dtFine 4.4->8.9u stays ~34x oversampled vs the 300u detail field; energy-conserving Beer-Lambert keeps density/transmittance. Live cvar: A/B 2/3/4 without a rebuild.
-	s_cvCas         = gEngfuncs.pfnRegisterVariable( "csz_clouds_cas",          "0.5",  FCVAR_CLIENTDLL );  // CAS contrast-adaptive sharpen amount in the upsample pass (0 = bilateral only)
+	s_cvCas         = gEngfuncs.pfnRegisterVariable( "csz_clouds_cas",          "0.2",  FCVAR_CLIENTDLL );  // M4: 0.5->0.2 -- CAS crisps the high-freq strands we are REMOVING, so back it off (upsample pass; 0 = bilateral only)
 	s_cvDepthSigma  = gEngfuncs.pfnRegisterVariable( "csz_clouds_depth_sigma",  "0.01", FCVAR_CLIENTDLL );  // joint-bilateral DEPTH edge-stop falloff (1/world-u of linear depth) -> crisp vs terrain
 	s_cvAlphaSigma  = gEngfuncs.pfnRegisterVariable( "csz_clouds_alpha_sigma",  "8.0",  FCVAR_CLIENTDLL );  // joint-bilateral cloud-ALPHA edge-stop falloff -> crisp cloud-vs-sky silhouette
 	// LOOK hot cvars (swept live, no rebuild). Defaults = the iter-2 SUBSTANCE-LOCK target:
@@ -215,14 +217,14 @@ void RegisterCvarsImpl()
 	// detailscale 1400->300 (fine crisp wisps, not coarse 43u lumps), hbase 0.15->0.12 (feathered
 	// flat base), htop 0.55->0.45 (rounded dome), erode_depth->0.55 (edge bite), sunfwd 1.7->0.6
 	// (bound day forward beam), moon 1.9->1.0 (RELATIVE dial; csz_clouds_night_lum owns dimming).
-	s_cvCoverage    = gEngfuncs.pfnRegisterVariable( "csz_clouds_coverage",    "0.40",  FCVAR_CLIENTDLL );
-	s_cvDensity     = gEngfuncs.pfnRegisterVariable( "csz_clouds_density",     "1.15",  FCVAR_CLIENTDLL );
-	s_cvSigma       = gEngfuncs.pfnRegisterVariable( "csz_clouds_sigma",       "0.0045",FCVAR_CLIENTDLL );
+	s_cvCoverage    = gEngfuncs.pfnRegisterVariable( "csz_clouds_coverage",    "0.55",  FCVAR_CLIENTDLL );  // M4: 0.40->0.55 -- scattered-but-substantial cumulus
+	s_cvDensity     = gEngfuncs.pfnRegisterVariable( "csz_clouds_density",     "1.6",   FCVAR_CLIENTDLL );  // M4: 1.15->1.6 -- raise optical opacity (on top of M1, not a substitute)
+	s_cvSigma       = gEngfuncs.pfnRegisterVariable( "csz_clouds_sigma",       "0.006", FCVAR_CLIENTDLL );  // M4: 0.0045->0.006 -- extinction coeff
 	s_cvBaseScale   = gEngfuncs.pfnRegisterVariable( "csz_clouds_basescale",   "2000",  FCVAR_CLIENTDLL );  // REBUILD: distinct cumulus across deck; de-tile hides the 2000u repeat
-	s_cvDetail      = gEngfuncs.pfnRegisterVariable( "csz_clouds_detail",      "0.85",  FCVAR_CLIENTDLL );
-	s_cvDetailScale = gEngfuncs.pfnRegisterVariable( "csz_clouds_detailscale", "300",   FCVAR_CLIENTDLL );  // REBUILD: fine crisp edge wisps (~20-75u features), not coarse 43u lumps
-	s_cvHBase       = gEngfuncs.pfnRegisterVariable( "csz_clouds_hbase",       "0.12",  FCVAR_CLIENTDLL );  // REBUILD: feathered flat-ish base
-	s_cvHTop        = gEngfuncs.pfnRegisterVariable( "csz_clouds_htop",        "0.45",  FCVAR_CLIENTDLL );  // REBUILD: rounded dome top
+	s_cvDetail      = gEngfuncs.pfnRegisterVariable( "csz_clouds_detail",      "0.35",  FCVAR_CLIENTDLL );  // M4: 0.85->0.35 -- subtle edge erosion (R4 #4)
+	s_cvDetailScale = gEngfuncs.pfnRegisterVariable( "csz_clouds_detailscale", "1000",  FCVAR_CLIENTDLL );  // M4: 300->1000 -- smoke-strand (~20-75u) -> cauliflower-lobe scale
+	s_cvHBase       = gEngfuncs.pfnRegisterVariable( "csz_clouds_hbase",       "0.16",  FCVAR_CLIENTDLL );  // M3: 0.12->0.16 -- smoothstep flat base end (R1 §1b)
+	s_cvHTop        = gEngfuncs.pfnRegisterVariable( "csz_clouds_htop",        "0.88",  FCVAR_CLIENTDLL );  // M3: 0.45->0.88 -- rounded dome fade-out start (R1 §1b)
 	s_cvFalloff     = gEngfuncs.pfnRegisterVariable( "csz_clouds_falloff",     "0.12",  FCVAR_CLIENTDLL );  // inert now (slab faces beyond marchFar); kept for config-compat
 	s_cvSilver      = gEngfuncs.pfnRegisterVariable( "csz_clouds_silver",      "0.80",  FCVAR_CLIENTDLL );
 	s_cvSilverWidth = gEngfuncs.pfnRegisterVariable( "csz_clouds_silver_width","0.9",   FCVAR_CLIENTDLL );
@@ -245,7 +247,7 @@ void RegisterCvarsImpl()
 	// STRUCTURE hot cvars (iter-3): stacked cauliflower turrets + shadowed valleys + irregular base.
 	// Defaults already show clearly separated lobes with internal shadow pockets out of the box.
 	s_cvBillow      = gEngfuncs.pfnRegisterVariable( "csz_clouds_billow",      "0.10",  FCVAR_CLIENTDLL );  // DEPRECATED (v3): turret hard-carve removed
-	s_cvErodeDepth  = gEngfuncs.pfnRegisterVariable( "csz_clouds_erode_depth", "0.55",  FCVAR_CLIENTDLL );  // REBUILD: edge-only erosion bite (<= ~0.5 Schneider)
+	s_cvErodeDepth  = gEngfuncs.pfnRegisterVariable( "csz_clouds_erode_depth", "0.25",  FCVAR_CLIENTDLL );  // M4: 0.55->0.25 -- shallower canonical remap-subtract erosion bite
 	s_cvErodeOct    = gEngfuncs.pfnRegisterVariable( "csz_clouds_erode_oct",   "3",     FCVAR_CLIENTDLL );
 	// codex compare2: LOWER selfshadow (1.6 -> 0.85) so cores read DEEP GREY, not the black-smoke
 	// charcoal the prior 1.6 produced; the cap-light + tonal range keep the lit/shadow contrast.
@@ -768,11 +770,23 @@ struct CelLight
 	float ambGround[3];
 	float ambSky[3];
 };
-void DeriveCelestial( float phase, float nightness, float sunI, float moonI, float ambientMul, float moonTint, CelLight &out )
+void DeriveCelestial( float phase, float nightness, float sunI, float moonI, float ambientMul, float moonTint,
+                      const float *moonDirReal, const float *moonColReal, CelLight &out )
 {
 	float sun[3];
 	skymath::SunDir( phase, sun );
+	// N2: light the night clouds by the REAL published moon, not the sun antipode. When the scene
+	// publishes a valid moonlightDir (surface->moon, same TOWARD-the-body convention as SunDir), use
+	// it so the lit face / silver rim lands on the moon-facing edge; else fall back to -sun.
 	float moon[3] = { -sun[0], -sun[1], -sun[2] };
+	if( moonDirReal )
+	{
+		float ml = sqrtf( moonDirReal[0]*moonDirReal[0] + moonDirReal[1]*moonDirReal[1] + moonDirReal[2]*moonDirReal[2] );
+		if( ml > 0.1f )
+		{
+			moon[0] = moonDirReal[0] / ml; moon[1] = moonDirReal[1] / ml; moon[2] = moonDirReal[2] / ml;
+		}
+	}
 
 	// Direction: lerp sun->moon, guarded against the exact-antipode cancellation at the
 	// twilight crossover (pick the dominant body if the blend nears zero length).
@@ -797,7 +811,21 @@ void DeriveCelestial( float phase, float nightness, float sunI, float moonI, flo
 	// The retired `moonI=1.9` absolute and the ngS/ngG night-ambient floor were the night-too-bright
 	// defect -- both deleted. moonTint is chroma-only (0 neutral .. 2 very cool).
 	const float dayC[3]   = { 1.00f, 0.97f, 0.90f };
-	const float coolC[3]  = { 0.74f, 0.86f, 1.00f };   // cool-white moon chroma (no dimming here)
+	// N2: cool-white moon CHROMA target = the real published moonColor (~{0.54,0.64,0.95}), normalized
+	// to max-channel 1.0 so it stays DAY-MAGNITUDE (a chroma, not a dim absolute -- u_nightLum owns the
+	// dimming) and the cool blue-silver scotopic tint is the moon's actual hue. Falls back to a fixed
+	// cool-white if no valid moonColor is published.
+	float coolC[3] = { 0.74f, 0.86f, 1.00f };
+	if( moonColReal )
+	{
+		float mx = moonColReal[0];
+		if( moonColReal[1] > mx ) mx = moonColReal[1];
+		if( moonColReal[2] > mx ) mx = moonColReal[2];
+		if( mx > 1e-3f )
+		{
+			coolC[0] = moonColReal[0] / mx; coolC[1] = moonColReal[1] / mx; coolC[2] = moonColReal[2] / mx;
+		}
+	}
 	float nightC[3];
 	for( int i = 0; i < 3; i++ )
 		nightC[i] = mixf( 1.0f, coolC[i], clampf( moonTint, 0.0f, 2.0f ) );
@@ -933,6 +961,25 @@ void ApplyWeatherTint( int w, CelLight &c )
 	}
 }
 #endif   // retired weather-preset machinery
+
+// A1: cvar-gated per-stage glGetError checkpoint for the cloud frame path. When csz_gl_debug is OFF
+// (default) it is a single cvar compare + early return -- it does NOT call glGetError, so it never
+// drains an error the surrounding code is responsible for, and adds ~zero cost. When ON it drains +
+// logs every pending GL error tagged with `tag`, so the main window's TEST agent can localize exactly
+// which cloud-pass GL op (or which prior stage) leaves the residual 0x502. Returns the first error.
+GLenum CloudGlCheck( const char *tag )
+{
+	if( ReadCvar( s_cvGlDebug, 0.0f ) < 0.5f )
+		return GL_NO_ERROR;
+	GLenum first = GL_NO_ERROR, e; int n = 0;
+	while( ( e = glGetError() ) != GL_NO_ERROR && n < 8 )
+	{
+		if( first == GL_NO_ERROR ) first = e;
+		CSZ_LogError( "cloudglcheck", "[csz_gl_debug] GL error 0x%x at %s (frame=%u)", (unsigned)e, tag, s_frame );
+		n++;
+	}
+	return first;
+}
 
 }  // anonymous namespace
 
@@ -1112,7 +1159,13 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	}
 
 	CelLight cel;
-	DeriveCelestial( phase, nightness, sunI, moonI, ambientMul, moonTint, cel );
+	// N2: hand DeriveCelestial the REAL published moon so the night clouds are lit BY the moon (dir +
+	// cool chroma), not the sun antipode. Only pass them when the scene actually has a moon/moonlight
+	// up (else null => fall back to -sun / fixed cool-white). todElev/todAzim stay -1 at tod 0 (live)
+	// so no synthetic ElevYawDir override fires and moonlightDir flows straight through to cel.dir.
+	const float *moonDirReal = view.ambience.moonlightEnabled ? view.ambience.moonlightDir : nullptr;
+	const float *moonColReal = view.ambience.moonEnabled      ? view.ambience.moonColor    : nullptr;
+	DeriveCelestial( phase, nightness, sunI, moonI, ambientMul, moonTint, moonDirReal, moonColReal, cel );
 
 	// --- CLOUD-ONLY sun-direction override (art/debug, the key missing lever) -----------
 	// When sun_elev>=0, rebuild ONLY this cloud pass's light DIRECTION from (elev,azim) using
@@ -1301,12 +1354,21 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	GLint     prevDepthMask = GL_TRUE; glGetIntegerv( GL_DEPTH_WRITEMASK, &prevDepthMask );
 
 	// --- pre-pass GL-error drain + attribution marker -------------------------------
+	// A1/A2: ALWAYS drain so the cloud pass starts from a clean GL state, but only LOG under
+	// csz_gl_debug (NOT perf -- the old `perf>0` gate flooded -log with one line/frame whenever the
+	// GPU timer was on). Honest wording: an error PRESENT at cloud-pass entry was generated by an
+	// EARLIER stage THIS or last frame (the cloud post-pass check below proves the cloud draws add
+	// none); the prior "predates the cloud pass" phrasing falsely implied stock-engine origin. The
+	// most likely generator is the engine's compat-profile GL_SelectTexture under -glcore in
+	// LeaveTakeover / the 2D-HUD path (see csz_sky_compose.cpp RestoreTmus notes); run csz_gl_debug
+	// with the per-stage CloudGlCheck()s to localize it precisely.
 	{
+		bool logDrain = ( ReadCvar( s_cvGlDebug, 0.0f ) >= 0.5f );
 		GLenum e; int drained = 0;
 		while( ( e = glGetError() ) != GL_NO_ERROR && drained < 8 )
 		{
-			if( perf > 0 )
-				CSZ_LogInfo( "cloudvol", "[csz_clouds] pre-existing GL 0x%x (predates the cloud pass)", (unsigned)e );
+			if( logDrain )
+				CSZ_LogError( "cloudglcheck", "[csz_gl_debug] GL error 0x%x present at cloud-pass entry (generated by an earlier stage; drained)", (unsigned)e );
 			drained++;
 		}
 	}
@@ -1434,9 +1496,12 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	if( s_gpu.mBase3d >= 0 )      glUniform1i( s_gpu.mBase3d, kSkyTmuBase + 1 );
 	if( s_gpu.mDetail3d >= 0 )    glUniform1i( s_gpu.mDetail3d, kSkyTmuBase + 2 );
 
+	CloudGlCheck( "march uniforms (pre-draw)" );
 	glDrawArrays( GL_TRIANGLES, 0, 3 );
+	CloudGlCheck( "march glDrawArrays" );
 	BindVao( 0 );
 	SkyComposeRestoreTmus();
+	CloudGlCheck( "march SkyComposeRestoreTmus" );
 
 	// ============== Pass 2: JOINT BILATERAL upsample + CAS sharpen + premultiplied composite ====
 	// REBUILD v2: replaces the plain bilinear tap with a depth-AND-alpha joint bilateral (clouds do
@@ -1449,10 +1514,17 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	SetBlend( kBlendPremulOver );   // dst = src.rgb + dst*(1-src.a) -- premultiplied over
 	SetCull( false );
 
+	CloudGlCheck( "upsample BindFbo+state (hdrFbo)" );
 	UseProgram( s_gpu.upsample.program );
 	BindVao( s_gpu.vao );
 	SkyComposeBindTex( 0, GL_TEXTURE_2D, s_tgt.colorTex );   // low-res cloud result on sky unit 0
 	SkyComposeBindTex( 1, GL_TEXTURE_2D, depthTex );         // full-res scene depth on sky unit 1
+	// NOTE (A1 candidate): depthTex is the hdrFbo's OWN GL_DEPTH_ATTACHMENT (SkyComposeDepthTex ==
+	// s_hdr.depthTex), so this draw samples a texture attached to the bound draw FBO -- a read-only
+	// feedback loop (depth test+write are OFF, so the attachment is never written). GL 4.x permits an
+	// unwritten attachment to be sampled; on a strict 3.3-core driver it is UB and can raise 0x502. The
+	// post-pass check below currently reports zero, i.e. THIS driver tolerates it -- the per-stage
+	// CloudGlCheck()s confirm at runtime whether any residual originates here vs the engine takeover.
 	float fSize[2] = { (float)fullW, (float)fullH };
 	if( s_gpu.uCloudTex >= 0 )   glUniform1i( s_gpu.uCloudTex, kSkyTmuBase + 0 );
 	if( s_gpu.uFullSize >= 0 )   glUniform2fv( s_gpu.uFullSize, 1, fSize );
@@ -1464,9 +1536,12 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	if( s_gpu.uAlphaSigma >= 0 ) glUniform1f( s_gpu.uAlphaSigma, alphaSigma );
 	if( s_gpu.uCasAmount >= 0 )  glUniform1f( s_gpu.uCasAmount, casAmount );
 
+	CloudGlCheck( "upsample uniforms (pre-draw)" );
 	glDrawArrays( GL_TRIANGLES, 0, 3 );
+	CloudGlCheck( "upsample glDrawArrays" );
 	BindVao( 0 );
 	SkyComposeRestoreTmus();
+	CloudGlCheck( "upsample SkyComposeRestoreTmus" );
 
 	if( issuing )
 	{
@@ -1489,11 +1564,19 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	if( prevSrgb )    glEnable( GL_FRAMEBUFFER_SRGB ); else glDisable( GL_FRAMEBUFFER_SRGB );
 
 	// --- post-pass GL-error check: the cloud pass MUST contribute zero ---------------
+	// A2: ALWAYS drain (never swallow a real error), but LOG-ONCE so a genuine regression surfaces
+	// without flooding -log every frame. A persistent cloud-pass error is a build regression, not the
+	// upstream-takeover residual the entry drain handles; one logged line is enough to flag it.
 	{
+		static bool s_postErrLogged = false;
 		GLenum e; int n = 0;
 		while( ( e = glGetError() ) != GL_NO_ERROR && n < 8 )
 		{
-			CSZ_LogError( "cloudvol", "[csz_clouds] CLOUD-PASS GL ERROR 0x%x (frame=%u)", (unsigned)e, s_frame );
+			if( !s_postErrLogged )
+			{
+				s_postErrLogged = true;
+				CSZ_LogError( "cloudvol", "[csz_clouds] CLOUD-PASS GL ERROR 0x%x (frame=%u) -- the cloud pass MUST contribute zero; logged once, run csz_gl_debug to localize", (unsigned)e, s_frame );
+			}
 			n++;
 		}
 	}
