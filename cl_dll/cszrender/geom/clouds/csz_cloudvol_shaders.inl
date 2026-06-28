@@ -130,6 +130,13 @@ uniform int   u_dbgMode;       // R5: debug viz (0 off / 1 density / 2 transmitt
 uniform int   u_weatherKind;   // iter5: EXPLICIT weather hard-gate (0 = clear NORMAL => old path byte-identical; 1 = rain; 2 = snow). Gates ALL overcast-structure behavior (NOT coverage inference).
 uniform float u_overcastVar;   // iter5 P1: low-freq billow injected into the coverage field (overcast only; 0 = off)
 uniform float u_lowHaze;       // iter5 P2: cold low-band horizon-haze amplitude (overcast only; 0 = off)
+// PATH A (macro cloud distribution): a LOW-FREQUENCY world-XY coverage field replaces the global
+// coverage scalar so the sky has REAL large-scale structure (cloudy regions vs clear/open sky)
+// for ALL weather states, and an INCOMMENSURATE second base tap de-tiles the within-region shape.
+uniform float u_covFreq;       // PATH A: macro coverage-field frequency (1/world-period); period >> marched footprint => no visible repeat
+uniform float u_covContrast;   // PATH A: coverage-field spread around the preset level (HIGH=scattered gaps, LOW=mild overcast variation)
+uniform float u_covDrift;      // PATH A: weather-system world drift fraction of u_windVec (0 = world-static field; existing cloud drift/evolve unchanged)
+uniform float u_detile;        // CHANGE 2: blend weight of the incommensurate (0.73x) second base tap (0 = old single tap; de-repeats within-region shape)
 
 // scene depth + reconstruct (standard inverse-viewproj; re-derived, no fog include)
 uniform sampler2D u_depthTex;  // raw window-space scene depth (compare-mode NONE)
@@ -196,6 +203,24 @@ R"GLSL(
 //   * the cumulus height gradient gives vertical puffy form (flat base, rounded top);
 //   * high-freq Worley = EDGE-ONLY erosion (the (1-smoothstep) edge weight keeps dense
 //     interiors smooth). detail=0 skips ONLY the fine erosion (cheap shadow taps).
+// PATH A -- MACRO SPATIAL COVERAGE FIELD over world horizontal XY (Quake Z-up = vertical, so
+// horizontal = X,Y). A LOW-FREQUENCY field whose world period (1/u_covFreq, ~40000u) EXCEEDS the
+// marched footprint (marchFar ~20000 => ~40000u sky diameter) so it does NOT visibly repeat in
+// view: ONE "weather cell" spans the reachable sky => some regions cloudy, others clear/open. Two
+// INCOMMENSURATE taps (ratio 0.73, NON-harmonic) push the apparent period to their LCM so even the
+// field itself shows no tile seam. WORLD-ANCHORED: u_covDrift defaults 0 (the weather mask is
+// world-static) and the cloud TEXTURE still drifts THROUGH it via ps below, so existing wind drift +
+// volume evolve animation is UNCHANGED -- clouds simply form on entering a cloudy region and
+// dissipate leaving it. Returns 0..1 (the R channel = the smooth Perlin-Worley base). Sampled on
+// RAW world p.xy (not the drifted ps) so the distribution is camera-parallax-correct and stable.
+float CoverageField( vec2 wxy )
+{
+	vec2 q  = wxy + u_windVec.xy * ( u_time * u_covDrift );
+	float f1 = texture( u_base3d, vec3( q * u_covFreq, 0.317 ) ).r;
+	float f2 = texture( u_base3d, vec3( q * ( u_covFreq * 0.73 ) + vec2( 0.41, 0.19 ), 0.622 ) ).r;
+	return clamp( 0.6 * f1 + 0.4 * f2, 0.0, 1.0 );
+}
+
 float SampleCloudDensity( vec3 p, int detail )
 {
 	// in-slab height fraction (Quake Z-up): 0 at the cloud base, 1 at the deck top.
@@ -222,7 +247,15 @@ float SampleCloudDensity( vec3 p, int detail )
 	vec3 warpOff = ( texture( u_base3d, ps * ( u_baseFreq * 0.37 ) ).gba * 2.0 - 1.0 ) * u_domainWarp;
 	ps += warpOff;
 
-	vec4 b     = texture( u_base3d, ps * u_baseFreq );
+	// CHANGE 2 (de-tile): the 128^3 base is GL_REPEAT-tiled at world period 1/u_baseFreq (~3000u),
+	// so a single tap repeats the SAME lump 6-13x across the visible sky. Composite a SECOND tap at
+	// an INCOMMENSURATE (non-harmonic) frequency u_baseFreq*0.73 with a phase offset: the apparent
+	// period becomes the LCM of the two (effectively never inside the footprint), killing the macro
+	// repeat WITHOUT a new asset. u_detile=0 => the old single tap exactly. mid/detail taps below stay
+	// coherent because they erode the resulting `cloud`, not the raw base.
+	vec4 b1    = texture( u_base3d, ps * u_baseFreq );
+	vec4 b2    = texture( u_base3d, ps * ( u_baseFreq * 0.73 ) + vec3( 0.19, 0.41, 0.27 ) );
+	vec4 b     = mix( b1, b2, u_detile );
 	float wfbm = dot( b.gba, vec3( 0.625, 0.25, 0.125 ) );
 
 	// Perlin-Worley base (R) DILATED by the Worley billow FBM => round connected billows.
@@ -233,13 +266,24 @@ float SampleCloudDensity( vec3 p, int detail )
 
 	// COVERAGE GATE: slide the existence threshold (low => isolated puffs, high => overcast),
 	// then re-scale by coverage to anchor the round billow look (Schneider).
-	float cov   = clamp( u_coverage, 0.0, 1.0 );
-	// P1 iter5 (OVERCAST only, HARD-GATED by u_weatherKind != 0 -- NOT coverage inference): inject a
-	// LOW-FREQ billow into the EFFECTIVE coverage. At high cov the gate window [1-cov,1] spans almost
-	// the whole base range so the base field stops carving thick/thin patches => featureless deck. A
-	// coarse, slowly-drifting base3d tap dips cov in patches so the window narrows and the base carves
-	// again => stratiform thick/thin breaks. World-stable scale => morphs with the volume, no shimmer.
-	// u_weatherKind==0 (clear NORMAL) skips this entirely => byte-identical old path.
+	// PATH A (load-bearing): cov is no longer a single GLOBAL scalar applied identically everywhere
+	// (which made "cloudy here / clear there" impossible by construction). It is now a per-column
+	// value driven by the MACRO spatial field: u_coverage is the field LEVEL/MEAN (set by the 3
+	// weather presets) and CoverageField(p.xy) spreads it spatially by +/- u_covContrast around 0.5.
+	//   * weather 0 (scattered): LOW level + HIGH contrast => many columns fall below the gate =>
+	//     CLEAR blue sky, the rest = puffy cumulus (the headline distribution).
+	//   * weather 1/2 (overcast): HIGH level + MILD contrast => mostly above the gate (full deck) but
+	//     not a dead-flat ceiling.
+	// Every downstream consumer (body curve, mid mask, edge mask, the light-march / AO re-invocations
+	// of SampleCloudDensity at neighbour points) reads THIS same local cov, so they inherit the
+	// spatial field for free.
+	float covMean = clamp( u_coverage, 0.0, 1.0 );
+	float cov     = clamp( covMean + ( CoverageField( p.xy ) - 0.5 ) * u_covContrast, 0.0, 1.0 );
+	// OVERCAST meso-break (HARD-GATED to weather != 0), layered ON TOP of the macro field for stratiform
+	// thick/thin texture WITHIN the overcast regions. At high cov the gate window [1-cov,1] spans almost
+	// the whole base range so the base field stops carving patches => featureless deck; this coarse,
+	// slowly-drifting base3d tap dips cov so the window narrows and the base carves again. World-stable
+	// scale => morphs with the volume, no shimmer. weather==0 skips it (the macro field already varies cov).
 	if( u_weatherKind != 0 && u_overcastVar > 0.001 )
 	{
 		float lowf = texture( u_base3d, ( ps + evolve * 0.5 ) * ( u_baseFreq * 0.45 ) ).r;

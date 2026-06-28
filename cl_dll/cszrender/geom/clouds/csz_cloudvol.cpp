@@ -146,6 +146,12 @@ cvar_t *s_cvLayerThick;  // csz_clouds_layer_thick   850   [120..6000]  cloud-DE
 cvar_t *s_cvWindDir;     // csz_clouds_wind_dir      45    [0..360]     wind azimuth (deg) for the horizontal drift
 cvar_t *s_cvWindSpeed;   // csz_clouds_wind_speed    60    [0..600]     horizontal drift speed (world-u/sec)
 cvar_t *s_cvEvolve;      // csz_clouds_evolve        35    [0..400]     volume-EVOLVE (morph) rate
+// PATH A (macro cloud distribution) hot cvars: the low-freq world-XY coverage FIELD that gives
+// "clouds in some regions, clear sky in others" + the incommensurate base de-tile.
+cvar_t *s_cvCovScale;    // csz_clouds_cov_scale     42000 [8000..120000] coverage-FIELD world period (freq=1/scale); >> footprint => no visible repeat
+cvar_t *s_cvCovContrast; // csz_clouds_cov_contrast  0.85  [0..2]         field spread around the preset coverage level (per-weather preset; HIGH=scattered gaps, LOW=mild overcast variation)
+cvar_t *s_cvCovDrift;    // csz_clouds_cov_drift      0.0   [0..2]         weather-system world drift fraction of wind (0 = world-static field; existing cloud drift/evolve unchanged)
+cvar_t *s_cvDetile;      // csz_clouds_detile         0.5   [0..0.5]       blend weight of the incommensurate (0.73x) second base tap (de-repeats within-region shape; 0 = old single tap)
 
 void RegisterCvarsImpl()
 {
@@ -248,6 +254,12 @@ void RegisterCvarsImpl()
 	s_cvWindDir     = gEngfuncs.pfnRegisterVariable( "csz_clouds_wind_dir",     "45",   FCVAR_CLIENTDLL );
 	s_cvWindSpeed   = gEngfuncs.pfnRegisterVariable( "csz_clouds_wind_speed",   "60",   FCVAR_CLIENTDLL );
 	s_cvEvolve      = gEngfuncs.pfnRegisterVariable( "csz_clouds_evolve",       "35",   FCVAR_CLIENTDLL );
+	// PATH A (macro cloud distribution): coverage-FIELD scale/contrast/drift + base de-tile.
+	// cov_contrast is re-pushed per weather preset (scattered=high gaps, overcast=mild variation).
+	s_cvCovScale    = gEngfuncs.pfnRegisterVariable( "csz_clouds_cov_scale",    "42000", FCVAR_CLIENTDLL );
+	s_cvCovContrast = gEngfuncs.pfnRegisterVariable( "csz_clouds_cov_contrast", "0.85",  FCVAR_CLIENTDLL );
+	s_cvCovDrift    = gEngfuncs.pfnRegisterVariable( "csz_clouds_cov_drift",    "0.0",   FCVAR_CLIENTDLL );
+	s_cvDetile      = gEngfuncs.pfnRegisterVariable( "csz_clouds_detile",       "0.5",   FCVAR_CLIENTDLL );
 	s_cvarsReady = true;
 	CSZ_LogDev( "cloudvol", "cvars registered (csz_clouds + _tod/_res/_perf/_dbg_* + LOOK: coverage/density/sigma/basescale/detail/detailscale/hbase/htop/falloff/silver/silver_width/powder/ambient/sun/sun_elev/sun_azim/moon/moontint + STRUCTURE: billow/erode_depth/erode_oct/selfshadow/base_irreg/tower_var)" );
 }
@@ -442,6 +454,7 @@ struct VolGpu
 	int mWindVec, mEvolveRate;   // v5 layer animation: wind drift + volume evolve
 	int mDomainWarp, mHorizonFadeLo, mHorizonFadeHi, mDbgMode;   // iter4: R1 warp / R2 elevation fade / R5 debug
 	int mWeatherKind, mOvercastVar, mLowHaze;   // iter5: weather hard-gate + P1 overcast billow + P2 cold low-band haze
+	int mCovFreq, mCovContrast, mCovDrift, mDetile;   // PATH A: macro coverage field (freq/contrast/drift) + base de-tile
 	int mDepthTex, mZNear, mZFar, mInvViewProj, mBase3d, mDetail3d;
 	// upsample uniforms
 	int uCloudTex, uFullSize, uUpDbgMode;
@@ -689,6 +702,10 @@ void BuildPrograms()
 	s_gpu.mWeatherKind   = UniformLoc( s_gpu.march, "u_weatherKind" );    // iter5 hard-gate
 	s_gpu.mOvercastVar   = UniformLoc( s_gpu.march, "u_overcastVar" );    // iter5 P1
 	s_gpu.mLowHaze       = UniformLoc( s_gpu.march, "u_lowHaze" );        // iter5 P2
+	s_gpu.mCovFreq       = UniformLoc( s_gpu.march, "u_covFreq" );        // PATH A coverage field
+	s_gpu.mCovContrast   = UniformLoc( s_gpu.march, "u_covContrast" );    // PATH A
+	s_gpu.mCovDrift      = UniformLoc( s_gpu.march, "u_covDrift" );       // PATH A
+	s_gpu.mDetile        = UniformLoc( s_gpu.march, "u_detile" );         // CHANGE 2 base de-tile
 	s_gpu.mLightReach  = UniformLoc( s_gpu.march, "u_lightReach" );
 	s_gpu.mMarchFar    = UniformLoc( s_gpu.march, "u_marchFar" );
 	s_gpu.mTargetSize  = UniformLoc( s_gpu.march, "u_targetSize" );
@@ -794,15 +811,19 @@ void ApplyWeatherPreset( int w )
 	// iter5: detail/erode/selfsh added so P5 (NORMAL edge crispen) + P1-FIX-5 (per-weather selfShadow)
 	// are wired PER-PRESET WITH RESET (BLOCKER 5): every weather change re-pushes ALL preset cvars, so
 	// a NORMAL-only edge tune cannot leak into rain/snow and vice-versa.
-	struct P { float cov, dens, sigma, amb, sun, sunfwd, cap, silver, powder, height, thick, detail, erode, selfsh; };
+	struct P { float cov, dens, sigma, amb, sun, sunfwd, cap, silver, powder, height, thick, detail, erode, selfsh, covctr; };
+	// PATH A covctr (coverage-FIELD contrast): the per-weather spread of the macro coverage field
+	// around `cov` (the field LEVEL). NORMAL = HIGH (0.85) so columns swing from clear to puffy =>
+	// scattered cumulus over open blue sky. RAIN/SNOW = MILD (0.22/0.30) so the deck stays mostly
+	// overcast but keeps large-scale thick/thin variation (not a dead-flat ceiling).
 	const P presets[3] = {
-		// cov   dens   sigma    amb    sun    sunfwd cap    silver powder height  thick   detail erode  selfsh
+		// cov   dens   sigma    amb    sun    sunfwd cap    silver powder height  thick   detail erode  selfsh covctr
 		// P2: NORMAL thick 850->1500 so the height gradient produces REAL rounded vertical form (a
 		//     850u deck was too thin for the gradient to read => flat sheet). capEps is now derived
 		//     from the SMALLEST box dim (below) so the cap-light normal still resolves at this thickness.
 		// P5 iter5: NORMAL silver 0.50->0.80, detail 0.70->0.85, erode 0.30->0.55 = crisper torn cumulus
 		//     edges (per-preset; overcast keeps smooth-stratiform 0.70/0.30). selfShadow 1.40 (was global).
-		{ 0.40f, 1.15f, 0.0045f, 1.00f, 3.40f, 1.70f, 1.10f, 0.80f, 0.40f, 2600.f, 1500.f, 0.85f, 0.55f, 1.40f },  // 0 NORMAL
+		{ 0.40f, 1.15f, 0.0045f, 1.00f, 3.40f, 1.70f, 1.10f, 0.80f, 0.40f, 2600.f, 1500.f, 0.85f, 0.55f, 1.40f, 0.85f },  // 0 NORMAL
 		// P3 RAIN: was near-BLACK (sigma .011 + amb .42 + sun .95 + skyVis->0). Rebalanced to a
 		//     legible dark blue-GREY rainy DAY: sigma .011->.0060 (not an opaque void), amb .42->1.00
 		//     + weather-gated skyVis floor (undersides read), sun .95->1.40 / cap .35->.60 (lighter
@@ -821,7 +842,7 @@ void ApplyWeatherPreset( int w )
 		//     shadowed-underside contrast lever: lower cone self-shadow => sunVis=exp(-tauL*selfShadow)
 		//     varies MORE across the deck => real volumetric lit/shadow structure (variance up). Small
 		//     mean rise acceptable per directive (w1 must stay <=~70). NORMAL/SNOW rows untouched.
-		{ 0.95f, 1.80f, 0.0050f, 1.30f, 1.40f, 0.30f, 0.60f, 0.10f, 0.55f, 1700.f, 1150.f, 0.70f, 0.30f, 1.10f },  // 1 RAIN
+		{ 0.95f, 1.80f, 0.0050f, 1.30f, 1.40f, 0.30f, 0.60f, 0.10f, 0.55f, 1700.f, 1150.f, 0.70f, 0.30f, 1.10f, 0.22f },  // 1 RAIN
 		// P3 SNOW: bright cold cool-WHITE. amb 1.35->1.70, sun 1.80->2.40, cap .70->1.00, sigma
 		//     .0075->.0055 (light penetrates => the deck glows). Cool-white tint via ApplyWeatherTint.
 		// R4 (iter4): brighter COLD cool-WHITE. amb 1.70->2.10, sun 2.40->2.80, cap 1.00->1.30,
@@ -830,7 +851,7 @@ void ApplyWeatherPreset( int w )
 		//     P4 tonemap to hold highlight detail + the ApplyWeatherTint cool ambient/base below).
 		// P1-FIX-5: SNOW selfShadow 1.40->1.20 = shallower cone shadow => bright diffuse undersides
 		//     (not carved-dark). detail/erode kept smooth 0.70/0.30.
-		{ 0.90f, 1.55f, 0.0048f, 2.50f, 2.80f, 0.70f, 1.50f, 0.25f, 0.45f, 2100.f, 1000.f, 0.70f, 0.30f, 1.20f },  // 2 SNOW
+		{ 0.90f, 1.55f, 0.0048f, 2.50f, 2.80f, 0.70f, 1.50f, 0.25f, 0.45f, 2100.f, 1000.f, 0.70f, 0.30f, 1.20f, 0.30f },  // 2 SNOW
 	};
 	const P &p = presets[ clampi( w, 0, 2 ) ];
 	gEngfuncs.Cvar_SetValue( "csz_clouds_coverage",     p.cov );
@@ -848,6 +869,8 @@ void ApplyWeatherPreset( int w )
 	gEngfuncs.Cvar_SetValue( "csz_clouds_detail",       p.detail );
 	gEngfuncs.Cvar_SetValue( "csz_clouds_erode_depth",  p.erode );
 	gEngfuncs.Cvar_SetValue( "csz_clouds_selfshadow",   p.selfsh );
+	// PATH A: per-weather coverage-FIELD contrast (reset on every weather change => no leak).
+	gEngfuncs.Cvar_SetValue( "csz_clouds_cov_contrast", p.covctr );
 	CSZ_LogInfo( "cloudvol",
 		"[csz_clouds] weather preset %d applied (cov=%.2f dens=%.2f sigma=%.4f amb=%.2f sun=%.2f sunfwd=%.2f cap=%.2f height=%.0f thick=%.0f)",
 		w, p.cov, p.dens, p.sigma, p.amb, p.sun, p.sunfwd, p.cap, p.height, p.thick );
@@ -1042,6 +1065,12 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	float windAz      = windDirDeg * kDegToRad;
 	float windVec[3]  = { cosf( windAz ) * windSpeed, sinf( windAz ) * windSpeed, 0.0f };
 	float midFreq     = 1.0f / midScale;
+	// PATH A (macro cloud distribution): coverage-FIELD freq/contrast/drift + base de-tile (all hot).
+	float covScale    = clampf( ReadCvar( s_cvCovScale,    42000.0f ), 8000.0f, 120000.0f );
+	float covFreq     = 1.0f / covScale;
+	float covContrast = clampf( ReadCvar( s_cvCovContrast, 0.85f ), 0.0f, 2.0f );
+	float covDrift    = clampf( ReadCvar( s_cvCovDrift,    0.0f  ), 0.0f, 2.0f );
+	float detile      = clampf( ReadCvar( s_cvDetile,      0.5f  ), 0.0f, 0.5f );
 	// CLOUD-ONLY sun-direction override: -1 = follow the tod/skymath sun (production unchanged).
 	// elev>=0 rebuilds the cloud light dir from (elev,azim); azim<0 falls back to a fixed azimuth.
 	float sunElevOvr  = ReadCvar( s_cvSunElev, -1.0f );
@@ -1384,6 +1413,10 @@ void CloudVolRenderer::Contribute( const ViewSetup &view )
 	if( s_gpu.mWeatherKind >= 0 )   glUniform1i( s_gpu.mWeatherKind, weather );         // iter5 hard-gate
 	if( s_gpu.mOvercastVar >= 0 )   glUniform1f( s_gpu.mOvercastVar, overcastVar );     // iter5 P1
 	if( s_gpu.mLowHaze >= 0 )       glUniform1f( s_gpu.mLowHaze, lowHaze );             // iter5 P2
+	if( s_gpu.mCovFreq >= 0 )       glUniform1f( s_gpu.mCovFreq, covFreq );            // PATH A coverage field
+	if( s_gpu.mCovContrast >= 0 )   glUniform1f( s_gpu.mCovContrast, covContrast );    // PATH A
+	if( s_gpu.mCovDrift >= 0 )      glUniform1f( s_gpu.mCovDrift, covDrift );          // PATH A
+	if( s_gpu.mDetile >= 0 )        glUniform1f( s_gpu.mDetile, detile );              // CHANGE 2 base de-tile
 	if( s_gpu.mTargetSize >= 0 )  glUniform2fv( s_gpu.mTargetSize, 1, fTarget );
 	if( s_gpu.mSteps >= 0 )       glUniform1i( s_gpu.mSteps, steps );
 	if( s_gpu.mLightSteps >= 0 )  glUniform1i( s_gpu.mLightSteps, lightSteps );
