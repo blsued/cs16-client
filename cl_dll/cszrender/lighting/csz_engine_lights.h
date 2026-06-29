@@ -1,5 +1,5 @@
 /*
- * csz_shadowmap.h -- CSOZ renderer: spot light shadow map (depth pass driver)
+ * csz_engine_lights.h -- CSOZ renderer: engine dynamic/entity light mirror (M2)
  *
  * Copyright (c) 2026 CSOZ project contributors
  *
@@ -33,24 +33,15 @@
  * exception statement from your version.
  */
 #pragma once
-struct cl_entity_s;
 namespace csz
 {
-struct ActiveLight;
 struct ViewSetup;
-class SpotShadowMap
-{
-public:
-	static const int kResolution = 1024;
-	bool EnsureCreated();   // lazy: depth texture (engine slot, TF_DEPTHMAP|TF_CLAMP|TF_BORDER|TF_NOMIPMAP) + FBO
-	                        // failure -> Error log once, light renders shadowless (B-class runtime degrade)
-	void Destroy();
-	// Depth-renders world + given studio entities from the light view
-	// (all-visible PVS), fills light.matShadow + light.shadowTexSlot.
-	// Caller restores main viewport afterwards (ApplyMainViewport).
-	void RenderDepth( ActiveLight &light, const ViewSetup &mainView,
-	                  cl_entity_s *const *studioEnts, int studioCount,
-	                  cl_entity_s *localPlayerShadow = nullptr );  // M2: extra shadow-only caster (local body)
-};
-extern SpotShadowMap g_spotShadow;   // M1: exactly one (single test light)
+// M2: mirror the engine's live dynamic lights (render_api GetDynamicLight --
+// the CL_AllocDlight pool: muzzle flash, explosions, TE_DLIGHT) and entity
+// lights (GetEntityLight -- attached projectile/rocket glows) into the registry
+// point-light bands each frame, nearest-N by camera distance. RunLightPasses
+// then adds their omni contribution to world + brush + studio. Honors cvars
+// csz_dlight / csz_elight (default 1) and emits the [CSZ:light] stat line.
+void CollectEngineLights( const ViewSetup &mainView );  // slot 7.55 (with CollectRealFlashlights)
+void RegisterEngineLightCvars();                        // csz_dlight / csz_elight / *_max / *_intensity
 }

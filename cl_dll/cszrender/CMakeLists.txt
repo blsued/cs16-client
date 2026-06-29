@@ -43,6 +43,7 @@ set(CSZRENDER_SRC
 	lighting/csz_light_budget.cpp
 	lighting/csz_flashlight_state.cpp
 	lighting/csz_shadowmap.cpp
+	lighting/csz_engine_lights.cpp
 )
 add_library(cszrender STATIC ${CSZRENDER_SRC})
 target_include_directories(cszrender PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

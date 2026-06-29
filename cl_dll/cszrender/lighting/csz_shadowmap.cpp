@@ -173,7 +173,7 @@ void SpotShadowMap::Destroy()
 }
 
 void SpotShadowMap::RenderDepth( ActiveLight &light, const ViewSetup &mainView,
-	cl_entity_s *const *studioEnts, int studioCount )
+	cl_entity_s *const *studioEnts, int studioCount, cl_entity_s *localPlayerShadow )
 {
 	(void)mainView;	// reserved (screen scissor optimization is an M2 concern)
 
@@ -204,6 +204,13 @@ void SpotShadowMap::RenderDepth( ActiveLight &light, const ViewSetup &mainView,
 
 	g_world.DrawDepth( lightView, light.frustum );
 	g_studio.DrawDepth( lightView, light.frustum, studioEnts, studioCount );
+
+	// M2: shadow-only ingest of the local first-person body. It is filtered out
+	// of studioEnts (camera-inside-own-head) so it never draws in the color/lit
+	// passes, but here it casts depth so the local body throws a shadow. A second
+	// self-contained DrawDepth call (Begin/End per call) -- cheap, one entity.
+	if( localPlayerShadow != NULL )
+		g_studio.DrawDepth( lightView, light.frustum, &localPlayerShadow, 1 );
 
 	SetPolygonOffset( false, 0.0f, 0.0f );
 
