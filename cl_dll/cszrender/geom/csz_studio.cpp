@@ -43,7 +43,11 @@
 #include "../core/csz_log.h"
 #include "../core/csz_shader.h"
 
+#include "pm_defs.h"	// PM_WORLD_ONLY, pmtrace_t -- SHOULD 6 blob-shadow ground trace
+#include "event_api.h"	// gEngfuncs.pEventAPI->EV_SetTraceHull / EV_PlayerTrace
+
 #include <math.h>
+#include <stdlib.h>	// qsort (transparent studio back-to-front sort)
 
 namespace csz
 {
@@ -64,7 +68,7 @@ const int kStudioNfMasked = 0x0040;	// alpha-tested texture
 // ignored by GL, so base-only/lit-only members stay harmless cross-program.
 struct PassLocs
 {
-	int uViewProj, uBones, uAlphaTest, uChrome, uViewRight, uViewUp;
+	int uViewProj, uBones, uAlphaTest, uChrome, uChromeMode, uViewRight, uViewUp;
 	int uAmbient, uShadeColor;					// base program only
 	int uFog, uAmbTint;						// base program only (M2a fog/night; lit/depth fog-free, pitfall 23)
 	int uSkyAmbScale;						// L3b sky-ambient cloud dimmer scalar (base program only); 1.0 neutral
@@ -77,6 +81,7 @@ struct PassLocs
 	int uMoonDir, uMoonColor;					// S2 gated night moon directional (base program only)
 	int uNightSky, uNightFloor, uNightK, uNightMoon;		// S2 studio night ambient calibration (base program only)
 	int uRimStrength, uRimPower;					// S4 competitive rim light (base program only)
+	int uStudioRender, uRenderAmt, uRenderColor;			// MUST 2 rendermode (base program only)
 	int uLightOrigin, uLightDir, uLightColor;			// lit program only
 	int uLightRadius, uCosInner, uCosOuter, uMatShadow, uHasShadow;	// lit program only
 	int uV3, uEdgeExp, uHotspotGain, uHotspotSharp, uDirectGain;	// L5R crisp profile (lit program only)
@@ -89,10 +94,14 @@ struct StudioState
 	ShaderProgram program;		// base (opaque) pass
 	ShaderProgram litProgram;	// additive per-light pass (T6)
 	ShaderProgram depthProgram;	// shadow map depth pass (T7)
+	ShaderProgram shellProgram;	// MUST 3 kRenderFxGlowShell additive extrude pass
 	PassLocs baseLocs, litLocs, depthLocs;
+	PassLocs shellLocs;		// only uViewProj/uBones resolve (others -1); reused by DrawModelMeshes
+	int shellExtrude, shellColor, shellAlpha;	// shell-program-only uniforms
 	const PassLocs *locs;		// active pass locations (set by Begin*Pass)
 	bool litPass;			// true while DrawLitAdditive runs (skips LightVec)
 	bool depthPass;			// true while DrawDepth runs (skips LightVec + texture binds)
+	bool shellPass;			// true while DrawGlowShells runs (skips LightVec + texture binds)
 	int whiteTexSlot;
 	float time;		// latched at BeginFrame
 	// per-draw uniform dedup
@@ -104,12 +113,25 @@ struct StudioState
 
 StudioState s_studio;
 
+// SHOULD 6 blob-shadow GPU state (own program + dynamic VBO; lifecycle mirrors the sprite pass).
+struct BlobState
+{
+	bool ready;
+	int gpuGeneration;
+	ShaderProgram program;
+	int uViewProj;
+	unsigned int vao, vbo;
+};
+
+BlobState s_blob;
+
 void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 {
 	out.uViewProj = UniformLoc( prog, "u_viewProj" );
 	out.uBones = UniformLoc( prog, "u_bones" );
 	out.uAlphaTest = UniformLoc( prog, "u_alphaTest" );
 	out.uChrome = UniformLoc( prog, "u_chrome" );
+	out.uChromeMode = UniformLoc( prog, "u_chromeMode" );	// SHOULD 4
 	out.uViewRight = UniformLoc( prog, "u_viewRight" );
 	out.uViewUp = UniformLoc( prog, "u_viewUp" );
 	out.uAmbient = UniformLoc( prog, "u_ambient" );
@@ -140,6 +162,9 @@ void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 	out.uNightMoon = UniformLoc( prog, "u_nightMoon" );		// S2
 	out.uRimStrength = UniformLoc( prog, "u_rimStrength" );		// S4
 	out.uRimPower = UniformLoc( prog, "u_rimPower" );		// S4
+	out.uStudioRender = UniformLoc( prog, "u_studioRender" );	// MUST 2 (base only; -1 on lit/depth/shell)
+	out.uRenderAmt = UniformLoc( prog, "u_renderAmt" );		// MUST 2
+	out.uRenderColor = UniformLoc( prog, "u_renderColor" );		// MUST 2
 	out.uLightOrigin = UniformLoc( prog, "u_lightOrigin" );
 	out.uLightDir = UniformLoc( prog, "u_lightDir" );
 	out.uLightColor = UniformLoc( prog, "u_lightColor" );
@@ -218,6 +243,12 @@ void EnsureShader()
 	// S4 rim defaults: off until the per-frame feed (rim is gated by nightness anyway).
 	if( s_studio.baseLocs.uRimStrength >= 0 )    glUniform1f( s_studio.baseLocs.uRimStrength, 0.0f );
 	if( s_studio.baseLocs.uRimPower >= 0 )       glUniform1f( s_studio.baseLocs.uRimPower, 3.0f );
+	// MUST 2 rendermode defaults: opaque (mode 0). The opaque pass keeps these (BeginStudioPass
+	// re-pins mode 0); only the transparent sub-pass overrides them per entity. Mode 0 ->
+	// fragColor = vec4(col,1) byte-identical to the pre-rendermode studio path.
+	if( s_studio.baseLocs.uStudioRender >= 0 )   glUniform1i( s_studio.baseLocs.uStudioRender, 0 );
+	if( s_studio.baseLocs.uRenderAmt >= 0 )      glUniform1f( s_studio.baseLocs.uRenderAmt, 1.0f );
+	if( s_studio.baseLocs.uRenderColor >= 0 )    glUniform3fv( s_studio.baseLocs.uRenderColor, 1, kTintNeutral );
 
 	BuildProgram( "csz_studio_lit", kStudioLitVs, kStudioLitFs, true, s_studio.litProgram );
 	QueryPassLocs( s_studio.litProgram, s_studio.litLocs );
@@ -231,6 +262,14 @@ void EnsureShader()
 	// every other PassLocs member is -1 (glUniform* no-ops) by design.
 	BuildProgram( "csz_studio_depth", kStudioDepthVs, kStudioDepthFs, true, s_studio.depthProgram );
 	QueryPassLocs( s_studio.depthProgram, s_studio.depthLocs );
+
+	// MUST 3 glow-shell program: u_viewProj/u_bones resolve via QueryPassLocs (reused by
+	// DrawModelMeshes for the bone upload); u_extrude/u_shellColor/u_shellAlpha are shell-only.
+	BuildProgram( "csz_studio_shell", kStudioShellVs, kStudioShellFs, true, s_studio.shellProgram );
+	QueryPassLocs( s_studio.shellProgram, s_studio.shellLocs );
+	s_studio.shellExtrude = UniformLoc( s_studio.shellProgram, "u_extrude" );
+	s_studio.shellColor = UniformLoc( s_studio.shellProgram, "u_shellColor" );
+	s_studio.shellAlpha = UniformLoc( s_studio.shellProgram, "u_shellAlpha" );
 
 	s_studio.locs = &s_studio.baseLocs;
 	s_studio.whiteTexSlot = ( gRenderAPI.GL_FindTexture != NULL )
@@ -415,9 +454,9 @@ void DrawModelMeshes( StudioModelGpu *gpu, const studiohdr_t *hdr, int body,
 		if( mesh.submodel != selected[mesh.bodypart] )
 			continue;
 
-		// Depth pass reads positions/bones only: no texture, no per-mesh
-		// uniforms (its program resolves none of them anyway).
-		if( !s_studio.depthPass )
+		// Depth + shell passes read positions/bones only: no texture, no per-mesh
+		// uniforms (their programs resolve none of them anyway).
+		if( !s_studio.depthPass && !s_studio.shellPass )
 		{
 			int texSlot = ( mesh.texSlot != 0 ) ? mesh.texSlot : s_studio.whiteTexSlot;
 
@@ -435,11 +474,22 @@ void DrawModelMeshes( StudioModelGpu *gpu, const studiohdr_t *hdr, int body,
 	}
 }
 
+// MUST 2 per-entity rendermode uniforms, resolved on the CPU and fed to the base program
+// (the GL blend state itself is chosen by the DrawTransparent loop / ResolveRendermode).
+struct StudioTransUniforms
+{
+	int mode;		// u_studioRender: 1 trans / 2 color / 3 texalpha
+	float amt;		// u_renderAmt [0,1]
+	float color[3];		// u_renderColor (kRenderTransColor flat fill)
+};
+
 // Full single-entity path: model resolve, cull, bones, light, meshes,
 // player p_ weapon merge. Returns true when something was drawn.
 // spotCull != NULL additionally rejects entities outside that light's reach
-// (lit-additive pass).
-bool DrawEntity( const ViewSetup &view, cl_entity_s *ent, bool doCull, const SpotLightParams *spotCull )
+// (lit-additive pass). trans != NULL feeds the MUST 2 rendermode uniforms
+// (transparent sub-pass; base program only).
+bool DrawEntity( const ViewSetup &view, cl_entity_s *ent, bool doCull, const SpotLightParams *spotCull,
+	const StudioTransUniforms *trans = NULL )
 {
 	model_t *mod = ent->model;
 
@@ -499,6 +549,15 @@ bool DrawEntity( const ViewSetup &view, cl_entity_s *ent, bool doCull, const Spo
 			glUniform1f( s_studio.locs->uSkyVis, g_world.SkyVisAtPoint( ent->origin ));
 	}
 
+	// MUST 2: feed the per-entity rendermode uniforms (base program only; the lit/depth/shell
+	// programs resolve these to -1, so the glUniform* calls no-op there). NULL = opaque pass.
+	if( trans != NULL )
+	{
+		if( s_studio.locs->uStudioRender >= 0 ) glUniform1i( s_studio.locs->uStudioRender, trans->mode );
+		if( s_studio.locs->uRenderAmt >= 0 )    glUniform1f( s_studio.locs->uRenderAmt, trans->amt );
+		if( s_studio.locs->uRenderColor >= 0 )  glUniform3fv( s_studio.locs->uRenderColor, 1, trans->color );
+	}
+
 	// Mirrored setups (right-hand viewmodel) have reversed triangle winding;
 	// the stock path solves this by drawing the flipped viewmodel with
 	// culling off (pinned ref/gl/gl_studio.c R_StudioDrawPoints) -- same here.
@@ -544,6 +603,171 @@ bool DrawEntity( const ViewSetup &view, cl_entity_s *ent, bool doCull, const Spo
 // the feed below falls back to the baked defaults if so.
 cvar_t *s_rimCvar = NULL;
 cvar_t *s_rimPowerCvar = NULL;
+
+// MUST 2/3 feature cvars (registered in StudioRegisterCvars; default 1). NULL until that runs;
+// the read sites below fail-safe ON (feature active) so a missing registration never silently
+// drops the transparent / glowshell passes.
+cvar_t *s_rendermodeCvar = NULL;	// csz_studio_rendermode
+cvar_t *s_renderfxCvar = NULL;		// csz_renderfx
+cvar_t *s_chromeCvar = NULL;		// csz_chrome (SHOULD 4)
+cvar_t *s_blobCvar = NULL;		// csz_blobshadow (SHOULD 6)
+
+inline bool RendermodeEnabled() { return ( s_rendermodeCvar == NULL ) || ( s_rendermodeCvar->value != 0.0f ); }
+inline bool RenderfxEnabled()   { return ( s_renderfxCvar == NULL ) || ( s_renderfxCvar->value != 0.0f ); }
+inline bool BlobShadowEnabled() { return ( s_blobCvar == NULL ) || ( s_blobCvar->value != 0.0f ); }
+// SHOULD 4: 1 = per-bone chrome (default ON / fail-safe), 0 = legacy global view-basis sphere map.
+inline int  ChromeMode()        { return ( s_chromeCvar == NULL || s_chromeCvar->value != 0.0f ) ? 1 : 0; }
+
+// Per-frame observability counters (reset at the top of each owning pass).
+int s_transDrawn = 0;
+int s_shellDrawn = 0;
+
+// ---------------------------------------------------------------------------
+// MUST 3 render-FX blend (csz_renderfx). Stock CL_FxBlend maps curstate.renderfx +
+// renderamt + time to an effective 0..255 alpha. The time-driven families (Pulse, Strobe,
+// Flicker) are reproduced statelessly from the latched frame time plus a per-entity phase
+// (ent->index) so models do not blink in lockstep. The ramp families (Fade*/Solid*) need a
+// per-entity latched spawn time the takeover does not track -> they pass renderamt through
+// (documented approximation; honest-cut in the report). Returns alpha in [0,1].
+float CszStudioFxBlend( const cl_entity_s *ent, float time )
+{
+	float amt = (float)ent->curstate.renderamt;	// 0..255
+
+	if( !RenderfxEnabled())
+		return amt * ( 1.0f / 255.0f );
+
+	float phase = (float)( ent->index & 31 );	// decorrelate per entity
+	float blend = amt;
+
+	switch( ent->curstate.renderfx )
+	{
+	case kRenderFxPulseSlow:
+		blend = amt + 16.0f * sinf( time * 2.0f + phase );
+		break;
+	case kRenderFxPulseFast:
+		blend = amt + 16.0f * sinf( time * 8.0f + phase );
+		break;
+	case kRenderFxPulseSlowWide:
+		blend = amt + 64.0f * sinf( time * 2.0f + phase );
+		break;
+	case kRenderFxPulseFastWide:
+		blend = amt + 64.0f * sinf( time * 8.0f + phase );
+		break;
+	case kRenderFxStrobeSlow:
+		blend = ( sinf( time * 4.0f + phase ) * 20.0f < 0.0f ) ? 0.0f : amt;
+		break;
+	case kRenderFxStrobeFast:
+		blend = ( sinf( time * 16.0f + phase ) * 20.0f < 0.0f ) ? 0.0f : amt;
+		break;
+	case kRenderFxStrobeFaster:
+		blend = ( sinf( time * 36.0f + phase ) * 20.0f < 0.0f ) ? 0.0f : amt;
+		break;
+	case kRenderFxFlickerSlow:
+		blend = amt + 16.0f * ( sinf( time * 16.0f ) + sinf( time * 23.0f + phase ));
+		break;
+	case kRenderFxFlickerFast:
+		blend = amt + 16.0f * ( sinf( time * 36.0f ) + sinf( time * 43.0f + phase ));
+		break;
+	case kRenderFxFadeSlow:
+	case kRenderFxFadeFast:
+	case kRenderFxSolidSlow:
+	case kRenderFxSolidFast:
+		// True monotonic ramp needs a per-entity latched start (deferred); pass amt through.
+		blend = amt;
+		break;
+	default:
+		blend = amt;
+		break;
+	}
+
+	if( blend < 0.0f ) blend = 0.0f;
+	if( blend > 255.0f ) blend = 255.0f;
+	return blend * ( 1.0f / 255.0f );
+}
+
+// MUST 2 rendermode classification. An entity is opaque when rendermode is kRenderNormal
+// (or rendermode handling is disabled). Everything else is routed to the transparent sub-pass.
+inline bool IsTransparentEntity( const cl_entity_s *ent )
+{
+	if( !RendermodeEnabled())
+		return false;	// A/B off: everything stays in the opaque pass (pre-MUST-2 behavior)
+
+	return ent->curstate.rendermode != kRenderNormal;
+}
+
+// Transparent studio sort buffer. Capacity restated locally (geom must not include the
+// composition root's FrameEntities::kMaxEntities = 1024; csz_sprite.cpp does the same).
+const int kMaxTransStudio = 1024;
+
+struct TransItem
+{
+	cl_entity_s *ent;
+	float distSq;	// to view origin, for back-to-front compositing
+};
+
+TransItem s_transItems[kMaxTransStudio];
+
+int CompareTransItems( const void *a, const void *b )
+{
+	const TransItem *ia = (const TransItem *)a;
+	const TransItem *ib = (const TransItem *)b;
+
+	if( ia->distSq > ib->distSq ) return -1;	// far first
+	if( ia->distSq < ib->distSq ) return 1;
+	return 0;
+}
+
+// Maps curstate.rendermode -> the base-program color/alpha SOURCE (u_studioRender) and the
+// GL blend/depth state, mirroring the sprite-pass rendermode mapping in csz_sprite.cpp.
+// Returns false for kRenderNormal (should never reach here -- those stay opaque).
+bool ResolveRendermode( const cl_entity_s *ent, StudioTransUniforms &u, BlendMode &blend, bool &depthTest )
+{
+	depthTest = true;
+
+	switch( ent->curstate.rendermode )
+	{
+	case kRenderTransColor:
+		u.mode = 2;			// flat rendercolor fill
+		blend = kBlendAlpha;
+		break;
+	case kRenderTransTexture:
+		u.mode = 1;			// lit texture * alpha
+		blend = kBlendAlpha;
+		break;
+	case kRenderTransAlpha:
+		u.mode = 3;			// texture's own alpha
+		blend = kBlendAlpha;
+		break;
+	case kRenderTransAdd:
+		u.mode = 1;
+		blend = kBlendAdditive;
+		break;
+	case kRenderGlow:
+	case kRenderWorldGlow:
+		u.mode = 1;
+		blend = kBlendAdditive;
+		depthTest = false;		// glow: no Z checks (engine parity)
+		break;
+	default:
+		return false;
+	}
+
+	// rendercolor (0,0,0 promoted to white, notes-mechanisms f-16) for the flat-fill mode.
+	const color24 &c = ent->curstate.rendercolor;
+
+	if( c.r || c.g || c.b )
+	{
+		u.color[0] = (float)c.r * ( 1.0f / 255.0f );
+		u.color[1] = (float)c.g * ( 1.0f / 255.0f );
+		u.color[2] = (float)c.b * ( 1.0f / 255.0f );
+	}
+	else
+	{
+		u.color[0] = u.color[1] = u.color[2] = 1.0f;
+	}
+
+	return true;
+}
 
 // Common pass prologue: program, view uniforms, chrome basis, dedup reset.
 void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, const PassLocs &locs )
@@ -616,6 +840,9 @@ void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, cons
 	AngleVectors( view.angles, fwd, right, up );
 	glUniform3fv( locs.uViewRight, 1, right );
 	glUniform3fv( locs.uViewUp, 1, up );
+	// SHOULD 4 (csz_chrome): per-bone vs global chrome basis. u_camPos (the per-bone view
+	// vector origin) is fed just above via locs.uCamPos and shared with the VS.
+	if( locs.uChromeMode >= 0 ) glUniform1i( locs.uChromeMode, ChromeMode());
 
 	// Pin known uniform state so per-mesh dedup stays truthful.
 	const float kGray[3] = { 0.5f, 0.5f, 0.5f };
@@ -634,6 +861,12 @@ void BeginStudioPass( const ViewSetup &view )
 	// EnsureShader runs first inside BeginStudioPassWith; the references
 	// below are stable storage, so taking them before is safe.
 	BeginStudioPassWith( view, s_studio.program, s_studio.baseLocs );
+
+	// MUST 2: re-pin opaque rendermode (mode 0). The transparent sub-pass shares this base
+	// program and leaves u_studioRender at 1/2/3, so the opaque pass (and DrawSingle) MUST
+	// reset it or it would inherit a stale transparent mode the next frame.
+	if( s_studio.baseLocs.uStudioRender >= 0 ) glUniform1i( s_studio.baseLocs.uStudioRender, 0 );
+	if( s_studio.baseLocs.uRenderAmt >= 0 )    glUniform1f( s_studio.baseLocs.uRenderAmt, 1.0f );
 }
 
 // Lit-additive prologue: lit program + per-light uniforms + additive blend
@@ -702,6 +935,235 @@ void EndStudioDepthPass()
 	EndStudioPass();
 }
 
+// MUST 3 glow-shell prologue: shell program + additive blend, depth test ON (shells are
+// occluded by nearer opaque geometry) but depth WRITE off. Front-face cull matches the base
+// pass (.mdl outward winding = GL back, T3); the extruded shell keeps that orientation.
+void BeginStudioShellPass( const ViewSetup &view )
+{
+	EnsureShader();
+	s_studio.shellPass = true;
+	s_studio.locs = &s_studio.shellLocs;
+	UseProgram( s_studio.shellProgram.program );
+	glUniformMatrix4fv( s_studio.shellLocs.uViewProj, 1, GL_FALSE, view.matViewProj.m );
+	SetCull( true );
+	SetCullFront( true );
+	SetBlend( kBlendAdditive );
+	SetDepthWrite( false );
+	SetDepthTest( true );
+}
+
+void EndStudioShellPass()
+{
+	SetBlend( kBlendNone );
+	SetDepthWrite( true );
+	s_studio.shellPass = false;
+	s_studio.locs = &s_studio.baseLocs;
+	EndStudioPass();
+}
+
+// Resolves the actual studio model for an entity (player userinfo/forced models included),
+// returning NULL when the entity has no drawable studio model. Shared by the shell pass.
+studiohdr_t *ResolveStudioModel( cl_entity_s *ent, model_t **outMod )
+{
+	model_t *mod = ent->model;
+
+	if( ent->player )
+	{
+		int playerIndex = ent->index - 1;
+
+		if( IEngineStudio.SetupPlayerModel != NULL &&
+			playerIndex >= 0 && playerIndex < gEngfuncs.GetMaxClients())
+		{
+			model_t *pm = IEngineStudio.SetupPlayerModel( playerIndex );
+
+			if( pm != NULL )
+				mod = pm;
+		}
+	}
+
+	if( mod == NULL || mod->type != mod_studio || IEngineStudio.Mod_Extradata == NULL )
+		return NULL;
+
+	studiohdr_t *hdr = (studiohdr_t *)IEngineStudio.Mod_Extradata( mod );
+
+	if( hdr == NULL || hdr->numbodyparts <= 0 || hdr->numbones <= 0 || hdr->numseq <= 0 )
+		return NULL;
+
+	*outMod = mod;
+	return hdr;
+}
+
+// Draws one glow-shell entity (extruded additive flat-color shell). Returns true if drawn.
+bool DrawShellEntity( const ViewSetup &view, cl_entity_s *ent, float extrude )
+{
+	model_t *mod = NULL;
+	studiohdr_t *hdr = ResolveStudioModel( ent, &mod );
+
+	if( hdr == NULL )
+		return false;
+
+	if( CullEntity( view, ent, hdr ))
+		return false;
+
+	// Shell color from rendercolor; all-zero (no color set) -> nothing to add, skip.
+	const color24 &c = ent->curstate.rendercolor;
+
+	if( !c.r && !c.g && !c.b )
+		return false;
+
+	float shellColor[3] = { (float)c.r * ( 1.0f / 255.0f ),
+		(float)c.g * ( 1.0f / 255.0f ), (float)c.b * ( 1.0f / 255.0f ) };
+
+	const BoneSetup *bones = NULL;
+
+	if( !SetupBones( ent, hdr, s_studio.time, &bones ))
+		return false;
+
+	StudioModelGpu *gpu = GetOrBuild( mod, hdr );
+
+	if( gpu == NULL )
+		return false;
+
+	const float kShellAlpha = 0.5f;	// fixed glow brightness (renderamt drives sprites, not shells)
+
+	glUniform1f( s_studio.shellExtrude, extrude );
+	glUniform3fv( s_studio.shellColor, 1, shellColor );
+	glUniform1f( s_studio.shellAlpha, kShellAlpha );
+
+	float dummyLight[3] = { 1.0f, 1.0f, 1.0f };	// unused (shell pass skips per-mesh uniforms)
+
+	DrawModelMeshes( gpu, hdr, ent->curstate.body, bones, dummyLight );
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// SHOULD 6 blob-shadow geometry. Each entity contributes one ground-aligned disc fan.
+// ---------------------------------------------------------------------------
+inline float ClampFloat( float v, float lo, float hi )
+{
+	return ( v < lo ) ? lo : (( v > hi ) ? hi : v );
+}
+
+const int kBlobSegments = 12;
+const int kBlobVertsPerBlob = kBlobSegments * 3;	// fan as independent triangles
+const int kBlobFloats = 4;				// pos3 + alpha1
+const int kMaxBlobs = 128;
+
+float s_blobVerts[kMaxBlobs * kBlobVertsPerBlob * kBlobFloats];
+
+void EnsureBlobGpu()
+{
+	if( s_blob.ready && s_blob.gpuGeneration == GpuGeneration())
+		return;
+
+	if( s_blob.gpuGeneration != GpuGeneration())
+	{
+		s_blob.program.program = 0;	// stale generation: forget, never delete (T1 rule)
+		s_blob.vao = s_blob.vbo = 0;
+	}
+
+	BuildProgram( "csz_studio_blob", kStudioBlobVs, kStudioBlobFs, true, s_blob.program );
+	s_blob.uViewProj = UniformLoc( s_blob.program, "u_viewProj" );
+
+	glGenVertexArrays( 1, &s_blob.vao );
+	BindVao( s_blob.vao );
+	glGenBuffers( 1, &s_blob.vbo );
+	glBindBuffer( GL_ARRAY_BUFFER, s_blob.vbo );
+
+	const int stride = kBlobFloats * (int)sizeof( float );
+
+	glEnableVertexAttribArray( 0 );
+	glVertexAttribPointer( 0, 3, GL_FLOAT, GL_FALSE, stride, (const void *)0 );
+	glEnableVertexAttribArray( 1 );
+	glVertexAttribPointer( 1, 1, GL_FLOAT, GL_FALSE, stride, (const void *)( 3 * sizeof( float )));
+
+	BindVao( 0 );
+	glBindBuffer( GL_ARRAY_BUFFER, 0 );
+
+	s_blob.gpuGeneration = GpuGeneration();
+	s_blob.ready = true;
+}
+
+// Traces the ground below an entity and appends one disc fan into s_blobVerts. Returns the
+// number of floats written (0 = no ground / no blob). vbase points at this blob's slot.
+int BuildBlob( const cl_entity_s *ent, const studiohdr_t *hdr, float strength, float *vbase )
+{
+	if( gEngfuncs.pEventAPI == NULL )
+		return 0;
+
+	float start[3] = { ent->origin[0], ent->origin[1], ent->origin[2] };
+	float end[3] = { ent->origin[0], ent->origin[1], ent->origin[2] - 4096.0f };
+	pmtrace_t tr;
+
+	gEngfuncs.pEventAPI->EV_SetTraceHull( 2 );	// point hull
+	gEngfuncs.pEventAPI->EV_PlayerTrace( start, end, PM_WORLD_ONLY, -1, &tr );
+
+	if( tr.allsolid || tr.fraction >= 1.0f )
+		return 0;	// no ground beneath
+
+	float n[3] = { tr.plane.normal[0], tr.plane.normal[1], tr.plane.normal[2] };
+	float nlen = sqrtf( n[0] * n[0] + n[1] * n[1] + n[2] * n[2] );
+
+	if( nlen < 1e-3f )
+	{
+		n[0] = 0.0f; n[1] = 0.0f; n[2] = 1.0f;	// degenerate plane: assume flat floor
+	}
+	else
+	{
+		n[0] /= nlen; n[1] /= nlen; n[2] /= nlen;
+	}
+
+	// Tangent basis on the ground plane.
+	float ref[3] = { 0.0f, 0.0f, 1.0f };
+
+	if( fabsf( n[2] ) > 0.99f )
+	{
+		ref[0] = 1.0f; ref[1] = 0.0f; ref[2] = 0.0f;
+	}
+
+	float t1[3] = { ref[1] * n[2] - ref[2] * n[1], ref[2] * n[0] - ref[0] * n[2], ref[0] * n[1] - ref[1] * n[0] };
+	float t1len = sqrtf( t1[0] * t1[0] + t1[1] * t1[1] + t1[2] * t1[2] );
+
+	if( t1len < 1e-3f )
+		return 0;
+
+	t1[0] /= t1len; t1[1] /= t1len; t1[2] /= t1len;
+
+	float t2[3] = { n[1] * t1[2] - n[2] * t1[1], n[2] * t1[0] - n[0] * t1[2], n[0] * t1[1] - n[1] * t1[0] };
+
+	// Radius from the entity probe (feet-ish footprint, not the full body sphere).
+	float radius = ClampFloat( EntityProbeRadius( ent, hdr ) * 0.6f, 10.0f, 32.0f );
+	const float kLift = 1.0f;	// raise the disc off the surface (anti z-fight, plus polygon offset)
+	float center[3] = {
+		tr.endpos[0] + n[0] * kLift,
+		tr.endpos[1] + n[1] * kLift,
+		tr.endpos[2] + n[2] * kLift };
+
+	const float kTwoPi = 6.2831853f;
+	float *v = vbase;
+
+	for( int i = 0; i < kBlobSegments; i++ )
+	{
+		float a0 = ( (float)i / (float)kBlobSegments ) * kTwoPi;
+		float a1 = ( (float)( i + 1 ) / (float)kBlobSegments ) * kTwoPi;
+		float c0 = cosf( a0 ), s0 = sinf( a0 );
+		float c1 = cosf( a1 ), s1 = sinf( a1 );
+
+		// center (dark), rim a0 (0), rim a1 (0)
+		v[0] = center[0]; v[1] = center[1]; v[2] = center[2]; v[3] = strength; v += kBlobFloats;
+		v[0] = center[0] + ( t1[0] * c0 + t2[0] * s0 ) * radius;
+		v[1] = center[1] + ( t1[1] * c0 + t2[1] * s0 ) * radius;
+		v[2] = center[2] + ( t1[2] * c0 + t2[2] * s0 ) * radius;
+		v[3] = 0.0f; v += kBlobFloats;
+		v[0] = center[0] + ( t1[0] * c1 + t2[0] * s1 ) * radius;
+		v[1] = center[1] + ( t1[1] * c1 + t2[1] * s1 ) * radius;
+		v[2] = center[2] + ( t1[2] * c1 + t2[2] * s1 ) * radius;
+		v[3] = 0.0f; v += kBlobFloats;
+	}
+
+	return kBlobVertsPerBlob * kBlobFloats;
+}
+
 }
 
 // S4-fix (codex S4 Low): register the studio rim cvars once at HUD init, parity with the
@@ -712,6 +1174,20 @@ void StudioRegisterCvars()
 		s_rimCvar = gEngfuncs.pfnRegisterVariable( "csz_rim", "0.30", FCVAR_CLIENTDLL );
 	if( s_rimPowerCvar == NULL )
 		s_rimPowerCvar = gEngfuncs.pfnRegisterVariable( "csz_rim_power", "3.0", FCVAR_CLIENTDLL );
+	// MUST 1/2/3 observability cvars (default 1 = feature ON). csz_attach is read by the bones
+	// module via pfnGetCvarPointer; csz_studio_rendermode / csz_renderfx are read here.
+	gEngfuncs.pfnRegisterVariable( "csz_attach", "1", FCVAR_CLIENTDLL );
+	if( s_rendermodeCvar == NULL )
+		s_rendermodeCvar = gEngfuncs.pfnRegisterVariable( "csz_studio_rendermode", "1", FCVAR_CLIENTDLL );
+	if( s_renderfxCvar == NULL )
+		s_renderfxCvar = gEngfuncs.pfnRegisterVariable( "csz_renderfx", "1", FCVAR_CLIENTDLL );
+	if( s_chromeCvar == NULL )	// SHOULD 4
+		s_chromeCvar = gEngfuncs.pfnRegisterVariable( "csz_chrome", "1", FCVAR_CLIENTDLL );
+	// SHOULD 5: csz_bonelerp (read by the bones module via pfnGetCvarPointer). Controllers +
+	// mouth only; cross-sequence transition lerp + multi-seqgroup deferred (see report).
+	gEngfuncs.pfnRegisterVariable( "csz_bonelerp", "1", FCVAR_CLIENTDLL );
+	if( s_blobCvar == NULL )	// SHOULD 6
+		s_blobCvar = gEngfuncs.pfnRegisterVariable( "csz_blobshadow", "1", FCVAR_CLIENTDLL );
 }
 
 void StudioRenderer::OnModelUnloaded( model_t *mod )
@@ -747,6 +1223,32 @@ void StudioRenderer::DestroyAll()
 			s_studio.depthProgram.program = 0;
 	}
 
+	if( s_studio.shellProgram.program != 0 )
+	{
+		if( s_studio.shaderGeneration == GpuGeneration())
+			DestroyProgram( s_studio.shellProgram );
+		else
+			s_studio.shellProgram.program = 0;
+	}
+
+	// SHOULD 6 blob GPU objects (own generation guard).
+	if( s_blob.ready || s_blob.program.program != 0 )
+	{
+		if( s_blob.gpuGeneration == GpuGeneration())
+		{
+			if( s_blob.program.program != 0 )
+				DestroyProgram( s_blob.program );
+			if( s_blob.vao != 0 )
+				glDeleteVertexArrays( 1, &s_blob.vao );
+			if( s_blob.vbo != 0 )
+				glDeleteBuffers( 1, &s_blob.vbo );
+		}
+
+		s_blob.program.program = 0;
+		s_blob.vao = s_blob.vbo = 0;
+		s_blob.ready = false;
+	}
+
 	s_studio.shaderReady = false;
 }
 
@@ -767,20 +1269,22 @@ void StudioRenderer::DrawOpaque( const ViewSetup &view, cl_entity_s *const *ents
 
 	for( int i = 0; i < count; i++ )
 	{
-		if( ents[i] != NULL && DrawEntity( view, ents[i], true, NULL ))
+		// MUST 2: non-opaque entities are handled by DrawTransparent (transparent domain).
+		if( ents[i] != NULL && !IsTransparentEntity( ents[i] ) && DrawEntity( view, ents[i], true, NULL ))
 			drawn++;
 	}
 
 	EndStudioPass();
 
-	// Per-frame stats at Dev level with 1s self-throttle (R8).
+	// Per-frame stats at Dev level with 1s self-throttle (R8). MUST 1: the attach count
+	// rides this line (one bone setup per entity this frame wrote ent->attachment[]).
 	static float s_nextStatsTime;
 	float now = ClientTime();
 
 	if( now >= s_nextStatsTime )
 	{
 		s_nextStatsTime = now + 1.0f;
-		CSZ_LogDev( "studio", "drawn %d / %d studio entities", drawn, count );
+		CSZ_LogDev( "studio", "drawn %d / %d studio entities; attach %d", drawn, count, StudioFrameAttachCount());
 	}
 }
 
@@ -802,7 +1306,9 @@ void StudioRenderer::DrawDepth( const ViewSetup &lightView, const Frustum &light
 
 	for( int i = 0; i < count; i++ )
 	{
-		if( ents[i] != NULL && DrawEntity( cullView, ents[i], true, NULL ))
+		// MUST 2: transparent entities do not write solid shadow-map depth (a ghost/additive
+		// model should not cast an opaque shadow). Opaque + glowshell models still do.
+		if( ents[i] != NULL && !IsTransparentEntity( ents[i] ) && DrawEntity( cullView, ents[i], true, NULL ))
 			drawn++;
 	}
 
@@ -831,7 +1337,9 @@ void StudioRenderer::DrawLitAdditive( const ViewSetup &view, const SpotLightPara
 
 	for( int i = 0; i < count; i++ )
 	{
-		if( ents[i] != NULL && DrawEntity( view, ents[i], true, &light ))
+		// MUST 2: transparent entities are not lit opaque-style here (they have no opaque depth
+		// for the additive flashlight to land on; they self-light in the transparent sub-pass).
+		if( ents[i] != NULL && !IsTransparentEntity( ents[i] ) && DrawEntity( view, ents[i], true, &light ))
 			drawn++;
 	}
 
@@ -845,6 +1353,216 @@ void StudioRenderer::DrawLitAdditive( const ViewSetup &view, const SpotLightPara
 	{
 		s_nextStatsTime = now + 1.0f;
 		CSZ_LogDev( "studio", "lit %d / %d studio entities", drawn, count );
+	}
+}
+
+void StudioRenderer::DrawTransparent( const ViewSetup &view, cl_entity_s *const *ents, int count )
+{
+	if( count <= 0 || !RendermodeEnabled())
+		return;
+
+	// Gather non-opaque entities with a view-distance key for back-to-front compositing.
+	int numItems = 0;
+
+	for( int i = 0; i < count && numItems < kMaxTransStudio; i++ )
+	{
+		cl_entity_s *ent = ents[i];
+
+		if( ent == NULL || !IsTransparentEntity( ent ))
+			continue;
+
+		float dx = ent->origin[0] - view.origin[0];
+		float dy = ent->origin[1] - view.origin[1];
+		float dz = ent->origin[2] - view.origin[2];
+
+		s_transItems[numItems].ent = ent;
+		s_transItems[numItems].distSq = dx * dx + dy * dy + dz * dz;
+		numItems++;
+	}
+
+	if( numItems == 0 )
+		return;
+
+	qsort( s_transItems, (size_t)numItems, sizeof( TransItem ), CompareTransItems );
+
+	BeginStudioPass( view );
+	SetDepthWrite( false );	// transparent geometry never writes depth
+
+	s_transDrawn = 0;
+
+	for( int i = 0; i < numItems; i++ )
+	{
+		cl_entity_s *ent = s_transItems[i].ent;
+		StudioTransUniforms u;
+		BlendMode blend;
+		bool depthTest;
+
+		if( !ResolveRendermode( ent, u, blend, depthTest ))
+			continue;	// unmapped rendermode (should not happen: IsTransparentEntity filtered)
+
+		u.amt = CszStudioFxBlend( ent, s_studio.time );	// MUST 3 renderfx-modulated alpha
+
+		if( u.amt <= 0.0f )
+			continue;	// strobe off-phase / fully faded
+
+		SetBlend( blend );
+		SetDepthTest( depthTest );
+
+		if( DrawEntity( view, ent, true, NULL, &u ))
+			s_transDrawn++;
+	}
+
+	// Hand a clean baseline to the next pass.
+	SetBlend( kBlendNone );
+	SetDepthTest( true );
+	SetDepthWrite( true );
+	EndStudioPass();
+
+	static float s_nextStatsTime;
+	float now = ClientTime();
+
+	if( s_transDrawn > 0 && now >= s_nextStatsTime )
+	{
+		s_nextStatsTime = now + 1.0f;
+		CSZ_LogDev( "studio", "transparent %d / %d studio entities", s_transDrawn, numItems );
+	}
+}
+
+void StudioRenderer::DrawGlowShells( const ViewSetup &view, cl_entity_s *const *ents, int count )
+{
+	if( count <= 0 || !RenderfxEnabled())
+		return;
+
+	// Distance cap (perf): glow shells are an extra full-mesh additive pass, so skip distant
+	// ones -- the effect is unreadable far away anyway.
+	const float kShellMaxDist = 2000.0f;
+	const float kShellMaxDistSq = kShellMaxDist * kShellMaxDist;
+	const float kShellExtrude = 2.0f;	// outward shell thickness (world units)
+
+	// One cheap pre-scan: do any entities actually request a glow shell? Keeps the pass a
+	// true no-op (no program switch / state churn) on the common shell-free frame.
+	int candidates = 0;
+
+	for( int i = 0; i < count; i++ )
+	{
+		if( ents[i] != NULL && ents[i]->curstate.renderfx == kRenderFxGlowShell )
+		{
+			candidates++;
+			break;
+		}
+	}
+
+	if( candidates == 0 )
+		return;
+
+	BeginStudioShellPass( view );
+
+	s_shellDrawn = 0;
+
+	for( int i = 0; i < count; i++ )
+	{
+		cl_entity_s *ent = ents[i];
+
+		if( ent == NULL || ent->curstate.renderfx != kRenderFxGlowShell )
+			continue;
+
+		float dx = ent->origin[0] - view.origin[0];
+		float dy = ent->origin[1] - view.origin[1];
+		float dz = ent->origin[2] - view.origin[2];
+
+		if( dx * dx + dy * dy + dz * dz > kShellMaxDistSq )
+			continue;
+
+		if( DrawShellEntity( view, ent, kShellExtrude ))
+			s_shellDrawn++;
+	}
+
+	EndStudioShellPass();
+
+	static float s_nextStatsTime;
+	float now = ClientTime();
+
+	if( s_shellDrawn > 0 && now >= s_nextStatsTime )
+	{
+		s_nextStatsTime = now + 1.0f;
+		CSZ_LogDev( "studio", "glowshell %d studio entities", s_shellDrawn );
+	}
+}
+
+void StudioRenderer::DrawBlobShadows( const ViewSetup &view, cl_entity_s *const *ents, int count )
+{
+	if( count <= 0 || !BlobShadowEnabled())
+		return;
+
+	const float kMaxDist = 2000.0f;
+	const float kMaxDistSq = kMaxDist * kMaxDist;
+	const float kStrength = 0.45f;	// center darkness (alpha)
+
+	int numBlobs = 0;
+	int numFloats = 0;
+
+	for( int i = 0; i < count && numBlobs < kMaxBlobs; i++ )
+	{
+		cl_entity_s *ent = ents[i];
+
+		if( ent == NULL )
+			continue;
+
+		float dx = ent->origin[0] - view.origin[0];
+		float dy = ent->origin[1] - view.origin[1];
+		float dz = ent->origin[2] - view.origin[2];
+
+		if( dx * dx + dy * dy + dz * dz > kMaxDistSq )
+			continue;
+
+		model_t *mod = NULL;
+		studiohdr_t *hdr = ResolveStudioModel( ent, &mod );
+
+		if( hdr == NULL )
+			continue;
+
+		int wrote = BuildBlob( ent, hdr, kStrength, &s_blobVerts[numFloats] );
+
+		if( wrote > 0 )
+		{
+			numFloats += wrote;
+			numBlobs++;
+		}
+	}
+
+	if( numBlobs == 0 )
+		return;
+
+	EnsureBlobGpu();
+
+	UseProgram( s_blob.program.program );
+	glUniformMatrix4fv( s_blob.uViewProj, 1, GL_FALSE, view.matViewProj.m );
+
+	BindVao( s_blob.vao );
+	glBindBuffer( GL_ARRAY_BUFFER, s_blob.vbo );
+	glBufferData( GL_ARRAY_BUFFER, (GLsizeiptr)( (size_t)numFloats * sizeof( float )), s_blobVerts, GL_STREAM_DRAW );
+	glBindBuffer( GL_ARRAY_BUFFER, 0 );
+
+	SetBlend( kBlendAlpha );
+	SetDepthWrite( false );
+	SetDepthTest( true );
+	SetCull( false );
+	SetPolygonOffset( true, -1.0f, -1.0f );	// pull the coplanar disc toward the camera (anti z-fight)
+
+	glDrawArrays( GL_TRIANGLES, 0, numBlobs * kBlobVertsPerBlob );
+
+	SetPolygonOffset( false, 0.0f, 0.0f );
+	SetBlend( kBlendNone );
+	SetDepthWrite( true );
+	BindVao( 0 );
+
+	static float s_nextStatsTime;
+	float now = ClientTime();
+
+	if( now >= s_nextStatsTime )
+	{
+		s_nextStatsTime = now + 1.0f;
+		CSZ_LogDev( "studio", "blobshadow %d studio entities", numBlobs );
 	}
 }
 
