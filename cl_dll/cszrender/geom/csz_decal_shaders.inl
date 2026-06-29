@@ -75,6 +75,7 @@ uniform sampler2D u_texDiffuse;   // unit 0: decal diffuse
 uniform sampler2D u_texLightmap;  // unit 1: engine lightmap page (when u_hasLightmap)
 uniform int  u_hasLightmap;       // 1 = modulate by the face lightmap
 uniform int  u_modulate;          // 1 = DST_COLOR x SRC_COLOR class, 0 = SRC_ALPHA class
+uniform int  u_procedural;        // 1 = synthesize the decal (diffuse texture unusable; 坑23)
 uniform vec4 u_fog;               // rgb = fog color (linear), w = extinction a (1/units); w<=0 -> off
 uniform vec4 u_fogParams;         // x = height falloff b, z = maxOpacity
 uniform vec3 u_camPos;            // camera world position (ray origin)
@@ -100,10 +101,39 @@ float cszFogT( vec3 worldPos, vec3 camPos, float a, float b, float maxOpacity )
 }
 void main()
 {
+	float T = cszFogT( v_worldPos, u_camPos, u_fog.w, u_fogParams.x, u_fogParams.z );
+
+	// 坑23: GoldSrc gradient/masked decals reach us as GL_LUMINANCE8_ALPHA8, a
+	// format removed from the GL core profile -> the engine's upload fails and the
+	// bound texture is a dead (0,0,0,1) tile (an opaque black square). The pixels
+	// are unrecoverable on the client, so synthesize a believable round scorch from
+	// the decal's own quad UVs: an opaque-dark center fading smoothly to nothing
+	// before the quad edge. Lit context comes from the surface underneath (the
+	// SRC_ALPHA / 2x-modulate blend), fog stays consistent with the other passes.
+	if( u_procedural != 0 )
+	{
+		float r = length( v_uv - vec2( 0.5 )) * 2.0;	// 0 at center .. ~1 at edge midpoints
+		float cov = 1.0 - smoothstep( 0.22, 0.72, r );	// soft round mask, feathered edge
+		if( cov <= 0.0 )
+			discard;
+		if( u_modulate != 0 )
+		{
+			// 2x-modulate class: darken the surface toward black at the core.
+			vec3 c = mix( vec3( 0.5 ), vec3( 0.0 ), cov * T );
+			fragColor = vec4( c, 1.0 );
+		}
+		else
+		{
+			// SRC_ALPHA class: a dark scorch laid over the lit surface.
+			vec3 c = mix( u_fog.rgb, vec3( 0.015 ), T );
+			fragColor = vec4( c, cov * 0.92 );
+		}
+		return;
+	}
+
 	vec4 d = texture( u_texDiffuse, v_uv );
 	vec3 lm = ( u_hasLightmap != 0 ) ? texture( u_texLightmap, v_lmuv ).rgb : vec3( 1.0 );
 	vec3 lit = d.rgb * lm;
-	float T = cszFogT( v_worldPos, u_camPos, u_fog.w, u_fogParams.x, u_fogParams.z );
 	if( u_modulate != 0 )
 	{
 		if( d.a < 0.5 )
@@ -113,7 +143,7 @@ void main()
 	}
 	else
 	{
-		vec3 c = mix( u_fog.rgb, lit, T );
+		vec3 c = mix( u_fog.rgb, lit, T );	// SRC_ALPHA blend; texture alpha drives coverage
 		fragColor = vec4( c, d.a );
 	}
 }

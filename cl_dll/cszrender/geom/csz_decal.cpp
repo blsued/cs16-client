@@ -106,6 +106,7 @@ struct DecalDraw
 	int count;	// vertex count (convex polygon, drawn as a triangle fan)
 	int texSlot;	// engine diffuse texture slot (GL_Bind)
 	int lmSlot;	// engine lightmap texture slot (0 = unlit)
+	int procedural;	// 1 = synthesize the decal (texture unusable in GL core; see 坑23)
 };
 
 struct DecalState
@@ -113,7 +114,7 @@ struct DecalState
 	bool shaderReady;
 	int gpuGeneration;
 	ShaderProgram program;
-	int uViewProj, uHasLightmap, uModulate, uFog, uFogParams, uCamPos;
+	int uViewProj, uHasLightmap, uModulate, uFog, uFogParams, uCamPos, uProcedural;
 	unsigned int vao, vbo;
 
 	// Per-frame CPU batches (filled in DrawDecalsAlpha's single BSP walk).
@@ -157,6 +158,36 @@ bool DecalIsAlphaClass( int texSlot )
 	return ( flags & kTfHasAlpha ) != 0;
 }
 
+// 坑23: the engine uploads GoldSrc gradient/masked decals ("{shot*", "{bigshot*",
+// "{blood*", ...) as GL_LUMINANCE8_ALPHA8 -- a legacy fixed-function format that is
+// REMOVED in the GL core profile this renderer requires. glTexImage2D rejects it
+// (GL_INVALID_ENUM) so the GL texture is never populated and samples as a solid
+// (0,0,0,1) -> a persistent OPAQUE BLACK SQUARE at every bullet impact. The pixels
+// are unrecoverable on our side (GL_LoadTexture just returns the same cached LA
+// slot), so when the bound decal texture is a non-RGB(A) format we synthesize the
+// decal procedurally instead of sampling the dead texture. RGB(A) decals (if any)
+// keep their real art.
+bool DecalTexBroken( int texSlot )
+{
+	if( gRenderAPI.RenderGetParm == NULL )
+		return false;
+	intptr_t f = gRenderAPI.RenderGetParm( PARM_TEX_GLFORMAT, texSlot );
+	switch( (unsigned)f )
+	{
+	case 0x1906:	// GL_ALPHA
+	case 0x803C:	// GL_ALPHA8
+	case 0x1909:	// GL_LUMINANCE
+	case 0x8040:	// GL_LUMINANCE8
+	case 0x190A:	// GL_LUMINANCE_ALPHA
+	case 0x8045:	// GL_LUMINANCE8_ALPHA8
+	case 0x8048:	// GL_LUMINANCE16_ALPHA16
+	case 0x8049:	// GL_INTENSITY
+		return true;
+	default:
+		return false;
+	}
+}
+
 // Throttled (>= 1s) error dedup for per-frame failure paths.
 void ThrottledError( const char *what )
 {
@@ -187,6 +218,7 @@ void EnsureGpuObjects()
 	s_decal.uFog = UniformLoc( s_decal.program, "u_fog" );
 	s_decal.uFogParams = UniformLoc( s_decal.program, "u_fogParams" );
 	s_decal.uCamPos = UniformLoc( s_decal.program, "u_camPos" );
+	s_decal.uProcedural = UniformLoc( s_decal.program, "u_procedural" );
 
 	UseProgram( s_decal.program.program );
 	glUniform1i( UniformLoc( s_decal.program, "u_texDiffuse" ), 0 );
@@ -247,7 +279,7 @@ void ValidateDecalAbi( const EngModel *bsp, int first, int numFaces )
 // in the R_DecalSetupVerts layout) to a class batch. Returns false when the
 // class is full (caller stops adding + warns once).
 bool AppendDecal( float *verts, int &vertCount, DecalDraw *draws, int &numDraws,
-	const float *src, int count, int texSlot, int lmSlot )
+	const float *src, int count, int texSlot, int lmSlot, int procedural )
 {
 	if( numDraws >= kMaxClassDraws || vertCount + count > kMaxClassVerts )
 		return false;
@@ -260,6 +292,7 @@ bool AppendDecal( float *verts, int &vertCount, DecalDraw *draws, int &numDraws,
 	d.count = count;
 	d.texSlot = texSlot;
 	d.lmSlot = lmSlot;
+	d.procedural = procedural;
 
 	vertCount += count;
 	return true;
@@ -299,7 +332,7 @@ void DrawBatch( const ViewSetup &view, const float *verts, int vertCount,
 	SetCull( false );
 	SetBlend( alphaClass ? kBlendAlpha : kBlendModulate );
 
-	int curLm = -2;
+	int curLm = -2, curProc = -1;
 	for( int i = 0; i < numDraws; i++ )
 	{
 		const DecalDraw &d = draws[i];
@@ -311,6 +344,15 @@ void DrawBatch( const ViewSetup &view, const float *verts, int vertCount,
 			curLm = hasLm;
 		}
 
+		if( d.procedural != curProc )
+		{
+			glUniform1i( s_decal.uProcedural, d.procedural );
+			curProc = d.procedural;
+		}
+
+		// A procedural decal ignores the (dead) diffuse texture, but unit 0 must
+		// still reference a complete texture for the sampler -- the engine slot is
+		// harmless to bind even when empty, so keep the normal bind either way.
 		BindTextureSlot( 0, d.texSlot );
 		if( hasLm )
 			BindTextureSlot( 1, d.lmSlot );
@@ -397,16 +439,20 @@ void DrawDecalsAlpha( const ViewSetup &view, const unsigned char *visibleFaces, 
 			if( v == NULL || count < 3 || count > kMaxClassVerts )
 				continue;
 
+			// 坑23: decal textures the engine uploaded in a core-invalid luminance/
+			// alpha format are unsamplable -> draw them procedurally (see DecalTexBroken).
+			int procedural = DecalTexBroken( tex ) ? 1 : 0;
+
 			if( DecalIsAlphaClass( tex ))
 			{
 				if( !AppendDecal( s_decal.alphaVerts, s_decal.alphaVertCount,
-					s_decal.alphaDraws, s_decal.numAlphaDraws, v, count, tex, lmSlot ))
+					s_decal.alphaDraws, s_decal.numAlphaDraws, v, count, tex, lmSlot, procedural ))
 					alphaFull = true;
 			}
 			else
 			{
 				if( !AppendDecal( s_decal.modVerts, s_decal.modVertCount,
-					s_decal.modDraws, s_decal.numModDraws, v, count, tex, lmSlot ))
+					s_decal.modDraws, s_decal.numModDraws, v, count, tex, lmSlot, procedural ))
 					modFull = true;
 			}
 		}
