@@ -53,6 +53,12 @@ public:
 	// share the trans domain with sprites, sorted back-to-front internally.
 	void DrawBrushOpaque( const ViewSetup &view, cl_entity_s *const *ents, int count );
 	void DrawBrushTransparent( const ViewSetup &view, cl_entity_s *const *ents, int count );
+	// Warped water/turb surfaces (kSurfDrawTurb). Drawn in the transparent domain
+	// with a Quake-style sine UV warp, night-tint + analytic fog parity, and a
+	// translucent blend (csz_wateralpha). Covers BOTH the worldspawn water (the
+	// static submodel-0 turb list) and func_water brush entities (per-entity model
+	// matrix, same brushFaces[] structure the opaque brush passes use).
+	void DrawWater( const ViewSetup &view, cl_entity_s *const *ents, int count );
 	void DrawDepth( const ViewSetup &lightView, const Frustum &lightCull );
 	void DrawLitAdditive( const ViewSetup &view, const SpotLightParams &light );
 	// Brush submodel (func_*) companion to DrawLitAdditive: lights opaque brush

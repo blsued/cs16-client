@@ -81,6 +81,7 @@ struct FaceRec
 	int smax, tmax;			// luxel block dimensions
 	int sampleSize;			// luxels-per-sample (cached so EmitFaceVerts need not re-query)
 	float alphaTest;		// 0 = opaque, else '{' discard threshold
+	bool isTurb;			// kSurfDrawTurb water surface (drawn in the warped water pass, not opaque)
 	float planeNormal[3];
 	float planeDist;
 	bool planeBack;
@@ -147,10 +148,17 @@ struct WorldState
 	ShaderProgram depthProgram;	// shadow map depth pass (T7)
 	int depthUViewProj;
 
+	ShaderProgram waterProgram;	// warped water/turb pass (M2c)
+	int waterUViewProj, waterUModel;
+	int waterUTime, waterUWarpAmp, waterUWarpFreq, waterUWarpSpeed;
+	int waterUAmbTint, waterUAlpha, waterUCamPos;
+	int waterUFog, waterUFogParams, waterUFogParams2;
+
 	FaceRec *faces;			// [numFaces], indexed by local face index
 	int *opaque;			// sorted local indices (texture, lightmap page)
+	int *water;			// local indices of worldspawn turb faces (drawn in DrawWater)
 	unsigned char *visible;		// per local face, rebuilt by BuildVisibleSet
-	int numFaces, numOpaque;
+	int numFaces, numOpaque, numWater;
 	int numSky, numTurb;
 	int whiteTexSlot;
 
@@ -495,8 +503,7 @@ bool BuildFaceRec( const EngModel *bsp, int globalIndex, int localSlot, FaceRec 
 	if( surf.flags & kSurfDrawSky )
 		return false;
 
-	if( surf.flags & kSurfDrawTurb )
-		return false;
+	f.isTurb = ( surf.flags & kSurfDrawTurb ) != 0;
 
 	const EngTexinfo *ti = surf.texinfo;
 	const EngTexture *tex = ti->texture;
@@ -512,6 +519,13 @@ bool BuildFaceRec( const EngModel *bsp, int globalIndex, int localSlot, FaceRec 
 	}
 
 	f.alphaTest = ( tex != NULL && tex->name[0] == '{' ) ? 0.25f : 0.0f;
+
+	// Water/turb surfaces carry NO baked lightmap (the engine's GL_BuildLightmaps
+	// skips SURF_DRAWTILED, so surf.samples is NULL and lightextents are unset):
+	// emit geometry only and leave lmPage = -1, the warped water pass lights them
+	// fullbright * night-tint instead of a (nonexistent) lightmap block.
+	if( f.isTurb )
+		return true;
 
 	const EngExtraSurf *info = surf.info;
 	int sampleSize = FaceSampleSize( globalIndex );
@@ -990,8 +1004,17 @@ void WorldRenderer::Destroy()
 			s_world.depthProgram.program = 0;
 	}
 
+	if( s_world.waterProgram.program != 0 )
+	{
+		if( sameContext )
+			DestroyProgram( s_world.waterProgram );
+		else
+			s_world.waterProgram.program = 0;
+	}
+
 	delete[] s_world.faces;
 	delete[] s_world.opaque;
+	delete[] s_world.water;
 	delete[] s_world.visible;
 	delete[] s_world.brushFaces;
 	delete[] s_world.brushForGlobal;
@@ -999,13 +1022,14 @@ void WorldRenderer::Destroy()
 	delete[] s_world.svVertVis;
 	s_world.faces = NULL;
 	s_world.opaque = NULL;
+	s_world.water = NULL;
 	s_world.visible = NULL;
 	s_world.brushFaces = NULL;
 	s_world.brushForGlobal = NULL;
 	s_world.svVertPos = NULL;
 	s_world.svVertVis = NULL;
 	s_world.svNumVerts = 0;
-	s_world.numFaces = s_world.numOpaque = 0;
+	s_world.numFaces = s_world.numOpaque = s_world.numWater = 0;
 	s_world.numBrushFaces = 0;
 	s_world.model = NULL;
 	s_world.bsp = NULL;
@@ -1044,10 +1068,12 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.numFaces = numFaces;
 	s_world.faces = new( std::nothrow ) FaceRec[numFaces];
 	s_world.opaque = new( std::nothrow ) int[numFaces];
+	s_world.water = new( std::nothrow ) int[numFaces];
 	s_world.visible = new( std::nothrow ) unsigned char[numFaces];
 	OpaqueSortKey *sortKeys = new( std::nothrow ) OpaqueSortKey[numFaces];
 
-	if( s_world.faces == NULL || s_world.opaque == NULL || s_world.visible == NULL || sortKeys == NULL )
+	if( s_world.faces == NULL || s_world.opaque == NULL || s_world.water == NULL ||
+		s_world.visible == NULL || sortKeys == NULL )
 		CSZ_FatalInit( "world", "out of memory building world face tables" );
 
 	// Brush submodels (E1): every BSP surface not owned by worldmodel
@@ -1078,7 +1104,9 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	{
 		const EngSurface &surf = bsp->surfaces[g];
 
-		if(( surf.flags & ( kSurfDrawSky | kSurfDrawTurb )) == 0 )
+		// Sky emits nothing (clear color shows through); turb water now emits
+		// geometry for the warped water pass, so only sky is excluded here.
+		if(( surf.flags & kSurfDrawSky ) == 0 )
 			totalVerts += surf.numedges;
 	}
 
@@ -1094,6 +1122,7 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 
 	s_world.numSky = s_world.numTurb = 0;
 	s_world.numOpaque = 0;
+	s_world.numWater = 0;
 	s_world.numBrushFaces = 0;
 
 	// S1: geometric sky-visibility sidecar, keyed by GLOBAL surface index. Absent
@@ -1110,15 +1139,21 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 
 		if( !BuildFaceRec( bsp, globalIndex, i, f, &badTexWarned, &atlasFullWarned, &maxPage ))
 		{
-			if( surf.flags & kSurfDrawSky )
-				s_world.numSky++;
-			else if( surf.flags & kSurfDrawTurb )
-				s_world.numTurb++;
+			s_world.numSky++;	// only sky returns false now (no geometry)
 			continue;
 		}
 
 		EmitFaceVerts( bsp, globalIndex, f, verts, vertCursor, skyvis );
 		vertCursor += surf.numedges;
+
+		// Turb water goes to the warped water pass; everything else is opaque and
+		// joins the texture/lightmap-sorted opaque list.
+		if( f.isTurb )
+		{
+			s_world.water[s_world.numWater++] = i;
+			s_world.numTurb++;
+			continue;
+		}
 
 		sortKeys[s_world.numOpaque].faceIndex = i;
 		sortKeys[s_world.numOpaque].texSlot = f.texSlot;
@@ -1152,10 +1187,16 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 		FaceRec &f = s_world.brushFaces[s_world.numBrushFaces];
 
 		if( !BuildFaceRec( bsp, g, g, f, &badTexWarned, &atlasFullWarned, &maxPage ))
-			continue;	// sky/turb: emit nothing, leave brushForGlobal[g] = -1
+			continue;	// sky: emit nothing, leave brushForGlobal[g] = -1
 
 		EmitFaceVerts( bsp, g, f, verts, vertCursor, skyvis );
 		vertCursor += surf.numedges;
+
+		// brushForGlobal is set for turb too (func_water): the opaque/trans/lit
+		// brush passes skip f.isTurb, and DrawWater picks the turb faces back up
+		// per-entity via this same global->slot map.
+		if( f.isTurb )
+			s_world.numTurb++;
 
 		s_world.brushForGlobal[g] = s_world.numBrushFaces;
 		s_world.numBrushFaces++;
@@ -1340,13 +1381,33 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	BuildProgram( "csz_world_depth", kWorldDepthVs, kWorldDepthFs, true, s_world.depthProgram );
 	s_world.depthUViewProj = UniformLoc( s_world.depthProgram, "u_viewProj" );
 
+	// Water program (M2c warped turb pass); init-time, so failure is FATAL.
+	BuildProgram( "csz_world_water", kWorldWaterVs, kWorldWaterFs, true, s_world.waterProgram );
+	s_world.waterUViewProj = UniformLoc( s_world.waterProgram, "u_viewProj" );
+	s_world.waterUModel = UniformLoc( s_world.waterProgram, "u_model" );
+	s_world.waterUTime = UniformLoc( s_world.waterProgram, "u_time" );
+	s_world.waterUWarpAmp = UniformLoc( s_world.waterProgram, "u_warpAmp" );
+	s_world.waterUWarpFreq = UniformLoc( s_world.waterProgram, "u_warpFreq" );
+	s_world.waterUWarpSpeed = UniformLoc( s_world.waterProgram, "u_warpSpeed" );
+	s_world.waterUAmbTint = UniformLoc( s_world.waterProgram, "u_ambTint" );
+	s_world.waterUAlpha = UniformLoc( s_world.waterProgram, "u_wateralpha" );
+	s_world.waterUCamPos = UniformLoc( s_world.waterProgram, "u_camPos" );
+	s_world.waterUFog = UniformLoc( s_world.waterProgram, "u_fog" );
+	s_world.waterUFogParams = UniformLoc( s_world.waterProgram, "u_fogParams" );
+	s_world.waterUFogParams2 = UniformLoc( s_world.waterProgram, "u_fogParams2" );
+
+	UseProgram( s_world.waterProgram.program );
+	glUniform1i( UniformLoc( s_world.waterProgram, "u_texDiffuse" ), 0 );
+	glUniformMatrix4fv( s_world.waterUModel, 1, GL_FALSE, identity.m );	// world stays identity; per-entity in DrawWater
+	UseProgram( 0 );
+
 	int pages = maxPage + 1;
 
 	s_world.built = true;
 	s_world.lightmapsDirty = false;
 
-	CSZ_LogInfo( "world", "built %s: %d world surfaces (%d sky, %d water skipped) + %d brush surfaces, %d verts, %d lightmap pages",
-		s_world.name, numFaces, s_world.numSky, s_world.numTurb, s_world.numBrushFaces, totalVerts, pages );
+	CSZ_LogInfo( "world", "built %s: %d world surfaces (%d sky skipped, %d world water) + %d brush surfaces, %d turb total, %d verts, %d lightmap pages",
+		s_world.name, numFaces, s_world.numSky, s_world.numWater, s_world.numBrushFaces, s_world.numTurb, totalVerts, pages );
 }
 
 void WorldRenderer::BuildVisibleSet( const ViewSetup &view )
@@ -1505,8 +1566,8 @@ int DrawBrushEntityFaces( const cl_entity_t *ent, const ViewSetup &view, const M
 
 		const FaceRec &f = s_world.brushFaces[slot];
 
-		if( f.firstVert < 0 )
-			continue;
+		if( f.firstVert < 0 || f.isTurb )
+			continue;	// turb water is drawn by DrawWater, not the opaque/trans brush path
 
 		// Plane-side backface cull in model space (same sign rule as the world
 		// opaque pass, plan step 3).
@@ -1839,6 +1900,177 @@ void WorldRenderer::DrawBrushTransparent( const ViewSetup &view, cl_entity_s *co
 	}
 }
 
+// Warped water/turb pass (M2c). Draws the worldspawn turb surfaces (the static
+// submodel-0 water list) and every func_water brush entity's turb faces through
+// the dedicated water program: a Quake-style sine UV warp animates the texture,
+// the night-tint + a compact analytic fog keep it consistent with the opaque
+// world, and a translucent alpha (csz_wateralpha) blends it over the scene.
+// Drawn 2-sided (no plane-side cull) so the surface is visible from underwater.
+// Shares the trans domain; depth-write ON because water is a large coherent
+// surface that should occlude correctly and avoid z-fighting.
+void WorldRenderer::DrawWater( const ViewSetup &view, cl_entity_s *const *ents, int count )
+{
+	if( !s_world.built )
+		return;
+
+	bool haveWorldWater = ( s_world.numWater > 0 );
+
+	if( !haveWorldWater && ( ents == NULL || count <= 0 ))
+		return;
+
+	// Water cvars (registered once; live-tunable so the USER can dial water in-game).
+	static cvar_t *s_alpha = NULL, *s_amp = NULL, *s_speed = NULL;
+	static bool    s_looked = false;
+	if( !s_looked )
+	{
+		s_looked = true;
+		s_alpha = gEngfuncs.pfnRegisterVariable( "csz_wateralpha",  "0.8", FCVAR_CLIENTDLL );	// world water translucency (0..1)
+		s_amp   = gEngfuncs.pfnRegisterVariable( "csz_water_warp",   "1.0", FCVAR_CLIENTDLL );	// warp amplitude scale (0 = flat)
+		s_speed = gEngfuncs.pfnRegisterVariable( "csz_water_speed",  "1.0", FCVAR_CLIENTDLL );	// warp animation speed scale
+	}
+
+	float wateralpha = ( s_alpha != NULL ) ? s_alpha->value : 0.8f;
+	if( wateralpha < 0.0f ) wateralpha = 0.0f;
+	if( wateralpha > 1.0f ) wateralpha = 1.0f;
+	float warpScale = ( s_amp != NULL ) ? s_amp->value : 1.0f;
+	float warpSpeed = ( s_speed != NULL ) ? s_speed->value : 1.0f;
+
+	const AmbienceParams &amb = view.ambience;
+
+	UseProgram( s_world.waterProgram.program );
+	glUniformMatrix4fv( s_world.waterUViewProj, 1, GL_FALSE, view.matViewProj.m );
+	glUniform1f( s_world.waterUTime, ClientTime() );
+	// Base warp: ~0.06 of one texture tile in amplitude, ~one wave per tile in
+	// spatial frequency, both scaled by the live cvars.
+	glUniform1f( s_world.waterUWarpAmp, 0.06f * warpScale );
+	glUniform1f( s_world.waterUWarpFreq, 6.2831853f );
+	glUniform1f( s_world.waterUWarpSpeed, 1.5f * warpSpeed );
+	glUniform3fv( s_world.waterUAmbTint, 1, amb.tint );	// night darkening parity with the opaque world
+	glUniform3fv( s_world.waterUCamPos, 1, view.origin );
+
+	// Compact analytic fog parity (per-channel extinction + height falloff +
+	// maxOpacity; no HG lobe / noise / flashlight defog -- those are opaque-world
+	// extras, out of scope for the water surface).
+	float fogVec[4], fogParams[4], fogParams2[4], fogParams3[4], fogLit[3];
+	CszFogUniformVecsEx( amb, ClientTime(), fogVec, fogParams, fogParams2, fogParams3, fogLit );
+	glUniform4fv( s_world.waterUFog, 1, fogVec );
+	glUniform4fv( s_world.waterUFogParams, 1, fogParams );
+	if( s_world.waterUFogParams2 >= 0 ) glUniform4fv( s_world.waterUFogParams2, 1, fogParams2 );
+
+	BindVao( s_world.vao );
+	SetCull( false );		// water is 2-sided; no plane-side cull (visible from underwater)
+	SetBlend( kBlendAlpha );
+	SetDepthWrite( true );
+
+	int curTex = -1;
+	int drawn = 0;
+
+	// --- Worldspawn water (submodel 0, identity model, camera PVS gated) ---
+	if( haveWorldWater )
+	{
+		Mat4 identity;
+		Mat4Identity( identity );
+		glUniformMatrix4fv( s_world.waterUModel, 1, GL_FALSE, identity.m );
+		glUniform1f( s_world.waterUAlpha, wateralpha );
+
+		for( int i = 0; i < s_world.numWater; i++ )
+		{
+			const FaceRec &f = s_world.faces[s_world.water[i]];
+
+			if( !s_world.visible[f.surfIndex] || f.firstVert < 0 )
+				continue;
+
+			if( f.texSlot != curTex )
+			{
+				BindTextureSlot( 0, f.texSlot );
+				curTex = f.texSlot;
+			}
+
+			glDrawArrays( GL_TRIANGLE_FAN, f.firstVert, f.numVerts );
+			drawn++;
+		}
+	}
+
+	// --- func_water brush entities (per-entity model matrix; turb faces only) ---
+	int drawnEnts = 0;
+
+	for( int i = 0; i < count; i++ )
+	{
+		cl_entity_t *ent = ents[i];
+
+		if( ent == NULL || ent->model == NULL || ent->model->type != mod_brush )
+			continue;
+
+		const EngModel *bmod = EngBsp( ent->model );
+		int first = bmod->firstmodelsurface;
+		int faceCount = bmod->nummodelsurfaces;
+
+		if( first < 0 || faceCount <= 0 || first + faceCount > s_world.bsp->numsurfaces )
+			continue;
+
+		// A func_water with an explicit translucent rendermode uses its renderamt;
+		// otherwise it inherits the global csz_wateralpha.
+		float entAlpha = ( ent->curstate.rendermode != kRenderNormal )
+			? (float)ent->curstate.renderamt * ( 1.0f / 255.0f ) : wateralpha;
+
+		Mat4 model;
+		BuildBrushModelMatrix( ent, model );
+
+		int entFaces = 0;
+
+		for( int g = first; g < first + faceCount; g++ )
+		{
+			int slot = s_world.brushForGlobal[g];
+
+			if( slot < 0 )
+				continue;
+
+			const FaceRec &f = s_world.brushFaces[slot];
+
+			if( f.firstVert < 0 || !f.isTurb )
+				continue;	// only this entity's turb faces are water
+
+			if( entFaces == 0 )
+			{
+				glUniformMatrix4fv( s_world.waterUModel, 1, GL_FALSE, model.m );
+				glUniform1f( s_world.waterUAlpha, entAlpha );
+			}
+
+			if( f.texSlot != curTex )
+			{
+				BindTextureSlot( 0, f.texSlot );
+				curTex = f.texSlot;
+			}
+
+			glDrawArrays( GL_TRIANGLE_FAN, f.firstVert, f.numVerts );
+			entFaces++;
+			drawn++;
+		}
+
+		if( entFaces > 0 )
+			drawnEnts++;
+	}
+
+	SetBlend( kBlendNone );
+	SetDepthWrite( true );
+
+	// Restore identity so the next water-program user never inherits a brush matrix.
+	{
+		Mat4 identity;
+		Mat4Identity( identity );
+		glUniformMatrix4fv( s_world.waterUModel, 1, GL_FALSE, identity.m );
+	}
+
+	static float s_nextStatsTime;
+	float now = ClientTime();
+
+	if( drawn > 0 && now >= s_nextStatsTime )
+	{
+		s_nextStatsTime = now + 1.0f;
+		CSZ_LogDev( "world", "water: %d faces (%d world + %d brush ents)", drawn, s_world.numWater, drawnEnts );
+	}
+}
+
 void WorldRenderer::DrawDepth( const ViewSetup &lightView, const Frustum &lightCull )
 {
 	if( !s_world.built )
@@ -2090,8 +2322,8 @@ void WorldRenderer::DrawBrushLitAdditive( const ViewSetup &view, const SpotLight
 
 			const FaceRec &f = s_world.brushFaces[slot];
 
-			if( f.firstVert < 0 )
-				continue;
+			if( f.firstVert < 0 || f.isTurb )
+				continue;	// turb water is not lit by the additive spot pass
 
 			// View-side plane cull (local space): skip faces the camera cannot see.
 			float dv = localView[0] * f.planeNormal[0] + localView[1] * f.planeNormal[1] +
