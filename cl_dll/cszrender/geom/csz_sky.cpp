@@ -77,7 +77,7 @@ struct SkyGpu
 	bool built;
 
 	int uCamFwd, uCamRight, uCamUp;
-	int uSunDir, uMoonDir, uMoonColor;
+	int uSunDir;
 	int uPhase, uStarAmount, uFog;
 	int uFogParams;		// analytic base fog (fog M1 Step 2): maxOpacity floor for the horizon band
 };
@@ -320,8 +320,6 @@ void SkyRenderer::EnsureBuilt()
 	s_sky.uCamRight   = UniformLoc( s_sky.program, "u_camRight" );
 	s_sky.uCamUp      = UniformLoc( s_sky.program, "u_camUp" );
 	s_sky.uSunDir     = UniformLoc( s_sky.program, "u_sunDir" );
-	s_sky.uMoonDir    = UniformLoc( s_sky.program, "u_moonDir" );
-	s_sky.uMoonColor  = UniformLoc( s_sky.program, "u_moonColor" );
 	s_sky.uPhase      = UniformLoc( s_sky.program, "u_phase" );
 	s_sky.uStarAmount = UniformLoc( s_sky.program, "u_starAmount" );
 	s_sky.uFog        = UniformLoc( s_sky.program, "u_fog" );
@@ -338,25 +336,17 @@ void SkyRenderer::DrawSky( const ViewSetup &view )
 
 	float phase = ComputePhase();
 
-	// Body directions from phase (or the dev override). The moon is the exact
-	// antipode of the sun (computed AFTER the dev override), so the disc and the
-	// lit side always agree and the two stay 180 deg opposite.
-	float sunDir[3], moonDir[3];
+	// Sun direction from phase (or the dev override). The fallback sky FS only
+	// consumes the sun direction; the moon dir/color uniforms it once declared were
+	// retired (dead, never read in the shader -- DEAD-1).
+	float sunDir[3];
 
 	skymath::SunDir( phase, sunDir );
-	skymath::MoonDir( phase, moonDir );
-
-	float moonColor[3] = { 0.90f, 0.93f, 1.00f };	// moonlit-cloud tint (near-white, faint cool edge)
 
 #if defined( CSZ_DEV_TOOLS )
 	if( s_devSunOn )
 		skymath::ElevYawDir( s_devSunElev, s_devSunYaw, sunDir );	// sunColor override removed with the disc (DEAD-1)
 #endif
-
-	// Moon = -sun (antipodal even under the dev sun override).
-	moonDir[0] = -sunDir[0];
-	moonDir[1] = -sunDir[1];
-	moonDir[2] = -sunDir[2];
 
 	// Camera basis (Quake world space, Z up). Pre-scale right/up by the
 	// half-FOV tangents so the VS ray = fwd + right*ndc.x + up*ndc.y.
@@ -404,8 +394,6 @@ void SkyRenderer::DrawSky( const ViewSetup &view )
 	glUniform3fv( s_sky.uCamRight, 1, rightS );
 	glUniform3fv( s_sky.uCamUp, 1, upS );
 	glUniform3fv( s_sky.uSunDir, 1, sunDir );
-	glUniform3fv( s_sky.uMoonDir, 1, moonDir );
-	glUniform3fv( s_sky.uMoonColor, 1, moonColor );
 	glUniform1f( s_sky.uPhase, phase );
 	glUniform1f( s_sky.uStarAmount, starAmount );
 	glUniform4fv( s_sky.uFog, 1, fogVec );

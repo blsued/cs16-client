@@ -130,7 +130,6 @@ uniform float u_nightMoon;        // gain on the skyVis-GATED moon directional (
 // extinction is LOCALLY lowered so the player sees a path through the black fog; outside the
 // cone (or with no flashlight) it is byte-identical to the server fog -- pure render-side
 // modulation, the server fog state/protocol (u_fog) is never touched. Gameplay blackout kept.
-uniform vec3  u_spotOrigin;       // cone apex (world); kept for parity (view-ray test below uses dir only)
 uniform vec3  u_spotDir;          // normalized cone forward
 uniform float u_spotRange;        // beam length (world units); <=0 => no flashlight this frame -> shader is identity
 uniform float u_spotCosInner;     // soft cone rim start (cos half-angle, inner)

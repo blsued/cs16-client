@@ -79,6 +79,7 @@ struct FaceRec
 	int texSlot;			// engine texture slot for unit 0
 	int lmPage, lmX, lmY;		// atlas block, luxel units; lmPage -1 = none
 	int smax, tmax;			// luxel block dimensions
+	int sampleSize;			// luxels-per-sample (cached so EmitFaceVerts need not re-query)
 	float alphaTest;		// 0 = opaque, else '{' discard threshold
 	float planeNormal[3];
 	float planeDist;
@@ -135,7 +136,7 @@ struct WorldState
 	int uMoonDir, uMoonColor;			// S2 gated night moon directional (base pass only)
 	int uNightSky, uNightFloor, uNightK, uNightMoon;	// S2 world night ambient calibration (base pass only)
 	int uBrushAlpha;		// per-entity translucency for blended brush modes (renderamt); 1.0 = opaque/world
-	int uSpotOrigin, uSpotDir, uSpotRange, uSpotCosInner, uSpotCosOuter;	// flashlight defog cone (base pass only; local clear of black fog)
+	int uSpotDir, uSpotRange, uSpotCosInner, uSpotCosOuter;	// flashlight defog cone (base pass only; local clear of black fog)
 	int uTpFogCount, uTpFogPos, uTpFogColor, uTpFogRadius, uTpFogIntensity;	// v5.1 third-person fog glow (non-local lanterns light the mist, bounded)
 	ShaderProgram litProgram;	// additive per-light pass (T6)
 	int litUViewProj, litUModel, litUAlphaTest;
@@ -229,6 +230,22 @@ void FeedFog( const WorldState &w, const AmbienceParams &amb )
 	FeedTpFogGlow( w );	// v5.1: non-local lanterns light the mist around their holders (bounded glow)
 }
 
+// Base-program per-pass ambience feed shared by the opaque world and opaque brush
+// base passes: fog (ONE inscatter owner) + cam/tint/sky-scale/sun uniforms + moon
+// Tyndall shaft + S2 physical night model. Base pass only.
+void FeedBaseAmbience( const WorldState &w, const ViewSetup &view )
+{
+	const AmbienceParams &amb = view.ambience;
+	FeedFog( w, amb );	// S3: per-channel ext + HG + Start/Cutoff + drifting noise + lit color (ONE inscatter owner)
+	glUniform3fv( w.uCamPos, 1, view.origin );		// ray origin for the height-fog integral
+	glUniform3fv( w.uAmbTint, 1, amb.tint );
+	glUniform1f( w.uSkyAmbScale, amb.skyAmbientScale );	// L3b sky-ambient cloud dimmer (1.0 when clouds off; floored >=0.6 in L3a)
+	glUniform3fv( w.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
+	glUniform3fv( w.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
+	FeedMoonShaft( w, amb );	// fog M1 L4 moon Tyndall air-glow (base pass only)
+	FeedNightModel( w, amb );	// S2 physical night model (base pass only)
+}
+
 // Flashlight defog feed (base pass only). Pushes the local player's shadowed-flashlight cone
 // so the base FS can locally clear the fog extinction INSIDE the cone (a see-through path) while
 // the server fog stays untouched everywhere else. Same spot the volumetric march uses
@@ -253,7 +270,6 @@ void FeedSpotDefog( const WorldState &w )
 	{
 		float len = spot.radius;
 		if( range > 0.0f && range < len ) len = range;	// csz_flashlight_range caps the clear distance
-		if( w.uSpotOrigin >= 0 )   glUniform3fv( w.uSpotOrigin, 1, spot.origin );
 		if( w.uSpotDir >= 0 )      glUniform3fv( w.uSpotDir, 1, spot.dir );
 		if( w.uSpotRange >= 0 )    glUniform1f( w.uSpotRange, len );
 		if( w.uSpotCosInner >= 0 ) glUniform1f( w.uSpotCosInner, spot.cosInner );
@@ -499,6 +515,7 @@ bool BuildFaceRec( const EngModel *bsp, int globalIndex, int localSlot, FaceRec 
 
 	const EngExtraSurf *info = surf.info;
 	int sampleSize = FaceSampleSize( globalIndex );
+	f.sampleSize = sampleSize;
 	int smax = ( info->lightextents[0] / sampleSize ) + 1;
 	int tmax = ( info->lightextents[1] / sampleSize ) + 1;
 	int page = 0, bx = 0, by = 0;
@@ -676,7 +693,7 @@ void EmitFaceVerts( const EngModel *bsp, int globalIndex, FaceRec &f, float *ver
 			float lt = pos[0] * info->lmvecs[1][0] + pos[1] * info->lmvecs[1][1] +
 				pos[2] * info->lmvecs[1][2] + info->lmvecs[1][3] - (float)info->lightmapmins[1];
 
-			int sampleSize = FaceSampleSize( globalIndex );
+			int sampleSize = f.sampleSize;
 
 			out[5] = ((float)f.lmX * sampleSize + ls + 0.5f * sampleSize ) /
 				(float)( LightmapAtlas::kPageSize * sampleSize );
@@ -810,6 +827,24 @@ void BuildBrushModelMatrix( const cl_entity_t *ent, Mat4 &out )
 	out.m[12] = ent->origin[0]; out.m[13] = ent->origin[1]; out.m[14] = ent->origin[2]; out.m[15] = 1.0f;
 }
 
+// Rigid inverse of a world POINT into a brush's local model space:
+// rel = p - origin, then R^T * rel (project onto the basis columns).
+void WorldToBrushLocal( const Mat4 &model, const float p[3], float out[3] )
+{
+	float rel[3] = { p[0] - model.m[12], p[1] - model.m[13], p[2] - model.m[14] };
+	out[0] = rel[0] * model.m[0] + rel[1] * model.m[1] + rel[2] * model.m[2];
+	out[1] = rel[0] * model.m[4] + rel[1] * model.m[5] + rel[2] * model.m[6];
+	out[2] = rel[0] * model.m[8] + rel[1] * model.m[9] + rel[2] * model.m[10];
+}
+
+// Direction-only variant (no translation): R^T * v.
+void DirToBrushLocal( const Mat4 &model, const float v[3], float out[3] )
+{
+	out[0] = v[0] * model.m[0] + v[1] * model.m[1] + v[2] * model.m[2];
+	out[1] = v[0] * model.m[4] + v[1] * model.m[5] + v[2] * model.m[6];
+	out[2] = v[0] * model.m[8] + v[1] * model.m[9] + v[2] * model.m[10];
+}
+
 // The only two real FWGS R_GetEntityRenderMode overrides that matter to brush
 // models (clean-room, pitfall: do NOT invent EF_*/renderamt/brightness rules,
 // they cause csz_renderer 0/1 A/B drift, R3):
@@ -840,6 +875,8 @@ struct BrushDrawItem
 {
 	cl_entity_t *ent;
 	float distSq;		// sort key: AABB-center dist^2, kRenderTransAlpha forced to 1e9 (drawn first)
+	int mode;		// resolved rendermode (cached from the collect loop; identical in the draw loop)
+	Mat4 model;		// brush model matrix (cached from the collect loop)
 };
 
 int CompareBrushItems( const void *a, const void *b )
@@ -1195,7 +1232,6 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.uFogParams2 = UniformLoc( s_world.program, "u_fogParams2" );	// S3
 	s_world.uFogParams3 = UniformLoc( s_world.program, "u_fogParams3" );	// S3
 	s_world.uFogLit = UniformLoc( s_world.program, "u_fogLit" );		// S3
-	s_world.uSpotOrigin = UniformLoc( s_world.program, "u_spotOrigin" );	// flashlight defog cone
 	s_world.uSpotDir = UniformLoc( s_world.program, "u_spotDir" );
 	s_world.uSpotRange = UniformLoc( s_world.program, "u_spotRange" );
 	s_world.uSpotCosInner = UniformLoc( s_world.program, "u_spotCosInner" );
@@ -1370,15 +1406,7 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 
 	// Ambience feed (M2a A1): server-authoritative snapshot rides in on the
 	// view (plan 2.5 slot 7.2); base pass only, pitfall 23.
-	const AmbienceParams &amb = view.ambience;
-	FeedFog( s_world, amb );	// S3: per-channel ext + HG + Start/Cutoff + drifting noise + lit color (ONE inscatter owner)
-	glUniform3fv( s_world.uCamPos, 1, view.origin );		// ray origin for the height-fog integral
-	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
-	glUniform1f( s_world.uSkyAmbScale, amb.skyAmbientScale );	// L3b sky-ambient cloud dimmer (1.0 when clouds off; floored >=0.6 in L3a)
-	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
-	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
-	FeedMoonShaft( s_world, amb );	// fog M1 L4 moon Tyndall air-glow (base pass only)
-	FeedNightModel( s_world, amb );	// S2 physical night model (base pass only)
+	FeedBaseAmbience( s_world, view );
 
 	BindVao( s_world.vao );
 	SetCull( false );	// BSP faces are culled per-face below (plan step 3)
@@ -1462,19 +1490,9 @@ int DrawBrushEntityFaces( const cl_entity_t *ent, const ViewSetup &view, const M
 	if( first < 0 || count <= 0 || first + count > s_world.bsp->numsurfaces )
 		return 0;
 
-	// View origin in the brush's local model space (rigid inverse:
-	// localView = R^T * (worldView - origin); matrix basis columns are the
-	// world-space axes, so the transpose rows are R^T).
-	float rel[3] = {
-		view.origin[0] - model.m[12],
-		view.origin[1] - model.m[13],
-		view.origin[2] - model.m[14],
-	};
-	float localView[3] = {
-		rel[0] * model.m[0] + rel[1] * model.m[1] + rel[2] * model.m[2],
-		rel[0] * model.m[4] + rel[1] * model.m[5] + rel[2] * model.m[6],
-		rel[0] * model.m[8] + rel[1] * model.m[9] + rel[2] * model.m[10],
-	};
+	// View origin in the brush's local model space (rigid inverse).
+	float localView[3];
+	WorldToBrushLocal( model, view.origin, localView );
 
 	int drawn = 0;
 
@@ -1560,15 +1578,7 @@ void WorldRenderer::DrawBrushOpaque( const ViewSetup &view, cl_entity_s *const *
 	UseProgram( s_world.program.program );
 	glUniformMatrix4fv( s_world.uViewProj, 1, GL_FALSE, view.matViewProj.m );
 
-	const AmbienceParams &amb = view.ambience;
-	FeedFog( s_world, amb );	// S3: brush surfaces fog identically to the world (ONE inscatter owner)
-	glUniform3fv( s_world.uCamPos, 1, view.origin );
-	glUniform3fv( s_world.uAmbTint, 1, amb.tint );
-	glUniform1f( s_world.uSkyAmbScale, amb.skyAmbientScale );	// L3b sky-ambient cloud dimmer (1.0 when clouds off; floored >=0.6 in L3a)
-	glUniform3fv( s_world.uSunDir, 1, amb.moonlightDir );		// directional N.L (sky 档1), base pass only
-	glUniform3fv( s_world.uSunColor, 1, amb.moonlightColor );	// (0,0,0) when the body light is off
-	FeedMoonShaft( s_world, amb );	// fog M1 L4 moon Tyndall air-glow (base pass only)
-	FeedNightModel( s_world, amb );	// S2 physical night model (base pass only)
+	FeedBaseAmbience( s_world, view );
 
 	BindVao( s_world.vao );
 	SetCull( false );		// per-face plane-side cull (model space) below
@@ -1658,6 +1668,8 @@ void WorldRenderer::DrawBrushTransparent( const ViewSetup &view, cl_entity_s *co
 		// kRenderTransAlpha brush sorts first (drawn before the alpha-blended
 		// remainder): force it to the far end of the back-to-front order.
 		s_items[numItems].distSq = ( mode == kRenderTransAlpha ) ? 1e9f : distSq;
+		s_items[numItems].mode = mode;
+		s_items[numItems].model = model;
 		numItems++;
 	}
 
@@ -1719,7 +1731,7 @@ void WorldRenderer::DrawBrushTransparent( const ViewSetup &view, cl_entity_s *co
 	for( int i = 0; i < numItems; i++ )
 	{
 		cl_entity_t *ent = s_items[i].ent;
-		int mode = ResolveBrushRenderMode( ent );
+		int mode = s_items[i].mode;		// cached in the collect loop (identical value)
 
 		// --- Per-mode GL state (engine R_SetRenderMode parity) ---
 		if( mode != curMode )
@@ -1788,8 +1800,7 @@ void WorldRenderer::DrawBrushTransparent( const ViewSetup &view, cl_entity_s *co
 			}
 		}
 
-		Mat4 model;
-		BuildBrushModelMatrix( ent, model );
+		const Mat4 &model = s_items[i].model;	// cached in the collect loop (identical value)
 		glUniformMatrix4fv( s_world.uModel, 1, GL_FALSE, model.m );
 
 		// applyAlphaTest only for the cutout mode (feeds FaceRec.alphaTest=0.25);
@@ -1880,6 +1891,26 @@ void WorldRenderer::DrawDepth( const ViewSetup &lightView, const Frustum &lightC
 	}
 }
 
+// World-space spot light uniforms shared by both lit-additive passes (world model0
+// and per-entity brush). u_model / u_viewProj are uploaded separately by each pass.
+void UploadLitLightUniforms( const SpotLightParams &light )
+{
+	glUniform3fv( s_world.litULightOrigin, 1, light.origin );
+	glUniform3fv( s_world.litULightDir, 1, light.dir );
+	glUniform3fv( s_world.litULightColor, 1, light.color );
+	glUniform1f( s_world.litULightRadius, light.radius );
+	glUniform1f( s_world.litUCosInner, light.cosInner );
+	glUniform1f( s_world.litUCosOuter, light.cosOuter );
+	glUniformMatrix4fv( s_world.litUMatShadow, 1, GL_FALSE, light.matShadow.m );
+	glUniform1i( s_world.litUHasShadow, ( light.shadowTexSlot != 0 ) ? 1 : 0 );
+	// L5R crisp direct profile (locs are -1 when absent -> glUniform on -1 is a safe no-op).
+	glUniform1f( s_world.litUV3, light.v3 );
+	glUniform1f( s_world.litUEdgeExp, light.edgeExp );
+	glUniform1f( s_world.litUHotspotGain, light.hotspotGain );
+	glUniform1f( s_world.litUHotspotSharp, light.hotspotSharp );
+	glUniform1f( s_world.litUDirectGain, light.directGain );
+}
+
 void WorldRenderer::DrawLitAdditive( const ViewSetup &view, const SpotLightParams &light )
 {
 	if( !s_world.built )
@@ -1895,20 +1926,7 @@ void WorldRenderer::DrawLitAdditive( const ViewSetup &view, const SpotLightParam
 		Mat4Identity( identity );
 		glUniformMatrix4fv( s_world.litUModel, 1, GL_FALSE, identity.m );
 	}
-	glUniform3fv( s_world.litULightOrigin, 1, light.origin );
-	glUniform3fv( s_world.litULightDir, 1, light.dir );
-	glUniform3fv( s_world.litULightColor, 1, light.color );
-	glUniform1f( s_world.litULightRadius, light.radius );
-	glUniform1f( s_world.litUCosInner, light.cosInner );
-	glUniform1f( s_world.litUCosOuter, light.cosOuter );
-	glUniformMatrix4fv( s_world.litUMatShadow, 1, GL_FALSE, light.matShadow.m );
-	glUniform1i( s_world.litUHasShadow, ( light.shadowTexSlot != 0 ) ? 1 : 0 );
-	// L5R crisp direct profile (locs are -1 when absent -> glUniform on -1 is a safe no-op).
-	glUniform1f( s_world.litUV3, light.v3 );
-	glUniform1f( s_world.litUEdgeExp, light.edgeExp );
-	glUniform1f( s_world.litUHotspotGain, light.hotspotGain );
-	glUniform1f( s_world.litUHotspotSharp, light.hotspotSharp );
-	glUniform1f( s_world.litUDirectGain, light.directGain );
+	UploadLitLightUniforms( light );
 
 	if( light.shadowTexSlot != 0 )
 		BindTextureSlot( 2, light.shadowTexSlot );	// T7 depth map (T6: never taken)
@@ -2009,19 +2027,7 @@ void WorldRenderer::DrawBrushLitAdditive( const ViewSetup &view, const SpotLight
 	// World-space spot uniforms are shared across every brush entity (only u_model
 	// changes per entity below); v_worldPos/v_worldNormal are world-space again
 	// after u_model, so origin/dir/shadow projection all stay in world space.
-	glUniform3fv( s_world.litULightOrigin, 1, light.origin );
-	glUniform3fv( s_world.litULightDir, 1, light.dir );
-	glUniform3fv( s_world.litULightColor, 1, light.color );
-	glUniform1f( s_world.litULightRadius, light.radius );
-	glUniform1f( s_world.litUCosInner, light.cosInner );
-	glUniform1f( s_world.litUCosOuter, light.cosOuter );
-	glUniformMatrix4fv( s_world.litUMatShadow, 1, GL_FALSE, light.matShadow.m );
-	glUniform1i( s_world.litUHasShadow, ( light.shadowTexSlot != 0 ) ? 1 : 0 );
-	glUniform1f( s_world.litUV3, light.v3 );
-	glUniform1f( s_world.litUEdgeExp, light.edgeExp );
-	glUniform1f( s_world.litUHotspotGain, light.hotspotGain );
-	glUniform1f( s_world.litUHotspotSharp, light.hotspotSharp );
-	glUniform1f( s_world.litUDirectGain, light.directGain );
+	UploadLitLightUniforms( light );
 
 	if( light.shadowTexSlot != 0 )
 		BindTextureSlot( 2, light.shadowTexSlot );
@@ -2058,22 +2064,9 @@ void WorldRenderer::DrawBrushLitAdditive( const ViewSetup &view, const SpotLight
 
 		// Rigid inverse of view origin, light origin (points) and light dir
 		// (direction) into this brush's local model space for the plane/cone culls.
-		float relView[3] = {
-			view.origin[0] - model.m[12], view.origin[1] - model.m[13], view.origin[2] - model.m[14],
-		};
-		float relLight[3] = {
-			light.origin[0] - model.m[12], light.origin[1] - model.m[13], light.origin[2] - model.m[14],
-		};
-		float localView[3] = {
-			relView[0] * model.m[0] + relView[1] * model.m[1] + relView[2] * model.m[2],
-			relView[0] * model.m[4] + relView[1] * model.m[5] + relView[2] * model.m[6],
-			relView[0] * model.m[8] + relView[1] * model.m[9] + relView[2] * model.m[10],
-		};
-		float localLightOrigin[3] = {
-			relLight[0] * model.m[0] + relLight[1] * model.m[1] + relLight[2] * model.m[2],
-			relLight[0] * model.m[4] + relLight[1] * model.m[5] + relLight[2] * model.m[6],
-			relLight[0] * model.m[8] + relLight[1] * model.m[9] + relLight[2] * model.m[10],
-		};
+		float localView[3], localLightOrigin[3];
+		WorldToBrushLocal( model, view.origin, localView );
+		WorldToBrushLocal( model, light.origin, localLightOrigin );
 
 		// Local-space copy of the spot for SpotTouchesBox (origin + dir rotated into
 		// the local frame; radius/cosines are rotation-invariant).
@@ -2081,9 +2074,7 @@ void WorldRenderer::DrawBrushLitAdditive( const ViewSetup &view, const SpotLight
 		localSpot.origin[0] = localLightOrigin[0];
 		localSpot.origin[1] = localLightOrigin[1];
 		localSpot.origin[2] = localLightOrigin[2];
-		localSpot.dir[0] = light.dir[0] * model.m[0] + light.dir[1] * model.m[1] + light.dir[2] * model.m[2];
-		localSpot.dir[1] = light.dir[0] * model.m[4] + light.dir[1] * model.m[5] + light.dir[2] * model.m[6];
-		localSpot.dir[2] = light.dir[0] * model.m[8] + light.dir[1] * model.m[9] + light.dir[2] * model.m[10];
+		DirToBrushLocal( model, light.dir, localSpot.dir );
 
 		int curTex = -1;
 		float curAlpha = 0.0f;

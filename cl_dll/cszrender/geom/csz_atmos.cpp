@@ -603,8 +603,6 @@ void AtmosDrawDebugFullscreen( const ViewSetup &view )
 	AtmosDrawSky( view );
 }
 
-double AtmosLastGpuMs() { return s_timer.lastMs; }
-
 // =============================================================================
 // PUBLIC: generation-safe shutdown.
 // =============================================================================

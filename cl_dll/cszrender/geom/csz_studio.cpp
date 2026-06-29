@@ -58,7 +58,6 @@ namespace
 // Engine-extended texture flags (pinned engine/studio.h values; the fork's
 // HLSDK studio.h predates them). Layout-independent constants.
 const int kStudioNfMasked = 0x0040;	// alpha-tested texture
-const int kStudioNfAdditive = 0x0020;	// additive (M1: drawn opaque, known gap)
 
 // Uniform locations of one studio program. Both passes share the per-mesh
 // uniform helper: locations a program lacks are -1 and glUniform* on -1 is

@@ -72,8 +72,6 @@ void main()
 static const char kSkyFs[] = R"GLSL(#version 330 core
 in vec3 v_dir;
 uniform vec3 u_sunDir;      // world dir toward the sun (normalized): warm horizon glow
-uniform vec3 u_moonDir;     // world dir toward the moon (normalized): moonlit-cloud lighting
-uniform vec3 u_moonColor;   // moonlit-cloud tint
 uniform float u_phase;      // 0=nightfall .. 0.5=midnight .. 1=daylight
 uniform float u_starAmount; // 0..1 star field brightness gate (1 at midnight)
 uniform vec4 u_fog;         // rgb = fog color (linear), w = extinction a (1/units); w<=0 -> off
@@ -82,7 +80,8 @@ uniform vec4 u_fogParams;   // x = height falloff b (unused for the sky band), y
 // u_moonHalo) were RETIRED with the legacy moon/sun disc (DEAD-1, infra pass 2
 // 2026-06-18): the physically-based bodies are C3's, so this fallback FS draws
 // no disc and never referenced them. Removed from the shader AND their CPU
-// plumbing (csz_sky.cpp). KEPT u_sunDir/u_moonDir/u_moonColor (still used above).
+// plumbing (csz_sky.cpp). The dead u_moonDir/u_moonColor uniforms (never read in
+// this FS) were likewise removed; KEPT u_sunDir (still used above).
 out vec4 fragColor;
 
 // Hash a direction-on-the-sphere into a pseudo-random scalar (public-domain
