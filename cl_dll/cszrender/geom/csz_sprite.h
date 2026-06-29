@@ -40,4 +40,17 @@ struct ViewSetup;
 // Parallel-oriented quads, back-to-front, additive/alpha blend by rendermode.
 void DrawSprites( const ViewSetup &view, cl_entity_s *const *ents, int count );
 void RegisterSpriteCommands();   // csz_testsprite (dev toggle: glow sprite 64u ahead of view)
+
+// ---------------------------------------------------------------------------
+// Transient additive billboard pool (muzzle flash). Under takeover the engine
+// efx muzzle flash (gEngfuncs.pEfxAPI->R_MuzzleFlash, a temp-entity sprite) is
+// never drawn, so the viewmodel event dispatch (csz_viewmodel.cpp) pushes its
+// own short-lived ADDITIVE billboard here. SpritePushMuzzleFlash loads/resolves
+// the named sprite once and stores a pool entry; DrawMuzzleFlashes draws + ages
+// the pool. It REUSES this module's sprite shader/VBO. The caller owns the GL
+// projection + depth range (the viewmodel pass draws these in its compressed
+// [0,0.3] gun depth band so the flash sits at the barrel, not behind it).
+// ---------------------------------------------------------------------------
+void SpritePushMuzzleFlash( const char *spriteName, const float origin[3], float scale, float rollDeg, float life );
+void DrawMuzzleFlashes( const ViewSetup &view );   // additive; caller owns projection + depth range
 }

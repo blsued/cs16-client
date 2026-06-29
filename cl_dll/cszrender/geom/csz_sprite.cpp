@@ -187,6 +187,26 @@ struct TestSpriteState
 SpriteState s_sprite;
 TestSpriteState s_test;
 
+// Transient muzzle-flash billboard pool (csz_sprite.h). Short-lived additive
+// quads pushed by the viewmodel event dispatch and drawn in the viewmodel pass.
+// Small fixed pool: a handful of overlapping flashes (rapid fire) is plenty; the
+// oldest is recycled on overflow. Entries hold the resolved sprite model_t* and
+// are re-validated at draw (model->type / cache.data) so a map change that frees
+// the sprite never dereferences a stale pointer.
+struct MuzzleFlash
+{
+	model_t *model;
+	float origin[3];
+	float scale;
+	float roll;		// degrees, view-parallel roll for variety
+	int frame;		// chosen sprite frame (held for the flash's life)
+	float die;		// absolute ClientTime to expire
+	bool used;
+};
+
+const int kMaxMuzzleFlashes = 16;
+MuzzleFlash s_muzzle[kMaxMuzzleFlashes];
+
 // Per-feature observability cvars (default 1 = engine-parity behavior on;
 // 0 = fall back to the M1 view-parallel / alpha-blend / dir-0 / world-only path).
 cvar_t *s_cvOrient;	// csz_sprite_orient: non-parallel orientations
@@ -936,6 +956,204 @@ void DrawSprites( const ViewSetup &view, cl_entity_s *const *ents, int count )
 				numItems, nOrient, nCutout, n8way, nGlow );
 		}
 	}
+}
+
+// Loads/resolves the named sprite and parks an additive flash in the pool.
+// Robust to a missing sprite: a NULL load is logged-once and simply produces no
+// billboard (the dlight + sparks still carry the muzzle read). Picks a free slot,
+// else recycles the soonest-to-die entry so rapid fire never starves the pool.
+void SpritePushMuzzleFlash( const char *spriteName, const float origin[3], float scale, float rollDeg, float life )
+{
+	if( spriteName == NULL || spriteName[0] == '\0' )
+		return;
+
+	HSPRITE hspr = gEngfuncs.pfnSPR_Load( spriteName );
+	model_t *mod = ( hspr != 0 ) ? (model_t *)gEngfuncs.GetSpritePointer( hspr ) : NULL;
+
+	if( mod == NULL || mod->type != mod_sprite || mod->cache.data == NULL )
+	{
+		ThrottledError( "muzzleflash sprite load failed", spriteName );
+		return;
+	}
+
+	const EngSprite *spr = (const EngSprite *)mod->cache.data;
+
+	if( !ValidateSprite( mod, spr ))
+		return;
+
+	float now = ClientTime();
+	int slot = -1;
+	float oldestDie = 0.0f;
+
+	for( int i = 0; i < kMaxMuzzleFlashes; i++ )
+	{
+		if( !s_muzzle[i].used )
+		{
+			slot = i;
+			break;
+		}
+
+		if( slot < 0 || s_muzzle[i].die < oldestDie )
+		{
+			slot = i;			// fallback: recycle the soonest-to-die
+			oldestDie = s_muzzle[i].die;
+		}
+	}
+
+	MuzzleFlash &mf = s_muzzle[slot];
+
+	mf.used = true;
+	mf.model = mod;
+	mf.origin[0] = origin[0];
+	mf.origin[1] = origin[1];
+	mf.origin[2] = origin[2];
+	mf.scale = ( scale > 0.0f ) ? scale : 1.0f;
+	mf.roll = rollDeg;
+	mf.frame = ( spr->numframes > 0 ) ? ( rand() % spr->numframes ) : 0;
+	mf.die = now + (( life > 0.0f ) ? life : 0.06f );
+}
+
+// Draws + ages the muzzle-flash pool. Additive, view-parallel billboards rolled
+// for variety. The caller (viewmodel pass) has already set the gun's compressed
+// projection + depth range, so the flash composites at the barrel. Reuses the
+// sprite shader/VBO; restores a clean GL baseline on exit.
+void DrawMuzzleFlashes( const ViewSetup &view )
+{
+	float now = ClientTime();
+	int live = 0;
+
+	// Age out first so an expired flash never contributes a quad.
+	for( int i = 0; i < kMaxMuzzleFlashes; i++ )
+	{
+		if( s_muzzle[i].used && s_muzzle[i].die < now )
+			s_muzzle[i].used = false;
+		if( s_muzzle[i].used )
+			live++;
+	}
+
+	if( live == 0 )
+		return;
+
+	EnsureGpuObjects();
+
+	// Roll the view-parallel basis per flash (vright/vup are the view-matrix rows).
+	const float *m = view.matView.m;
+	float vright[3] = { m[0], m[4], m[8] };
+	float vup[3]    = { m[1], m[5], m[9] };
+
+	const float uv[4][2] = {{ 0.0f, 1.0f }, { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 1.0f, 1.0f }};
+
+	int built = 0;
+
+	for( int i = 0; i < kMaxMuzzleFlashes && built < kMaxItems; i++ )
+	{
+		if( !s_muzzle[i].used )
+			continue;
+
+		MuzzleFlash &mf = s_muzzle[i];
+
+		// Re-validate the sprite each frame (a map change can free it underneath us).
+		if( mf.model == NULL || mf.model->type != mod_sprite || mf.model->cache.data == NULL )
+		{
+			mf.used = false;
+			continue;
+		}
+
+		const EngSprite *spr = (const EngSprite *)mf.model->cache.data;
+
+		if( !ValidateSprite( mf.model, spr ))
+		{
+			mf.used = false;
+			continue;
+		}
+
+		const EngSpriteFrame *frame = SelectFrame( mf.model, spr, mf.frame, now, 0.0f, 0.0f, false, NULL );
+
+		if( !ValidateFrame( mf.model, frame ))
+		{
+			mf.used = false;
+			continue;
+		}
+
+		float a = mf.roll * kSpriteDegToRad;
+		float sr = sinf( a ), cr = cosf( a );
+		float right[3], up[3];
+
+		for( int k = 0; k < 3; k++ )
+		{
+			right[k] = vright[k] * cr + vup[k] * sr;
+			up[k]    = vright[k] * -sr + vup[k] * cr;
+		}
+
+		const float corner[4][2] = {
+			{ frame->left, frame->down },
+			{ frame->left, frame->up },
+			{ frame->right, frame->up },
+			{ frame->right, frame->down },
+		};
+
+		float *v = &s_verts[built * kVertsPerQuad * kVertexFloats];
+
+		// Stash the resolved texture slot in the item array (reused as scratch).
+		s_items[built].frame = frame;
+
+		for( int c = 0; c < 4; c++ )
+		{
+			float r = corner[c][0] * mf.scale;
+			float u = corner[c][1] * mf.scale;
+
+			v[0] = mf.origin[0] + right[0] * r + up[0] * u;
+			v[1] = mf.origin[1] + right[1] * r + up[1] * u;
+			v[2] = mf.origin[2] + right[2] * r + up[2] * u;
+			v[3] = uv[c][0];
+			v[4] = uv[c][1];
+			v[5] = v[6] = v[7] = 1.0f;	// white emitter
+			v[8] = 1.0f;
+			v += kVertexFloats;
+		}
+
+		built++;
+	}
+
+	if( built == 0 )
+		return;
+
+	UseProgram( s_sprite.program.program );
+	glUniformMatrix4fv( s_sprite.uViewProj, 1, GL_FALSE, view.matViewProj.m );
+
+	const AmbienceParams &amb = view.ambience;
+	float fogVec[4], fogParams[4];
+	CszFogUniformVecs( amb, fogVec, fogParams );
+
+	glUniform4fv( s_sprite.uFog, 1, fogVec );
+	glUniform4fv( s_sprite.uFogParams, 1, fogParams );
+	glUniform3fv( s_sprite.uCamPos, 1, view.origin );
+	glUniform1i( s_sprite.uFogAdditive, 1 );	// emitters fade to black under fog (plan 2.6)
+	glUniform1f( s_sprite.uAlphaTest, 0.0f );
+
+	BindVao( s_sprite.vao );
+	glBindBuffer( GL_ARRAY_BUFFER, s_sprite.vbo );
+	glBufferData( GL_ARRAY_BUFFER, (GLsizeiptr)( (size_t)built * kVertsPerQuad * kVertexFloats * sizeof( float )),
+		s_verts, GL_STREAM_DRAW );
+	glBindBuffer( GL_ARRAY_BUFFER, 0 );
+
+	SetCull( false );
+	SetBlend( kBlendAdditive );
+	SetDepthTest( true );		// test against the gun's compressed depth (caller's range)
+	SetDepthWrite( false );
+
+	for( int i = 0; i < built; i++ )
+	{
+		BindTextureSlot( 0, s_items[i].frame->gl_texturenum );
+		glDrawElements( GL_TRIANGLES, kIndicesPerQuad, GL_UNSIGNED_SHORT,
+			(const void *)( (size_t)i * kIndicesPerQuad * sizeof( unsigned short )));
+	}
+
+	// Clean baseline for the next pass.
+	SetBlend( kBlendNone );
+	SetDepthWrite( true );
+	SetDepthTest( true );
+	BindVao( 0 );
 }
 
 void RegisterSpriteCommands()
