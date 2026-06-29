@@ -939,11 +939,51 @@ float ScrollOffset( bool on )
 	return -( t - floorf( t ) );	// wrap to [-1,0): seamless on tiling textures
 }
 
+// GoldSrc '-' random-tiling parity: a texture whose name starts with '-' (e.g.
+// de_dust2 -0Sand/-1Sand/-2Sand/-3Sand, -0csSandWall...) is NOT a time animation.
+// The engine (R_TextureAnimation) picks ONE variant PER SURFACE from a fixed
+// pseudo-random table keyed by the surface's texturemins and holds it STATIC for
+// the life of the map. Cycling these on the 10 Hz clock (the '+' path) is what made
+// static sand/rock walls visibly churn. Mirror the engine: build the same 20x20
+// (MOD_FRAMES) table once with a deterministic LCG -- no time term, no engine RNG
+// dependency -- so a given surface always resolves to the same variant every frame.
+const int kModFrames = 20;
+int RandomTilingFrame( const EngSurface &surf, const EngTexture *base )
+{
+	static int rtable[kModFrames][kModFrames];
+	static bool tableReady = false;
+
+	if( !tableReady )
+	{
+		unsigned int seed = 0x1234567u;
+		for( int i = 0; i < kModFrames; i++ )
+		{
+			for( int j = 0; j < kModFrames; j++ )
+			{
+				seed = seed * 1103515245u + 12345u;
+				rtable[i][j] = (int)(( seed >> 16 ) & 0x7fff );
+			}
+		}
+		tableReady = true;
+	}
+
+	int w = ( base->width  > 0 ) ? (int)base->width  : 1;
+	int h = ( base->height > 0 ) ? (int)base->height : 1;
+	// + (w<<16) keeps the numerator positive before the divide (texturemins < 0).
+	int tx = (int)((( surf.texturemins[0] + ( w << 16 )) / w )) % kModFrames;
+	int ty = (int)((( surf.texturemins[1] + ( h << 16 )) / h )) % kModFrames;
+	if( tx < 0 ) tx += kModFrames;
+	if( ty < 0 ) ty += kModFrames;
+
+	return rtable[tx][ty];
+}
+
 // R_TextureAnimation parity: resolve a surface's CURRENT diffuse texture slot.
 // '+a/+b' alternate set is chosen by the owning entity's animation state
 // (curstate.frame != 0; the worldmodel is always frame 0). Numbered '+0..9'
 // sequences cycle on the engine's 10 Hz clock through the anim_next ring, picking
-// the texture whose [anim_min, anim_max) window contains the current step.
+// the texture whose [anim_min, anim_max) window contains the current step. '-N'
+// random-tiling groups resolve to a fixed per-surface variant instead (no time).
 int TextureAnimationSlot( int globalSurf, int entFrame )
 {
 	const EngSurface &surf = s_world.bsp->surfaces[globalSurf];
@@ -959,7 +999,11 @@ int TextureAnimationSlot( int globalSurf, int entFrame )
 	if( base->anim_total == 0 )
 		return base->gl_texturenum;
 
-	int reletive = (int)( ClientTime() * 10.0f ) % base->anim_total;
+	int reletive;
+	if( base->name[0] == '-' )
+		reletive = RandomTilingFrame( surf, base ) % base->anim_total;	// static per-surface
+	else
+		reletive = (int)( ClientTime() * 10.0f ) % base->anim_total;	// '+' time animation
 	if( reletive < 0 )
 		reletive += base->anim_total;
 
