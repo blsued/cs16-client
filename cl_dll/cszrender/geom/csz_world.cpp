@@ -64,6 +64,23 @@ namespace
 
 const float kBackfaceEpsilon = 0.01f;
 
+// M2c conveyor flow rate: full texture widths scrolled per second along +S. The
+// classic GoldSrc conveyor cadence is ~1/64-unit stepping; world surfaces carry no
+// per-entity speed, so a fixed, clearly-visible rate is used (tune via the shader if
+// a faster belt is wanted). csz_scroll gates it on/off.
+const float kScrollSpeed = 0.5f;
+
+// The cszrender GL function table exposes only the *fv vec2 setter; this packs a
+// scalar pair and no-ops on an absent (-1) uniform. Used by the M2c scroll/detail feeds.
+void Uniform2f( int loc, float x, float y )
+{
+	if( loc < 0 )
+		return;
+
+	float v[2] = { x, y };
+	glUniform2fv( loc, 1, v );
+}
+
 // Interleaved vertex layout (plan section 5 step 2.4): pos3 + uv2 + lmuv2 +
 // normal3 + skyVis1 = 11 floats, 44 bytes. Attribute locations are the plan 2.4
 // contract; a_skyVis at location 4 is the S1 geometric sky-visibility channel
@@ -75,16 +92,25 @@ const int kSkyVisFloatOffset = 10;	// out[10] within the interleaved vertex
 struct FaceRec
 {
 	int surfIndex;			// LOCAL index (surfaces[firstmodelsurface + i])
+	int globalSurf;			// GLOBAL surface index (bsp->surfaces[]); for samples/styles/texture lookup
 	int firstVert, numVerts;	// into the world VBO; -1/0 for sky/turb
-	int texSlot;			// engine texture slot for unit 0
+	int texSlot;			// engine texture slot for unit 0 (the BASE frame)
 	int lmPage, lmX, lmY;		// atlas block, luxel units; lmPage -1 = none
 	int smax, tmax;			// luxel block dimensions
 	int sampleSize;			// luxels-per-sample (cached so EmitFaceVerts need not re-query)
 	float alphaTest;		// 0 = opaque, else '{' discard threshold
+	bool isTurb;			// kSurfDrawTurb water surface (drawn in the warped water pass, not opaque)
 	float planeNormal[3];
 	float planeDist;
 	bool planeBack;
 	float mins[3], maxs[3];		// surface bounds (engine mextrasurf, light cull)
+	// World-surface dynamics (M2c). Precomputed at build time so the per-frame
+	// draw loop only pays for faces that actually animate/scroll/detail.
+	bool animTex;			// texture has a +0..9 sequence (anim_total) or a +a/+b alternate
+	bool flowing;			// SURF_CONVEYOR: scroll the diffuse uv
+	bool animLm;			// lightmap has an animated lightstyle (styles[1..3] present, or a non-0 style[0])
+	int detailSlot;			// detail-texture engine slot (dt_texturenum); 0 = none
+	float detailScaleS, detailScaleT;	// per-texture detail tiling (GetDetailScaleForTexture)
 };
 
 // Loaded "<map>.skyvis" sidecar (geom/bake/bake_skyvis.py): per GLOBAL surface
@@ -125,6 +151,8 @@ struct WorldState
 	unsigned int vao, vbo;
 	ShaderProgram program;
 	int uViewProj, uAlphaTest;
+	int uScroll;			// M2c: diffuse uv flow offset (SURF_CONVEYOR); (0,0) = no scroll
+	int uHasDetail, uDetailScale;	// M2c: gl_detail second-TMU overlay (base pass only)
 	int uModel;			// base-pass model->world transform (identity for world; per-entity for brush, E1)
 	int uFog, uAmbTint;		// base pass only (M2a fog/night; lit/depth stay fog-free, pitfall 23)
 	int uSkyAmbScale;		// L3b sky-ambient cloud dimmer scalar (base pass only); 1.0 neutral
@@ -147,10 +175,17 @@ struct WorldState
 	ShaderProgram depthProgram;	// shadow map depth pass (T7)
 	int depthUViewProj;
 
+	ShaderProgram waterProgram;	// warped water/turb pass (M2c)
+	int waterUViewProj, waterUModel;
+	int waterUTime, waterUWarpAmp, waterUWarpFreq, waterUWarpSpeed;
+	int waterUAmbTint, waterUAlpha, waterUCamPos;
+	int waterUFog, waterUFogParams, waterUFogParams2;
+
 	FaceRec *faces;			// [numFaces], indexed by local face index
 	int *opaque;			// sorted local indices (texture, lightmap page)
+	int *water;			// local indices of worldspawn turb faces (drawn in DrawWater)
 	unsigned char *visible;		// per local face, rebuilt by BuildVisibleSet
-	int numFaces, numOpaque;
+	int numFaces, numOpaque, numWater;
 	int numSky, numTurb;
 	int whiteTexSlot;
 
@@ -170,6 +205,30 @@ struct WorldState
 	float *svVertPos;		// [svNumVerts*3] world-space xyz
 	float *svVertVis;		// [svNumVerts] skyVis in [0,1]
 	int svNumVerts;
+
+	// --- World-surface dynamics (M2c) ---
+	// Animated-lightmap face list: indices of faces[] / brushFaces[] whose lightmap
+	// has a switchable/animated lightstyle. Built once at EnsureBuilt; per frame we
+	// compare each face's live style values to cached[] and re-upload ONLY the dirty
+	// blocks (R_AnimateLight / R_BuildLightMap parity, dirty-block economy).
+	struct AnimLmRef
+	{
+		int recIndex;		// index into faces[] (brush=false) or brushFaces[] (brush=true)
+		bool brush;
+		int cached[4];		// last-uploaded d_lightstylevalue per style slot; -1 sentinel
+	};
+	AnimLmRef *animLm;
+	int numAnimLm;
+	int lightStyleValue[64];	// per-frame d_lightstylevalue (MAX_LIGHTSTYLES); 'm'==264 scale
+	bool lightstyleWasOn;		// edge-detect so toggling csz_lightstyle off restores the static base once
+
+	// Lazily-registered feature cvars (FeedTpFogGlow precedent; INTEGRATOR may move
+	// registration to the composition root -- see the integration spec).
+	cvar_t *cvLightstyle, *cvTexanim, *cvScroll, *cvDetail;
+	bool dynCvarsLooked;
+
+	// Per-frame observability counts (thrown to the throttled [CSZ:world] dynamics log).
+	int statLightstyle, statTexanim, statFlowing, statDetail;
 };
 
 WorldState s_world;
@@ -475,8 +534,11 @@ bool BuildFaceRec( const EngModel *bsp, int globalIndex, int localSlot, FaceRec 
 
 	memset( &f, 0, sizeof( f ));
 	f.surfIndex = localSlot;
+	f.globalSurf = globalIndex;
 	f.firstVert = -1;
 	f.lmPage = -1;
+	f.detailScaleS = 1.0f;
+	f.detailScaleT = 1.0f;
 
 	const mplane_t *plane = surf.plane;
 
@@ -495,8 +557,7 @@ bool BuildFaceRec( const EngModel *bsp, int globalIndex, int localSlot, FaceRec 
 	if( surf.flags & kSurfDrawSky )
 		return false;
 
-	if( surf.flags & kSurfDrawTurb )
-		return false;
+	f.isTurb = ( surf.flags & kSurfDrawTurb ) != 0;
 
 	const EngTexinfo *ti = surf.texinfo;
 	const EngTexture *tex = ti->texture;
@@ -512,6 +573,38 @@ bool BuildFaceRec( const EngModel *bsp, int globalIndex, int localSlot, FaceRec 
 	}
 
 	f.alphaTest = ( tex != NULL && tex->name[0] == '{' ) ? 0.25f : 0.0f;
+
+	// Water/turb surfaces carry NO baked lightmap (the engine's GL_BuildLightmaps
+	// skips SURF_DRAWTILED, so surf.samples is NULL and lightextents are unset):
+	// emit geometry only and leave lmPage = -1, the warped water pass lights them
+	// fullbright * night-tint instead of a (nonexistent) lightmap block. Turb faces
+	// are drawn by DrawWater, not the opaque pass, so they also skip the opaque-only
+	// texanim/scroll/detail tagging below.
+	if( f.isTurb )
+		return true;
+
+	// M2c texture frame animation: '+0..9' numbered sequence (anim_total) or a
+	// '+a/+b' alternate set. The per-frame draw walks the anim_next chain only for
+	// faces flagged here, so static textures pay nothing.
+	f.animTex = ( tex != NULL && ( tex->anim_total != 0 || tex->alternate_anims != NULL ));
+
+	// M2c scrolling: SURF_CONVEYOR is resolved per-surface by ref_gl at load.
+	f.flowing = ( surf.flags & kSurfConveyor ) != 0;
+
+	// M2c detail texture: dt_texturenum is the engine slot to overlay; the scale is
+	// keyed by the BASE texture's gl number. Absent (0) -> feature inert for this face.
+	if( tex != NULL && tex->dt_texturenum != 0 )
+	{
+		f.detailSlot = (int)tex->dt_texturenum;
+
+		if( gRenderAPI.GetDetailScaleForTexture != NULL )
+		{
+			float sx = 1.0f, sy = 1.0f;
+			gRenderAPI.GetDetailScaleForTexture( tex->gl_texturenum, &sx, &sy );
+			f.detailScaleS = ( sx > 0.0f ) ? sx : 1.0f;
+			f.detailScaleT = ( sy > 0.0f ) ? sy : 1.0f;
+		}
+	}
 
 	const EngExtraSurf *info = surf.info;
 	int sampleSize = FaceSampleSize( globalIndex );
@@ -537,6 +630,14 @@ bool BuildFaceRec( const EngModel *bsp, int globalIndex, int localSlot, FaceRec 
 		CSZ_LogError( "world", "lightmap atlas full at surface %d (%dx%d); face samples page 0 origin",
 			globalIndex, smax, tmax );
 	}
+
+	// M2c animated lightmap candidate: has a block + real samples, and is NOT a
+	// pure-static face. A pure-static face has exactly styles[0]==0 (the constant
+	// "normal" style) with no further styles; everything else (a present styles[1..3]
+	// OR a non-0 single style[0], i.e. a switchable light) can change frame-to-frame.
+	// Faces failing this test never enter the per-frame dirty scan (the common case).
+	f.animLm = ( f.lmPage >= 0 && surf.samples != NULL && surf.styles[0] != 255 &&
+		( surf.styles[0] != 0 || surf.styles[1] != 255 ));
 
 	return true;
 }
@@ -804,6 +905,231 @@ void ReuploadLightmaps()
 }
 
 // ---------------------------------------------------------------------------
+// World-surface dynamics (M2c): animated lightstyles, texture frame animation,
+// scrolling conveyors, detail textures. Self-drawn in GL3.3 core; observability
+// behind the csz_<fx> cvars.
+// ---------------------------------------------------------------------------
+
+// Accumulation scratch for one animated lightmap block (style sum, pre-gamma);
+// same exotic-size ceiling as the static path's s_blockScratch.
+unsigned char s_litScratch[128 * 128 * 3];
+
+void LookupDynamicsCvars()
+{
+	if( s_world.dynCvarsLooked )
+		return;
+
+	s_world.dynCvarsLooked = true;
+	// Lazy self-registration (FeedTpFogGlow precedent). The INTEGRATOR may instead
+	// register these at the composition root; ReadCvar is null-safe so an unregistered
+	// pointer just defaults the feature ON (see the integration spec).
+	s_world.cvLightstyle = gEngfuncs.pfnRegisterVariable( "csz_lightstyle", "1", FCVAR_CLIENTDLL );
+	s_world.cvTexanim    = gEngfuncs.pfnRegisterVariable( "csz_texanim",    "1", FCVAR_CLIENTDLL );
+	s_world.cvScroll     = gEngfuncs.pfnRegisterVariable( "csz_scroll",     "1", FCVAR_CLIENTDLL );
+	s_world.cvDetail     = gEngfuncs.pfnRegisterVariable( "csz_detail",     "1", FCVAR_CLIENTDLL );
+}
+
+// Negative S-axis flow offset (UV space) for this frame; classic conveyor direction.
+float ScrollOffset( bool on )
+{
+	if( !on )
+		return 0.0f;
+
+	float t = ClientTime() * kScrollSpeed;
+	return -( t - floorf( t ) );	// wrap to [-1,0): seamless on tiling textures
+}
+
+// R_TextureAnimation parity: resolve a surface's CURRENT diffuse texture slot.
+// '+a/+b' alternate set is chosen by the owning entity's animation state
+// (curstate.frame != 0; the worldmodel is always frame 0). Numbered '+0..9'
+// sequences cycle on the engine's 10 Hz clock through the anim_next ring, picking
+// the texture whose [anim_min, anim_max) window contains the current step.
+int TextureAnimationSlot( int globalSurf, int entFrame )
+{
+	const EngSurface &surf = s_world.bsp->surfaces[globalSurf];
+	const EngTexinfo *ti = surf.texinfo;
+	const EngTexture *base = ( ti != NULL ) ? ti->texture : NULL;
+
+	if( base == NULL )
+		return s_world.whiteTexSlot;
+
+	if( entFrame != 0 && base->alternate_anims != NULL )
+		base = base->alternate_anims;
+
+	if( base->anim_total == 0 )
+		return base->gl_texturenum;
+
+	int reletive = (int)( ClientTime() * 10.0f ) % base->anim_total;
+	if( reletive < 0 )
+		reletive += base->anim_total;
+
+	int guard = 0;
+	while( base->anim_min > reletive || base->anim_max <= reletive )
+	{
+		if( base->anim_next == NULL || ++guard > 100 )
+			break;	// malformed chain: fall back to the last texture reached (never hang)
+
+		base = base->anim_next;
+	}
+
+	return base->gl_texturenum;
+}
+
+// Replicates the engine's per-frame d_lightstylevalue[] on the canonical Quake
+// scale ('a'=0, 'm'=264, 'z'=550), sampled at the 10 Hz lightstyle clock straight
+// from each style's pattern string -- no dependence on the engine's internal value
+// scale. Style 0 is pinned to the constant "normal" 264 so an animated face's base
+// layer stays byte-matched to the static style-0 bake (sample*264>>8).
+void AnimateLightStyles()
+{
+	int tenths = (int)( ClientTime() * 10.0f );
+
+	for( int j = 0; j < 64; j++ )
+	{
+		lightstyle_t *ls = ( gRenderAPI.GetLightStyle != NULL ) ? gRenderAPI.GetLightStyle( j ) : NULL;
+
+		if( ls == NULL || ls->length <= 0 )
+		{
+			s_world.lightStyleValue[j] = 256;	// undefined / switched-off style (unused by surfaces)
+			continue;
+		}
+
+		int k = tenths % ls->length;
+		if( k < 0 )
+			k += ls->length;
+
+		int v = ( (int)(unsigned char)ls->pattern[k] - 'a' ) * 22;
+		s_world.lightStyleValue[j] = ( v > 0 ) ? v : 0;
+	}
+
+	s_world.lightStyleValue[0] = 264;	// canonical constant base; never animate style 0
+}
+
+unsigned char ClampLitByte( int v )
+{
+	if( v < 0 )
+		return 0;
+	if( v > 255 )
+		return 255;
+	return (unsigned char)v;
+}
+
+// R_BuildLightMap for one animated face: accumulate every present style's samples
+// scaled by its live value, >>8, clamp, then upload (gamma-only, no extra *264).
+// A style-0-only face reduces EXACTLY to the static bake. Exotic blocks beyond the
+// scratch ceiling are left at their base (same clamp policy as the static path).
+void BuildAndUploadAnimFace( const FaceRec &f )
+{
+	if( f.lmPage < 0 || f.smax <= 0 )
+		return;
+
+	const EngSurface &surf = s_world.bsp->surfaces[f.globalSurf];
+
+	if( surf.samples == NULL )
+		return;
+
+	int size = f.smax * f.tmax;
+	if( size <= 0 || size > (int)( sizeof( s_litScratch ) / 3 ))
+		return;
+
+	for( int l = 0; l < size; l++ )
+	{
+		int accR = 0, accG = 0, accB = 0;
+
+		for( int m = 0; m < 4 && surf.styles[m] != 255; m++ )
+		{
+			int sv = s_world.lightStyleValue[surf.styles[m]];
+			const color24 *blk = surf.samples + (size_t)m * size;
+
+			accR += (int)blk[l].r * sv;
+			accG += (int)blk[l].g * sv;
+			accB += (int)blk[l].b * sv;
+		}
+
+		s_litScratch[l * 3 + 0] = ClampLitByte( accR >> 8 );
+		s_litScratch[l * 3 + 1] = ClampLitByte( accG >> 8 );
+		s_litScratch[l * 3 + 2] = ClampLitByte( accB >> 8 );
+	}
+
+	g_lightmaps.UploadBlockLit( f.lmPage, f.lmX, f.lmY, f.smax, f.tmax, s_litScratch );
+}
+
+// Restores an animated face's atlas block to the STATIC style-0 bake (used when
+// csz_lightstyle is toggled off): identical bytes to the original build.
+void RestoreFaceBaseLightmap( const FaceRec &f )
+{
+	if( f.lmPage < 0 || f.smax <= 0 )
+		return;
+
+	const EngSurface &surf = s_world.bsp->surfaces[f.globalSurf];
+	g_lightmaps.UploadBlock( f.lmPage, f.lmX, f.lmY, f.smax, f.tmax, FaceLightBlock( surf, f.smax, f.tmax ));
+}
+
+// Per-frame animated-lightmap pass (called from DrawOpaque, once per frame, before
+// any world/brush draw). Re-uploads ONLY the atlas blocks whose style values changed
+// since their last upload. csz_lightstyle 0 restores the static base once and bails.
+void UpdateAnimatedLightmaps()
+{
+	bool on = ReadCvar( s_world.cvLightstyle, 1.0f ) >= 0.5f;
+
+	if( !on )
+	{
+		if( s_world.lightstyleWasOn )
+		{
+			for( int i = 0; i < s_world.numAnimLm; i++ )
+			{
+				const WorldState::AnimLmRef &r = s_world.animLm[i];
+				RestoreFaceBaseLightmap( r.brush ? s_world.brushFaces[r.recIndex] : s_world.faces[r.recIndex] );
+			}
+
+			s_world.lightstyleWasOn = false;
+		}
+
+		s_world.statLightstyle = 0;
+		return;
+	}
+
+	AnimateLightStyles();
+
+	bool forceAll = !s_world.lightstyleWasOn;	// first frame after (re)enable -> rebuild every block
+
+	for( int i = 0; i < s_world.numAnimLm; i++ )
+	{
+		WorldState::AnimLmRef &r = s_world.animLm[i];
+		const FaceRec &f = r.brush ? s_world.brushFaces[r.recIndex] : s_world.faces[r.recIndex];
+		const EngSurface &surf = s_world.bsp->surfaces[f.globalSurf];
+
+		int cur[4] = { -2, -2, -2, -2 };	// -2 = absent style slot
+		bool changed = forceAll;
+		int m = 0;
+
+		for( ; m < 4 && surf.styles[m] != 255; m++ )
+		{
+			cur[m] = s_world.lightStyleValue[surf.styles[m]];
+			if( cur[m] != r.cached[m] )
+				changed = true;
+		}
+
+		for( ; m < 4; m++ )
+		{
+			if( r.cached[m] != -2 )
+				changed = true;
+			cur[m] = -2;
+		}
+
+		if( changed )
+		{
+			BuildAndUploadAnimFace( f );
+			for( int m2 = 0; m2 < 4; m2++ )
+				r.cached[m2] = cur[m2];
+		}
+	}
+
+	s_world.lightstyleWasOn = true;
+	s_world.statLightstyle = s_world.numAnimLm;
+}
+
+// ---------------------------------------------------------------------------
 // Brush entity helpers (E1). A brush submodel's geometry is baked in its local
 // model space; the entity carries an origin/angles transform that the engine's
 // R_DrawBrushModel would apply. We rebuild that transform as a per-draw model
@@ -990,22 +1316,36 @@ void WorldRenderer::Destroy()
 			s_world.depthProgram.program = 0;
 	}
 
+	if( s_world.waterProgram.program != 0 )
+	{
+		if( sameContext )
+			DestroyProgram( s_world.waterProgram );
+		else
+			s_world.waterProgram.program = 0;
+	}
+
 	delete[] s_world.faces;
 	delete[] s_world.opaque;
+	delete[] s_world.water;
 	delete[] s_world.visible;
 	delete[] s_world.brushFaces;
 	delete[] s_world.brushForGlobal;
 	delete[] s_world.svVertPos;
 	delete[] s_world.svVertVis;
+	delete[] s_world.animLm;
 	s_world.faces = NULL;
 	s_world.opaque = NULL;
+	s_world.water = NULL;
 	s_world.visible = NULL;
 	s_world.brushFaces = NULL;
 	s_world.brushForGlobal = NULL;
 	s_world.svVertPos = NULL;
 	s_world.svVertVis = NULL;
 	s_world.svNumVerts = 0;
-	s_world.numFaces = s_world.numOpaque = 0;
+	s_world.animLm = NULL;
+	s_world.numAnimLm = 0;
+	s_world.lightstyleWasOn = false;
+	s_world.numFaces = s_world.numOpaque = s_world.numWater = 0;
 	s_world.numBrushFaces = 0;
 	s_world.model = NULL;
 	s_world.bsp = NULL;
@@ -1044,10 +1384,12 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	s_world.numFaces = numFaces;
 	s_world.faces = new( std::nothrow ) FaceRec[numFaces];
 	s_world.opaque = new( std::nothrow ) int[numFaces];
+	s_world.water = new( std::nothrow ) int[numFaces];
 	s_world.visible = new( std::nothrow ) unsigned char[numFaces];
 	OpaqueSortKey *sortKeys = new( std::nothrow ) OpaqueSortKey[numFaces];
 
-	if( s_world.faces == NULL || s_world.opaque == NULL || s_world.visible == NULL || sortKeys == NULL )
+	if( s_world.faces == NULL || s_world.opaque == NULL || s_world.water == NULL ||
+		s_world.visible == NULL || sortKeys == NULL )
 		CSZ_FatalInit( "world", "out of memory building world face tables" );
 
 	// Brush submodels (E1): every BSP surface not owned by worldmodel
@@ -1078,7 +1420,9 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	{
 		const EngSurface &surf = bsp->surfaces[g];
 
-		if(( surf.flags & ( kSurfDrawSky | kSurfDrawTurb )) == 0 )
+		// Sky emits nothing (clear color shows through); turb water now emits
+		// geometry for the warped water pass, so only sky is excluded here.
+		if(( surf.flags & kSurfDrawSky ) == 0 )
 			totalVerts += surf.numedges;
 	}
 
@@ -1094,6 +1438,7 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 
 	s_world.numSky = s_world.numTurb = 0;
 	s_world.numOpaque = 0;
+	s_world.numWater = 0;
 	s_world.numBrushFaces = 0;
 
 	// S1: geometric sky-visibility sidecar, keyed by GLOBAL surface index. Absent
@@ -1110,15 +1455,21 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 
 		if( !BuildFaceRec( bsp, globalIndex, i, f, &badTexWarned, &atlasFullWarned, &maxPage ))
 		{
-			if( surf.flags & kSurfDrawSky )
-				s_world.numSky++;
-			else if( surf.flags & kSurfDrawTurb )
-				s_world.numTurb++;
+			s_world.numSky++;	// only sky returns false now (no geometry)
 			continue;
 		}
 
 		EmitFaceVerts( bsp, globalIndex, f, verts, vertCursor, skyvis );
 		vertCursor += surf.numedges;
+
+		// Turb water goes to the warped water pass; everything else is opaque and
+		// joins the texture/lightmap-sorted opaque list.
+		if( f.isTurb )
+		{
+			s_world.water[s_world.numWater++] = i;
+			s_world.numTurb++;
+			continue;
+		}
 
 		sortKeys[s_world.numOpaque].faceIndex = i;
 		sortKeys[s_world.numOpaque].texSlot = f.texSlot;
@@ -1152,10 +1503,16 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 		FaceRec &f = s_world.brushFaces[s_world.numBrushFaces];
 
 		if( !BuildFaceRec( bsp, g, g, f, &badTexWarned, &atlasFullWarned, &maxPage ))
-			continue;	// sky/turb: emit nothing, leave brushForGlobal[g] = -1
+			continue;	// sky: emit nothing, leave brushForGlobal[g] = -1
 
 		EmitFaceVerts( bsp, g, f, verts, vertCursor, skyvis );
 		vertCursor += surf.numedges;
+
+		// brushForGlobal is set for turb too (func_water): the opaque/trans/lit
+		// brush passes skip f.isTurb, and DrawWater picks the turb faces back up
+		// per-entity via this same global->slot map.
+		if( f.isTurb )
+			s_world.numTurb++;
 
 		s_world.brushForGlobal[g] = s_world.numBrushFaces;
 		s_world.numBrushFaces++;
@@ -1198,6 +1555,58 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 
 	FreeSkyVis( skyvis );
 
+	// M2c: collect the animated-lightmap faces (world + brush) into one dense list
+	// with a per-face cached-value sentinel, so the per-frame dirty scan touches only
+	// these (R_AnimateLight dirty-block economy). Built CPU-side; no GPU dependency.
+	s_world.animLm = NULL;
+	s_world.numAnimLm = 0;
+	s_world.lightstyleWasOn = false;
+	{
+		int animCount = 0;
+
+		for( int i = 0; i < s_world.numFaces; i++ )
+			if( s_world.faces[i].animLm )
+				animCount++;
+
+		for( int i = 0; i < s_world.numBrushFaces; i++ )
+			if( s_world.brushFaces[i].animLm )
+				animCount++;
+
+		if( animCount > 0 )
+		{
+			s_world.animLm = new( std::nothrow ) WorldState::AnimLmRef[animCount];
+
+			if( s_world.animLm != NULL )
+			{
+				for( int i = 0; i < s_world.numFaces; i++ )
+				{
+					if( !s_world.faces[i].animLm )
+						continue;
+
+					WorldState::AnimLmRef &r = s_world.animLm[s_world.numAnimLm++];
+					r.recIndex = i;
+					r.brush = false;
+					r.cached[0] = r.cached[1] = r.cached[2] = r.cached[3] = -1;
+				}
+
+				for( int i = 0; i < s_world.numBrushFaces; i++ )
+				{
+					if( !s_world.brushFaces[i].animLm )
+						continue;
+
+					WorldState::AnimLmRef &r = s_world.animLm[s_world.numAnimLm++];
+					r.recIndex = i;
+					r.brush = true;
+					r.cached[0] = r.cached[1] = r.cached[2] = r.cached[3] = -1;
+				}
+			}
+			else
+			{
+				CSZ_LogWarn( "world", "out of memory for %d animated-lightmap refs; lightstyles static", animCount );
+			}
+		}
+	}
+
 	// GPU objects. Build happens outside the takeover window (slot 6), so
 	// leave VAO/VBO unbound for the engine afterwards.
 	glGenVertexArrays( 1, &s_world.vao );
@@ -1226,6 +1635,9 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	BuildProgram( "csz_world", kWorldVs, kWorldFs, true, s_world.program );
 	s_world.uViewProj = UniformLoc( s_world.program, "u_viewProj" );
 	s_world.uAlphaTest = UniformLoc( s_world.program, "u_alphaTest" );
+	s_world.uScroll = UniformLoc( s_world.program, "u_scroll" );		// M2c conveyor flow
+	s_world.uHasDetail = UniformLoc( s_world.program, "u_hasDetail" );	// M2c detail overlay
+	s_world.uDetailScale = UniformLoc( s_world.program, "u_detailScale" );	// M2c detail tiling
 	s_world.uModel = UniformLoc( s_world.program, "u_model" );
 	s_world.uFog = UniformLoc( s_world.program, "u_fog" );
 	s_world.uFogParams = UniformLoc( s_world.program, "u_fogParams" );
@@ -1263,8 +1675,14 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	UseProgram( s_world.program.program );
 	glUniform1i( UniformLoc( s_world.program, "u_texDiffuse" ), 0 );
 	glUniform1i( UniformLoc( s_world.program, "u_texLightmap" ), 1 );
+	glUniform1i( UniformLoc( s_world.program, "u_texDetail" ), 3 );	// M2c detail sampler (unit 3)
 	glUniform1f( s_world.uAlphaTest, 0.0f );
 	glUniform1f( s_world.uBrushAlpha, 1.0f );	// opaque/world default; per-entity feed in DrawBrushTransparent
+	// M2c dynamics defaults = identity: no scroll, no detail (byte-identical until a
+	// flowing/detail face feeds them in the draw loop).
+	Uniform2f( s_world.uScroll, 0.0f, 0.0f );
+	if( s_world.uHasDetail >= 0 )   glUniform1i( s_world.uHasDetail, 0 );
+	Uniform2f( s_world.uDetailScale, 1.0f, 1.0f );
 
 	Mat4 identity;
 	Mat4Identity( identity );
@@ -1340,13 +1758,33 @@ void WorldRenderer::EnsureBuilt( model_t *world )
 	BuildProgram( "csz_world_depth", kWorldDepthVs, kWorldDepthFs, true, s_world.depthProgram );
 	s_world.depthUViewProj = UniformLoc( s_world.depthProgram, "u_viewProj" );
 
+	// Water program (M2c warped turb pass); init-time, so failure is FATAL.
+	BuildProgram( "csz_world_water", kWorldWaterVs, kWorldWaterFs, true, s_world.waterProgram );
+	s_world.waterUViewProj = UniformLoc( s_world.waterProgram, "u_viewProj" );
+	s_world.waterUModel = UniformLoc( s_world.waterProgram, "u_model" );
+	s_world.waterUTime = UniformLoc( s_world.waterProgram, "u_time" );
+	s_world.waterUWarpAmp = UniformLoc( s_world.waterProgram, "u_warpAmp" );
+	s_world.waterUWarpFreq = UniformLoc( s_world.waterProgram, "u_warpFreq" );
+	s_world.waterUWarpSpeed = UniformLoc( s_world.waterProgram, "u_warpSpeed" );
+	s_world.waterUAmbTint = UniformLoc( s_world.waterProgram, "u_ambTint" );
+	s_world.waterUAlpha = UniformLoc( s_world.waterProgram, "u_wateralpha" );
+	s_world.waterUCamPos = UniformLoc( s_world.waterProgram, "u_camPos" );
+	s_world.waterUFog = UniformLoc( s_world.waterProgram, "u_fog" );
+	s_world.waterUFogParams = UniformLoc( s_world.waterProgram, "u_fogParams" );
+	s_world.waterUFogParams2 = UniformLoc( s_world.waterProgram, "u_fogParams2" );
+
+	UseProgram( s_world.waterProgram.program );
+	glUniform1i( UniformLoc( s_world.waterProgram, "u_texDiffuse" ), 0 );
+	glUniformMatrix4fv( s_world.waterUModel, 1, GL_FALSE, identity.m );	// world stays identity; per-entity in DrawWater
+	UseProgram( 0 );
+
 	int pages = maxPage + 1;
 
 	s_world.built = true;
 	s_world.lightmapsDirty = false;
 
-	CSZ_LogInfo( "world", "built %s: %d world surfaces (%d sky, %d water skipped) + %d brush surfaces, %d verts, %d lightmap pages",
-		s_world.name, numFaces, s_world.numSky, s_world.numTurb, s_world.numBrushFaces, totalVerts, pages );
+	CSZ_LogInfo( "world", "built %s: %d world surfaces (%d sky skipped, %d world water) + %d brush surfaces, %d turb total, %d verts, %d lightmap pages",
+		s_world.name, numFaces, s_world.numSky, s_world.numWater, s_world.numBrushFaces, s_world.numTurb, totalVerts, pages );
 }
 
 void WorldRenderer::BuildVisibleSet( const ViewSetup &view )
@@ -1393,7 +1831,16 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 	{
 		ReuploadLightmaps();
 		s_world.lightmapsDirty = false;
+		// ReuploadLightmaps wrote the STATIC style-0 base to every block (incl. animated
+		// ones); force the next animated pass to rebuild them so flicker is not stuck.
+		s_world.lightstyleWasOn = false;
 	}
+
+	// M2c animated lightstyles: re-upload only the dirty atlas blocks before any draw.
+	// (Self-registers the feature cvars on first call; covers world + brush faces since
+	// both sample the shared atlas.)
+	LookupDynamicsCvars();
+	UpdateAnimatedLightmaps();
 
 	UseProgram( s_world.program.program );
 	glUniformMatrix4fv( s_world.uViewProj, 1, GL_FALSE, view.matViewProj.m );
@@ -1418,10 +1865,20 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 	glUniform1f( s_world.uAlphaTest, 0.0f );
 	glUniform1f( s_world.uBrushAlpha, 1.0f );
 
+	// M2c feature toggles (cvars looked up at the top of this frame) + per-frame state.
+	bool texanimOn = ReadCvar( s_world.cvTexanim, 1.0f ) >= 0.5f;
+	bool scrollOn  = ReadCvar( s_world.cvScroll,  1.0f ) >= 0.5f;
+	bool detailOn  = ReadCvar( s_world.cvDetail,  1.0f ) >= 0.5f;
+	float scrollOff = ScrollOffset( scrollOn );
+	s_world.statTexanim = s_world.statFlowing = s_world.statDetail = 0;
+
 	int curTex = -1;
 	int curPage = -1;
 	float curAlpha = 0.0f;
 	int drawn = 0;
+	bool flowOn = false;		// u_scroll currently holds the flow offset?
+	bool detailBound = false;	// u_hasDetail currently 1?
+	int curDetailSlot = -1;		// detail slot bound on TMU 3
 
 	for( int i = 0; i < s_world.numOpaque; i++ )
 	{
@@ -1437,10 +1894,19 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 		if( f.planeBack ? ( d > -kBackfaceEpsilon ) : ( d < kBackfaceEpsilon ))
 			continue;
 
-		if( f.texSlot != curTex )
+		// M2c texture frame animation: resolve the current frame's slot for animated
+		// surfaces (worldmodel entity frame is 0 -> no +a/+b alternate).
+		int wantTex = f.texSlot;
+		if( texanimOn && f.animTex )
 		{
-			BindTextureSlot( 0, f.texSlot );
-			curTex = f.texSlot;
+			wantTex = TextureAnimationSlot( f.globalSurf, 0 );
+			s_world.statTexanim++;
+		}
+
+		if( wantTex != curTex )
+		{
+			BindTextureSlot( 0, wantTex );
+			curTex = wantTex;
 		}
 
 		if( f.lmPage != curPage )
@@ -1455,9 +1921,53 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 			curAlpha = f.alphaTest;
 		}
 
+		// M2c conveyor flow: feed the S-offset only while drawing flowing faces.
+		bool wantFlow = scrollOn && f.flowing;
+		if( wantFlow != flowOn )
+		{
+			if( s_world.uScroll >= 0 )
+				Uniform2f( s_world.uScroll, wantFlow ? scrollOff : 0.0f, 0.0f );
+			flowOn = wantFlow;
+		}
+		if( wantFlow )
+			s_world.statFlowing++;
+
+		// M2c detail overlay: bind the detail texture + scale for faces that have one.
+		bool wantDetail = detailOn && f.detailSlot != 0;
+		if( wantDetail )
+		{
+			if( f.detailSlot != curDetailSlot )
+			{
+				BindTextureSlot( 3, f.detailSlot );
+				if( s_world.uDetailScale >= 0 )
+					Uniform2f( s_world.uDetailScale, f.detailScaleS, f.detailScaleT );
+				curDetailSlot = f.detailSlot;
+			}
+			if( !detailBound )
+			{
+				if( s_world.uHasDetail >= 0 )
+					glUniform1i( s_world.uHasDetail, 1 );
+				detailBound = true;
+			}
+			s_world.statDetail++;
+		}
+		else if( detailBound )
+		{
+			if( s_world.uHasDetail >= 0 )
+				glUniform1i( s_world.uHasDetail, 0 );
+			detailBound = false;
+		}
+
 		glDrawArrays( GL_TRIANGLE_FAN, f.firstVert, f.numVerts );
 		drawn++;
 	}
+
+	// Restore the shared base program's M2c uniforms to identity so the brush passes
+	// (DrawBrushOpaque/Transparent reuse this program) never inherit a stale scroll/detail.
+	if( flowOn && s_world.uScroll >= 0 )
+		Uniform2f( s_world.uScroll, 0.0f, 0.0f );
+	if( detailBound && s_world.uHasDetail >= 0 )
+		glUniform1i( s_world.uHasDetail, 0 );
 
 	// Per-frame stats at Dev level with 1s self-throttle (R8).
 	static float s_nextStatsTime;
@@ -1467,6 +1977,9 @@ void WorldRenderer::DrawOpaque( const ViewSetup &view )
 	{
 		s_nextStatsTime = now + 1.0f;
 		CSZ_LogDev( "world", "drawn %d / %d opaque faces", drawn, s_world.numOpaque );
+		// M2c observability: grade-immune proof the dynamics passes executed.
+		CSZ_LogDev( "world", "dynamics lightstyle=%d texanim=%d flowing=%d detail=%d",
+			s_world.statLightstyle, s_world.statTexanim, s_world.statFlowing, s_world.statDetail );
 	}
 }
 
@@ -1494,6 +2007,18 @@ int DrawBrushEntityFaces( const cl_entity_t *ent, const ViewSetup &view, const M
 	float localView[3];
 	WorldToBrushLocal( model, view.origin, localView );
 
+	// M2c dynamics on brush submodels: func_conveyor flow, animated/alternate (+a/+b
+	// via curstate.frame) textures, and detail overlay. Same shared base program, so
+	// the per-face uniforms are tracked locally and reset before returning.
+	bool texanimOn = ReadCvar( s_world.cvTexanim, 1.0f ) >= 0.5f;
+	bool scrollOn  = ReadCvar( s_world.cvScroll,  1.0f ) >= 0.5f;
+	bool detailOn  = ReadCvar( s_world.cvDetail,  1.0f ) >= 0.5f;
+	int entFrame = (int)ent->curstate.frame;
+	float scrollOff = ScrollOffset( scrollOn );
+	bool flowOn = false;
+	bool detailBound = false;
+	int curDetailSlot = -1;
+
 	int drawn = 0;
 
 	for( int g = first; g < first + count; g++ )
@@ -1505,8 +2030,8 @@ int DrawBrushEntityFaces( const cl_entity_t *ent, const ViewSetup &view, const M
 
 		const FaceRec &f = s_world.brushFaces[slot];
 
-		if( f.firstVert < 0 )
-			continue;
+		if( f.firstVert < 0 || f.isTurb )
+			continue;	// turb water is drawn by DrawWater, not the opaque/trans brush path
 
 		// Plane-side backface cull in model space (same sign rule as the world
 		// opaque pass, plan step 3).
@@ -1516,10 +2041,14 @@ int DrawBrushEntityFaces( const cl_entity_t *ent, const ViewSetup &view, const M
 		if( f.planeBack ? ( d > -kBackfaceEpsilon ) : ( d < kBackfaceEpsilon ))
 			continue;
 
-		if( f.texSlot != curTex )
+		int wantTex = f.texSlot;
+		if( texanimOn && f.animTex )
+			wantTex = TextureAnimationSlot( f.globalSurf, entFrame );
+
+		if( wantTex != curTex )
 		{
-			BindTextureSlot( 0, f.texSlot );
-			curTex = f.texSlot;
+			BindTextureSlot( 0, wantTex );
+			curTex = wantTex;
 		}
 
 		if( f.lmPage != curPage )
@@ -1536,9 +2065,47 @@ int DrawBrushEntityFaces( const cl_entity_t *ent, const ViewSetup &view, const M
 			curAlpha = wantAlpha;
 		}
 
+		bool wantFlow = scrollOn && f.flowing;
+		if( wantFlow != flowOn )
+		{
+			if( s_world.uScroll >= 0 )
+				Uniform2f( s_world.uScroll, wantFlow ? scrollOff : 0.0f, 0.0f );
+			flowOn = wantFlow;
+		}
+
+		bool wantDetail = detailOn && f.detailSlot != 0;
+		if( wantDetail )
+		{
+			if( f.detailSlot != curDetailSlot )
+			{
+				BindTextureSlot( 3, f.detailSlot );
+				if( s_world.uDetailScale >= 0 )
+					Uniform2f( s_world.uDetailScale, f.detailScaleS, f.detailScaleT );
+				curDetailSlot = f.detailSlot;
+			}
+			if( !detailBound )
+			{
+				if( s_world.uHasDetail >= 0 )
+					glUniform1i( s_world.uHasDetail, 1 );
+				detailBound = true;
+			}
+		}
+		else if( detailBound )
+		{
+			if( s_world.uHasDetail >= 0 )
+				glUniform1i( s_world.uHasDetail, 0 );
+			detailBound = false;
+		}
+
 		glDrawArrays( GL_TRIANGLE_FAN, f.firstVert, f.numVerts );
 		drawn++;
 	}
+
+	// Reset shared-program M2c uniforms so the next brush entity / pass starts clean.
+	if( flowOn && s_world.uScroll >= 0 )
+		Uniform2f( s_world.uScroll, 0.0f, 0.0f );
+	if( detailBound && s_world.uHasDetail >= 0 )
+		glUniform1i( s_world.uHasDetail, 0 );
 
 	return drawn;
 }
@@ -1839,6 +2406,177 @@ void WorldRenderer::DrawBrushTransparent( const ViewSetup &view, cl_entity_s *co
 	}
 }
 
+// Warped water/turb pass (M2c). Draws the worldspawn turb surfaces (the static
+// submodel-0 water list) and every func_water brush entity's turb faces through
+// the dedicated water program: a Quake-style sine UV warp animates the texture,
+// the night-tint + a compact analytic fog keep it consistent with the opaque
+// world, and a translucent alpha (csz_wateralpha) blends it over the scene.
+// Drawn 2-sided (no plane-side cull) so the surface is visible from underwater.
+// Shares the trans domain; depth-write ON because water is a large coherent
+// surface that should occlude correctly and avoid z-fighting.
+void WorldRenderer::DrawWater( const ViewSetup &view, cl_entity_s *const *ents, int count )
+{
+	if( !s_world.built )
+		return;
+
+	bool haveWorldWater = ( s_world.numWater > 0 );
+
+	if( !haveWorldWater && ( ents == NULL || count <= 0 ))
+		return;
+
+	// Water cvars (registered once; live-tunable so the USER can dial water in-game).
+	static cvar_t *s_alpha = NULL, *s_amp = NULL, *s_speed = NULL;
+	static bool    s_looked = false;
+	if( !s_looked )
+	{
+		s_looked = true;
+		s_alpha = gEngfuncs.pfnRegisterVariable( "csz_wateralpha",  "0.8", FCVAR_CLIENTDLL );	// world water translucency (0..1)
+		s_amp   = gEngfuncs.pfnRegisterVariable( "csz_water_warp",   "1.0", FCVAR_CLIENTDLL );	// warp amplitude scale (0 = flat)
+		s_speed = gEngfuncs.pfnRegisterVariable( "csz_water_speed",  "1.0", FCVAR_CLIENTDLL );	// warp animation speed scale
+	}
+
+	float wateralpha = ( s_alpha != NULL ) ? s_alpha->value : 0.8f;
+	if( wateralpha < 0.0f ) wateralpha = 0.0f;
+	if( wateralpha > 1.0f ) wateralpha = 1.0f;
+	float warpScale = ( s_amp != NULL ) ? s_amp->value : 1.0f;
+	float warpSpeed = ( s_speed != NULL ) ? s_speed->value : 1.0f;
+
+	const AmbienceParams &amb = view.ambience;
+
+	UseProgram( s_world.waterProgram.program );
+	glUniformMatrix4fv( s_world.waterUViewProj, 1, GL_FALSE, view.matViewProj.m );
+	glUniform1f( s_world.waterUTime, ClientTime() );
+	// Base warp: ~0.06 of one texture tile in amplitude, ~one wave per tile in
+	// spatial frequency, both scaled by the live cvars.
+	glUniform1f( s_world.waterUWarpAmp, 0.06f * warpScale );
+	glUniform1f( s_world.waterUWarpFreq, 6.2831853f );
+	glUniform1f( s_world.waterUWarpSpeed, 1.5f * warpSpeed );
+	glUniform3fv( s_world.waterUAmbTint, 1, amb.tint );	// night darkening parity with the opaque world
+	glUniform3fv( s_world.waterUCamPos, 1, view.origin );
+
+	// Compact analytic fog parity (per-channel extinction + height falloff +
+	// maxOpacity; no HG lobe / noise / flashlight defog -- those are opaque-world
+	// extras, out of scope for the water surface).
+	float fogVec[4], fogParams[4], fogParams2[4], fogParams3[4], fogLit[3];
+	CszFogUniformVecsEx( amb, ClientTime(), fogVec, fogParams, fogParams2, fogParams3, fogLit );
+	glUniform4fv( s_world.waterUFog, 1, fogVec );
+	glUniform4fv( s_world.waterUFogParams, 1, fogParams );
+	if( s_world.waterUFogParams2 >= 0 ) glUniform4fv( s_world.waterUFogParams2, 1, fogParams2 );
+
+	BindVao( s_world.vao );
+	SetCull( false );		// water is 2-sided; no plane-side cull (visible from underwater)
+	SetBlend( kBlendAlpha );
+	SetDepthWrite( true );
+
+	int curTex = -1;
+	int drawn = 0;
+
+	// --- Worldspawn water (submodel 0, identity model, camera PVS gated) ---
+	if( haveWorldWater )
+	{
+		Mat4 identity;
+		Mat4Identity( identity );
+		glUniformMatrix4fv( s_world.waterUModel, 1, GL_FALSE, identity.m );
+		glUniform1f( s_world.waterUAlpha, wateralpha );
+
+		for( int i = 0; i < s_world.numWater; i++ )
+		{
+			const FaceRec &f = s_world.faces[s_world.water[i]];
+
+			if( !s_world.visible[f.surfIndex] || f.firstVert < 0 )
+				continue;
+
+			if( f.texSlot != curTex )
+			{
+				BindTextureSlot( 0, f.texSlot );
+				curTex = f.texSlot;
+			}
+
+			glDrawArrays( GL_TRIANGLE_FAN, f.firstVert, f.numVerts );
+			drawn++;
+		}
+	}
+
+	// --- func_water brush entities (per-entity model matrix; turb faces only) ---
+	int drawnEnts = 0;
+
+	for( int i = 0; i < count; i++ )
+	{
+		cl_entity_t *ent = ents[i];
+
+		if( ent == NULL || ent->model == NULL || ent->model->type != mod_brush )
+			continue;
+
+		const EngModel *bmod = EngBsp( ent->model );
+		int first = bmod->firstmodelsurface;
+		int faceCount = bmod->nummodelsurfaces;
+
+		if( first < 0 || faceCount <= 0 || first + faceCount > s_world.bsp->numsurfaces )
+			continue;
+
+		// A func_water with an explicit translucent rendermode uses its renderamt;
+		// otherwise it inherits the global csz_wateralpha.
+		float entAlpha = ( ent->curstate.rendermode != kRenderNormal )
+			? (float)ent->curstate.renderamt * ( 1.0f / 255.0f ) : wateralpha;
+
+		Mat4 model;
+		BuildBrushModelMatrix( ent, model );
+
+		int entFaces = 0;
+
+		for( int g = first; g < first + faceCount; g++ )
+		{
+			int slot = s_world.brushForGlobal[g];
+
+			if( slot < 0 )
+				continue;
+
+			const FaceRec &f = s_world.brushFaces[slot];
+
+			if( f.firstVert < 0 || !f.isTurb )
+				continue;	// only this entity's turb faces are water
+
+			if( entFaces == 0 )
+			{
+				glUniformMatrix4fv( s_world.waterUModel, 1, GL_FALSE, model.m );
+				glUniform1f( s_world.waterUAlpha, entAlpha );
+			}
+
+			if( f.texSlot != curTex )
+			{
+				BindTextureSlot( 0, f.texSlot );
+				curTex = f.texSlot;
+			}
+
+			glDrawArrays( GL_TRIANGLE_FAN, f.firstVert, f.numVerts );
+			entFaces++;
+			drawn++;
+		}
+
+		if( entFaces > 0 )
+			drawnEnts++;
+	}
+
+	SetBlend( kBlendNone );
+	SetDepthWrite( true );
+
+	// Restore identity so the next water-program user never inherits a brush matrix.
+	{
+		Mat4 identity;
+		Mat4Identity( identity );
+		glUniformMatrix4fv( s_world.waterUModel, 1, GL_FALSE, identity.m );
+	}
+
+	static float s_nextStatsTime;
+	float now = ClientTime();
+
+	if( drawn > 0 && now >= s_nextStatsTime )
+	{
+		s_nextStatsTime = now + 1.0f;
+		CSZ_LogDev( "world", "water: %d faces (%d world + %d brush ents)", drawn, s_world.numWater, drawnEnts );
+	}
+}
+
 void WorldRenderer::DrawDepth( const ViewSetup &lightView, const Frustum &lightCull )
 {
 	if( !s_world.built )
@@ -2090,8 +2828,8 @@ void WorldRenderer::DrawBrushLitAdditive( const ViewSetup &view, const SpotLight
 
 			const FaceRec &f = s_world.brushFaces[slot];
 
-			if( f.firstVert < 0 )
-				continue;
+			if( f.firstVert < 0 || f.isTurb )
+				continue;	// turb water is not lit by the additive spot pass
 
 			// View-side plane cull (local space): skip faces the camera cannot see.
 			float dv = localView[0] * f.planeNormal[0] + localView[1] * f.planeNormal[1] +

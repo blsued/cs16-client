@@ -43,6 +43,11 @@ public:
 	void Reset();                                                  // new map / destroy
 	bool Allocate( int w, int h, int *page, int *x, int *y );      // classic row (skyline) allocator
 	void UploadBlock( int page, int x, int y, int w, int h, const unsigned char *rgb888 ); // style-0 block -> RGBA8 subimage
+	// Animated-lightstyle path: the caller already accumulated styles*values and
+	// scaled (>>8) into final 0..255 light bytes, so this applies ONLY the engine
+	// light gamma (no extra *264 scale). A style-0-only block routed here is
+	// byte-identical to UploadBlock (caller fed sample*264>>8). See csz_world R_BuildLightMap.
+	void UploadBlockLit( int page, int x, int y, int w, int h, const unsigned char *rgbLit );
 	int  PageTexSlot( int page );                                  // engine texture slot (lazy GL_CreateTexture "csz_lightmap_<page>")
 };
 extern LightmapAtlas g_lightmaps;
