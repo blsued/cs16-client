@@ -55,8 +55,6 @@ namespace csz
 namespace
 {
 
-const float kDegToRad = 3.14159265358979323846f / 180.0f;
-
 // Reserved registry keys for the M1 test lights.
 const int kTestSpotKey = -1;	// csz_testspot command (placed at the view)
 const int kTestLightKey = -2;	// csz_testlight cvar (demo spot at T spawn)
@@ -237,6 +235,22 @@ bool ParseTSpawn( const char *ents, float origin[3], float *yaw )
 	return false;
 }
 
+// Shared spawn body for the dev test lights (csz_testlight / csz_testspot /
+// csz_testbeam): a persistent shadow-casting spot at (origin, angles) with the
+// fixed test color/radius/fov. Callers supply the per-fixture placement.
+void MakeTestLightDesc( const float origin[3], const float angles[3], LightDesc &out )
+{
+	memset( &out, 0, sizeof( out ));
+	out.type = kLightSpot;
+	out.origin[0] = origin[0]; out.origin[1] = origin[1]; out.origin[2] = origin[2];
+	out.angles[0] = angles[0]; out.angles[1] = angles[1]; out.angles[2] = angles[2];
+	out.color[0] = kTestColor[0]; out.color[1] = kTestColor[1]; out.color[2] = kTestColor[2];
+	out.radius = kTestRadius;
+	out.fov = kTestFov;
+	out.die = 0.0f;			// persistent
+	out.castShadow = true;
+}
+
 // Keeps the csz_testlight demo spot in sync with the cvar and the current
 // map. Runs once per taken-over frame (cheap: string compare + flag checks).
 void SyncDemoLight()
@@ -280,22 +294,9 @@ void SyncDemoLight()
 	if( wantOn && !s_demoLightOn )
 	{
 		LightDesc desc;
-
-		memset( &desc, 0, sizeof( desc ));
-		desc.type = kLightSpot;
-		desc.origin[0] = s_spawnOrigin[0];
-		desc.origin[1] = s_spawnOrigin[1];
-		desc.origin[2] = s_spawnOrigin[2] + kDemoHeight;
-		desc.angles[0] = kDemoPitchDeg;		// down-forward along the spawn yaw
-		desc.angles[1] = s_spawnYaw;
-		desc.angles[2] = 0.0f;
-		desc.color[0] = kTestColor[0];
-		desc.color[1] = kTestColor[1];
-		desc.color[2] = kTestColor[2];
-		desc.radius = kTestRadius;
-		desc.fov = kTestFov;
-		desc.die = 0.0f;			// persistent
-		desc.castShadow = true;
+		float origin[3] = { s_spawnOrigin[0], s_spawnOrigin[1], s_spawnOrigin[2] + kDemoHeight };
+		float angles[3] = { kDemoPitchDeg, s_spawnYaw, 0.0f };	// down-forward along the spawn yaw
+		MakeTestLightDesc( origin, angles, desc );
 
 		int slot = g_lights.AddOrUpdate( kTestLightKey, desc );
 
@@ -336,22 +337,7 @@ void TestSpotCommand()
 	}
 
 	LightDesc desc;
-
-	memset( &desc, 0, sizeof( desc ));
-	desc.type = kLightSpot;
-	desc.origin[0] = s_viewOrigin[0];
-	desc.origin[1] = s_viewOrigin[1];
-	desc.origin[2] = s_viewOrigin[2];
-	desc.angles[0] = s_viewAngles[0];
-	desc.angles[1] = s_viewAngles[1];
-	desc.angles[2] = s_viewAngles[2];
-	desc.color[0] = kTestColor[0];
-	desc.color[1] = kTestColor[1];
-	desc.color[2] = kTestColor[2];
-	desc.radius = kTestRadius;
-	desc.fov = kTestFov;
-	desc.die = 0.0f;			// persistent until "csz_testspot off"
-	desc.castShadow = true;
+	MakeTestLightDesc( s_viewOrigin, s_viewAngles, desc );
 
 	int slot = g_lights.AddOrUpdate( kTestSpotKey, desc );
 
@@ -389,24 +375,14 @@ void TestBeamCommand()
 	AngleVectors( s_viewAngles, fwd, right, up );
 
 	LightDesc desc;
-
-	memset( &desc, 0, sizeof( desc ));
-	desc.type = kLightSpot;
 	// Apex up + to the right of the eye so the camera is clearly outside the cone.
+	float origin[3];
 	for( int j = 0; j < 3; j++ )
-		desc.origin[j] = s_viewOrigin[j] + up[j] * 60.0f + right[j] * 50.0f + fwd[j] * 24.0f;
+		origin[j] = s_viewOrigin[j] + up[j] * 60.0f + right[j] * 50.0f + fwd[j] * 24.0f;
 	// Aim along the view yaw but pitched well DOWN: the beam descends into the floor
 	// ahead, fully inside the forward frustum, seen side-on from the upper-left.
-	desc.angles[0] = s_viewAngles[0] + 30.0f;	// quake +pitch = downward
-	desc.angles[1] = s_viewAngles[1];
-	desc.angles[2] = 0.0f;
-	desc.color[0] = kTestColor[0];
-	desc.color[1] = kTestColor[1];
-	desc.color[2] = kTestColor[2];
-	desc.radius = kTestRadius;
-	desc.fov = kTestFov;
-	desc.die = 0.0f;			// persistent until "csz_testbeam off"
-	desc.castShadow = true;
+	float angles[3] = { s_viewAngles[0] + 30.0f, s_viewAngles[1], 0.0f };	// quake +pitch = downward
+	MakeTestLightDesc( origin, angles, desc );
 
 	int slot = g_lights.AddOrUpdate( kTestBeamKey, desc );
 

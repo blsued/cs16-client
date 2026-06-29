@@ -55,7 +55,5 @@ enum LightBudgetTier
 
 void LightBudgetRegisterCvars();                    // csz_flashlight_max_full / _max_cheap
 void LightBudgetCompute( const ViewSetup &view );   // per-frame: rank visible spots, fill budgetTier
-int  LightBudgetCount( LightBudgetTier tier );      // last Compute's tier tally (cap evidence)
-int  LightBudgetVisible();                          // full + cheap (beams actually drawn)
 int  LightBudgetCheapSteps();                       // cone march steps for the cheap tier
 }

@@ -217,30 +217,13 @@ void LightBudgetCompute( const ViewSetup &view )
 	// beams exist than the full tier -- i.e. when the cap is actually doing work.
 	static float s_nextStats;
 
-	if( ( s_countFull + s_countCheap + s_countCull ) > s_countFull && now >= s_nextStats )
+	if( ( s_countCheap + s_countCull ) > 0 && now >= s_nextStats )
 	{
 		s_nextStats = now + 1.0f;
 		CSZ_LogDev( "lightbudget", "[csz_lightbudget] spots=%d visible=%d full=%d cheap=%d cull=%d (cap %d+%d)",
 			s_countFull + s_countCheap + s_countCull, s_countFull + s_countCheap,
 			s_countFull, s_countCheap, s_countCull, maxFull, maxCheap );
 	}
-}
-
-int LightBudgetCount( LightBudgetTier tier )
-{
-	switch( tier )
-	{
-	case kBudgetFull:  return s_countFull;
-	case kBudgetCheap: return s_countCheap;
-	case kBudgetCull:  return s_countCull;
-	}
-
-	return 0;
-}
-
-int LightBudgetVisible()
-{
-	return s_countFull + s_countCheap;
 }
 
 int LightBudgetCheapSteps()

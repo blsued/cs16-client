@@ -216,9 +216,4 @@ void SpotShadowMap::RenderDepth( ActiveLight &light, const ViewSetup &mainView,
 	light.shadowTexSlot = s_shadow.texSlot;
 }
 
-int SpotShadowMap::TexSlot() const
-{
-	return ( s_shadow.gpuGeneration == GpuGeneration()) ? s_shadow.texSlot : 0;
-}
-
 }

@@ -119,8 +119,7 @@ void FlashlightSet( const FlashlightState &st )
 		return;
 	}
 
-	s_table[slot] = st;
-	s_table[slot].enabled = true;
+	s_table[slot] = st;	// st.enabled is already true past the guard above
 }
 
 void FlashlightClear( int owner )
@@ -187,7 +186,7 @@ void FlashlightPublishToRegistry()
 		desc.color[2] = noColor ? kDefaultColor[2] : st.color[2];
 		desc.radius = ( st.range > 0.0f ) ? st.range : kDefaultRange;
 		desc.fov    = ( st.fov   > 0.0f ) ? st.fov   : kDefaultFov;
-		desc.die = 0.0f;			// lifetime owned by the state table, not a timer
+		// desc.die stays 0 from the memset above (lifetime owned by the state table, not a timer)
 		// v5: only the local first-person beam claims the single shadow map; non-local
 		// lanterns stay shadowless (faint glows need none, and the fog march keys on the
 		// shadowed spot -- this keeps the lanterns out of it, so no third-person fog shaft).

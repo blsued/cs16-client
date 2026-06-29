@@ -38,7 +38,6 @@
 #include "../core/csz_log.h"
 
 #include <math.h>
-#include <string.h>
 
 namespace csz
 {
@@ -182,9 +181,7 @@ void LightRegistry::BuildSpotParams( const ActiveLight &light, SpotLightParams &
 	out.origin[1] = d.origin[1];
 	out.origin[2] = d.origin[2];
 
-	float right[3], up[3];
-
-	AngleVectors( d.angles, out.dir, right, up );
+	AngleVectors( d.angles, out.dir, NULL, NULL );	// only out.dir (forward) is consumed
 
 	out.color[0] = d.color[0];
 	out.color[1] = d.color[1];

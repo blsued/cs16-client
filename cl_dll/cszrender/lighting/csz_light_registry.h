@@ -39,7 +39,7 @@
 #include "../core/csz_light_types.h"
 namespace csz
 {
-enum LightType { kLightSpot = 0, kLightOmni = 1, kLightDirectional = 2 };  // M1 implements Spot only
+enum LightType { kLightSpot = 0, kLightDirectional = 2 };  // M1 implements Spot only (kLightDirectional reserved for M2)
 
 struct LightDesc
 {

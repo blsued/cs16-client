@@ -70,8 +70,6 @@ namespace csz
 namespace
 {
 
-const float kDegToRad = 3.14159265358979323846f / 180.0f;
-
 // Radial wedge count of the procedural cone (smooth rim at any near distance; a
 // flashlight cone is small on screen so 64 is plenty). MUST match the draw count.
 const int kConeSegments = 64;
@@ -99,7 +97,6 @@ cvar_t *s_cvarTpSigmaE;    // csz_flashlight_tp_sigmaE    default "0.05": extinc
 cvar_t *s_cvarTpCap;       // csz_flashlight_tp_cap       default "2.5": per-light radiance cap
 cvar_t *s_cvarTpKnee;      // csz_flashlight_tp_knee      default "0.8": volume-buffer soft-knee compression knee
 cvar_t *s_cvarTpHalo;      // csz_flashlight_tp_halo      default "0.3": two-lobe halo weight w1 (0..1)
-cvar_t *s_cvarTpHero;      // csz_flashlight_tp_heroshadows default "0": hero shadow-map count (v1: NOT implemented)
 bool    s_lookedV3;
 
 // --- half-res in-scatter target (RGBA16F, no depth) ---------------------------
@@ -357,12 +354,11 @@ void DrawConeForSpot( const ViewSetup &view, const SpotLightParams &spot,
 	float rightS[3] = { right[0] * rimR, right[1] * rimR, right[2] * rimR };
 	float upS[3]    = { up[0] * rimR,    up[1] * rimR,    up[2] * rimR };
 
-	if( s_gpu.mMatViewProj >= 0 ) glUniformMatrix4fv( s_gpu.mMatViewProj, 1, GL_FALSE, view.matViewProj.m );
+	// u_matViewProj + u_segments are frame-constant -> uploaded once by the caller.
 	if( s_gpu.mApex >= 0 )        glUniform3fv( s_gpu.mApex, 1, spot.origin );
 	if( s_gpu.mAxis >= 0 )        glUniform3fv( s_gpu.mAxis, 1, axis );
 	if( s_gpu.mRight >= 0 )       glUniform3fv( s_gpu.mRight, 1, rightS );
 	if( s_gpu.mUp >= 0 )          glUniform3fv( s_gpu.mUp, 1, upS );
-	if( s_gpu.mSegments >= 0 )    glUniform1f( s_gpu.mSegments, (float)kConeSegments );
 
 	if( s_gpu.mAxisDir >= 0 )     glUniform3fv( s_gpu.mAxisDir, 1, spot.dir );
 	if( s_gpu.mLen >= 0 )         glUniform1f( s_gpu.mLen, len );
@@ -435,14 +431,35 @@ void LightConeRegisterCvars()
 		// (g*0.5) gets w1. Broadens the glow around the bright core; weights stay
 		// normalized (w0+w1<=1) so energy is not double-counted.
 		s_cvarTpHalo = gEngfuncs.pfnRegisterVariable( "csz_flashlight_tp_halo", "0.3", FCVAR_CLIENTDLL );
-	if( s_cvarTpHero == NULL )
-		// Hero shadow-map count. v1 does NOT implement per-cone hero shadow maps (the
-		// single 1024 spot map is owned by the first-person path; a multi-hero atlas is
-		// out of scope, see DESIGN-SPEC §V2 #5). Registered at 0 as a documented stub;
-		// residual distant wall-bleed from the light side is an accepted v1 limitation.
-		s_cvarTpHero = gEngfuncs.pfnRegisterVariable( "csz_flashlight_tp_heroshadows", "0", FCVAR_CLIENTDLL );
 
-	CSZ_LogDev( "lightcone", "cvars registered (tp/_intensity/_nl_surffade/_g/_fogcouple/_steps/_sigmaS/_sigmaE/_cap/_knee/_halo/_heroshadows)" );
+	CSZ_LogDev( "lightcone", "cvars registered (tp/_intensity/_nl_surffade/_g/_fogcouple/_steps/_sigmaS/_sigmaE/_cap/_knee/_halo)" );
+}
+
+// One-shot lazy cvar-pointer latch: fetch the pointer on first use, then reuse.
+cvar_t *LatchCvar( bool &looked, cvar_t *&slot, const char *name )
+{
+	if( !looked )
+	{
+		looked = true;
+		slot = gEngfuncs.pfnGetCvarPointer( name );
+	}
+	return slot;
+}
+
+// Shared eligibility predicate for both LightConeRender loops (the eligible-count
+// pre-pass and the draw pass). Under v3 the LOCAL first-person beam is owned by the
+// slot-13.5 fog march, so it is excluded here.
+bool IsSpotEligible( const ActiveLight *light, bool v3, float now )
+{
+	if( !light->used || light->desc.type != kLightSpot )
+		return false;
+	if( light->desc.die > 0.0f && light->desc.die < now )
+		return false;
+	if( light->budgetTier == kBudgetCull )
+		return false;
+	if( v3 && light->desc.isLocal )
+		return false;	// local beam excluded (slot 13.5 owns it)
+	return true;
 }
 
 void LightConeRender( const ViewSetup &view )
@@ -469,28 +486,15 @@ void LightConeRender( const ViewSetup &view )
 	// L5R master split (csz_flashlight_v3, default 1). Under v3 the LOCAL first-person
 	// beam's air volume is owned by the slot-13.5 fog march, so it is EXCLUDED here (no
 	// double-draw). Non-local (third-person) cones are this pass's job.
-	if( !s_lookedV3 )
-	{
-		s_lookedV3 = true;
-		s_cvarV3 = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_v3" );
-	}
-	bool v3 = ( ReadCvar( s_cvarV3, 1.0f ) >= 0.5f );
+	bool v3 = ( ReadCvar( LatchCvar( s_lookedV3, s_cvarV3, "csz_flashlight_v3" ), 1.0f ) >= 0.5f );
 
 	// Count eligible non-local cones first: if none, do not touch the FBO at all.
 	float now = ClientTime();
 	int eligible = 0;
 	for( int i = 0; i < LightRegistry::kMaxLights; i++ )
 	{
-		ActiveLight *light = g_lights.Slot( i );
-		if( !light->used || light->desc.type != kLightSpot )
-			continue;
-		if( light->desc.die > 0.0f && light->desc.die < now )
-			continue;
-		if( light->budgetTier == kBudgetCull )
-			continue;
-		if( v3 && light->desc.isLocal )
-			continue;                          // local beam excluded (slot 13.5 owns it)
-		eligible++;
+		if( IsSpotEligible( g_lights.Slot( i ), v3, now ) )
+			eligible++;
 	}
 	if( eligible == 0 )
 		return;
@@ -509,12 +513,7 @@ void LightConeRender( const ViewSetup &view )
 		return;
 
 	// csz_flashlight_range (FogVolume-owned) caps the beam length; lazily fetched.
-	if( !s_lookedRange )
-	{
-		s_lookedRange = true;
-		s_cvarRange = gEngfuncs.pfnGetCvarPointer( "csz_flashlight_range" );
-	}
-	float range = ReadCvar( s_cvarRange, 1600.0f );
+	float range = ReadCvar( LatchCvar( s_lookedRange, s_cvarRange, "csz_flashlight_range" ), 1600.0f );
 	float intensity = ReadCvar( s_cvarTpIntensity, 3.0f );
 
 	float nlSurfFade = ReadCvar( s_cvarNlSurfFade, 1.0f );
@@ -557,9 +556,8 @@ void LightConeRender( const ViewSetup &view )
 	if( fullSteps < 8 )  fullSteps = 8;
 	if( fullSteps > 32 ) fullSteps = 32;
 
-	float fTarget[2]  = { (float)halfW, (float)halfH };
+	float fHalfSize[2] = { (float)halfW, (float)halfH };	// march u_targetSize == upsample u_halfSize
 	float fFullSize[2] = { (float)fullW, (float)fullH };
-	float fHalfSize[2] = { (float)halfW, (float)halfH };
 
 	// ===================== Pass 1: half-res cone accumulation =================
 	// Each non-local cone mesh adds its energy-conserving in-scatter into the separate
@@ -581,7 +579,7 @@ void LightConeRender( const ViewSetup &view )
 
 	SkyComposeBindTex( 0, GL_TEXTURE_2D, depthTex );
 	if( s_gpu.mDepthTex >= 0 )    glUniform1i( s_gpu.mDepthTex, kSkyTmuBase + 0 );
-	if( s_gpu.mTargetSize >= 0 )  glUniform2fv( s_gpu.mTargetSize, 1, fTarget );
+	if( s_gpu.mTargetSize >= 0 )  glUniform2fv( s_gpu.mTargetSize, 1, fHalfSize );
 	if( s_gpu.mCamPos >= 0 )      glUniform3fv( s_gpu.mCamPos, 1, view.origin );
 	if( s_gpu.mHgG >= 0 )         glUniform1f( s_gpu.mHgG, coneG );
 	if( s_gpu.mHalo >= 0 )        glUniform1f( s_gpu.mHalo, halo );
@@ -592,19 +590,16 @@ void LightConeRender( const ViewSetup &view )
 	if( s_gpu.mZNear >= 0 )       glUniform1f( s_gpu.mZNear, view.zNear );
 	if( s_gpu.mZFar >= 0 )        glUniform1f( s_gpu.mZFar, view.zFar );
 	if( s_gpu.mInvViewProj >= 0 ) glUniformMatrix4fv( s_gpu.mInvViewProj, 1, GL_FALSE, invViewProj.m );
+	// Frame-constant for every cone -> uploaded once here, not per DrawConeForSpot.
+	if( s_gpu.mMatViewProj >= 0 ) glUniformMatrix4fv( s_gpu.mMatViewProj, 1, GL_FALSE, view.matViewProj.m );
+	if( s_gpu.mSegments >= 0 )    glUniform1f( s_gpu.mSegments, (float)kConeSegments );
 
 	int drawnFull = 0, drawnCheap = 0;
 	for( int i = 0; i < LightRegistry::kMaxLights; i++ )
 	{
 		ActiveLight *light = g_lights.Slot( i );
-		if( !light->used || light->desc.type != kLightSpot )
+		if( !IsSpotEligible( light, v3, now ) )
 			continue;
-		if( light->desc.die > 0.0f && light->desc.die < now )
-			continue;
-		if( light->budgetTier == kBudgetCull )
-			continue;
-		if( v3 && light->desc.isLocal )
-			continue;                          // local beam excluded (no double-energy)
 
 		int steps = ( light->budgetTier == kBudgetCheap ) ? cheapSteps : fullSteps;
 

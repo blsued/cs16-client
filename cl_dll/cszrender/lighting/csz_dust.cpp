@@ -176,6 +176,27 @@ float Luma( const float c[3] )
 	return 0.299f * c[0] + 0.587f * c[1] + 0.114f * c[2];
 }
 
+// Per-mote single-scatter coefficient for a view-vs-light cosine mu.
+float HgScatter( float mu )
+{
+	return kScatterBase + kScatterHg * HgPhase( mu, kHgG );
+}
+
+// Brightest-wins candidate commit: keep the candidate (color*k) iff it out-lumas
+// the running best. Returns true when it won (so the moon gate can latch wonByMoon).
+bool AccumCandidate( const float color[3], float k, float &bestLum, float emit[3] )
+{
+	float cand[3] = { color[0] * k, color[1] * k, color[2] * k };
+	float lum = Luma( cand );
+	if( lum > bestLum )
+	{
+		bestLum = lum;
+		emit[0] = cand[0]; emit[1] = cand[1]; emit[2] = cand[2];
+		return true;
+	}
+	return false;
+}
+
 // Cheap divergence-light "curl" flow (sines of position + time) -> a slow swirling
 // drift with no clumping; GL3.3 has no compute, but a few hundred-thousand scalar ops
 // for the whole pool is negligible CPU.
@@ -473,15 +494,9 @@ void DustRender( const ViewSetup &view )
 			float toL[3] = { g.origin[0]-p[0], g.origin[1]-p[1], g.origin[2]-p[2] };
 			float ll = sqrtf( toL[0]*toL[0]+toL[1]*toL[1]+toL[2]*toL[2] );
 			float mu = ( ll > 1e-4f ) ? ( V[0]*toL[0]+V[1]*toL[1]+V[2]*toL[2] ) / ll : 0.0f;
-			float scat = kScatterBase + kScatterHg * HgPhase( mu, kHgG );
+			float scat = HgScatter( mu );
 			float k = coneFall * atten * scat * kConeGain * intensity;
-			float cand[3] = { g.color[0]*k, g.color[1]*k, g.color[2]*k };
-			float lum = Luma( cand );
-			if( lum > bestLum )
-			{
-				bestLum = lum;
-				emit[0] = cand[0]; emit[1] = cand[1]; emit[2] = cand[2];
-			}
+			AccumCandidate( g.color, k, bestLum, emit );
 		}
 
 		// --- moon shaft gate ---
@@ -496,16 +511,10 @@ void DustRender( const ViewSetup &view )
 		{
 			// HG toward the moon (sample -> moon == moonlightDir, the L vector).
 			float mu = V[0]*moonDir[0] + V[1]*moonDir[1] + V[2]*moonDir[2];
-			float scat = kScatterBase + kScatterHg * HgPhase( mu, kHgG );
+			float scat = HgScatter( mu );
 			float k = moonInScatter * shaftMask * scat * kMoonGain * intensity;
-			float cand[3] = { moonRGB[0]*k, moonRGB[1]*k, moonRGB[2]*k };
-			float lum = Luma( cand );
-			if( lum > bestLum )
-			{
-				bestLum = lum;
-				emit[0] = cand[0]; emit[1] = cand[1]; emit[2] = cand[2];
+			if( AccumCandidate( moonRGB, k, bestLum, emit ) )
 				wonByMoon = true;
-			}
 		}
 
 		if( bestLum < kCullEps )

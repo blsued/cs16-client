@@ -50,7 +50,6 @@ public:
 	// Caller restores main viewport afterwards (ApplyMainViewport).
 	void RenderDepth( ActiveLight &light, const ViewSetup &mainView,
 	                  cl_entity_s *const *studioEnts, int studioCount );
-	int TexSlot() const;    // 0 when not created
 };
 extern SpotShadowMap g_spotShadow;   // M1: exactly one (single test light)
 }
