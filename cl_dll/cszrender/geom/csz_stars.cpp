@@ -437,7 +437,10 @@ void StarsContribute( const ViewSetup &view )
 		// octaves stair-step / drift toward sync. mod 3600 s is large enough that the
 		// once-an-hour global wrap is imperceptible against the per-star boil (every
 		// star's phase is a fixed offset). Do the wrap here, NEVER in-shader.
-		if( s_gpu.uS_time >= 0 )       glUniform1f( s_gpu.uS_time, fmodf( ClientTime(), 3600.0f ) );
+		// Verification infra: csz_verify_freeze pins the twinkle/flicker clock to a constant so the
+		// per-star boil cannot drift between two captures of the SAME fixed instant (byte-stable A/B).
+		if( s_gpu.uS_time >= 0 )       glUniform1f( s_gpu.uS_time,
+			SkyComposeVerifyFreeze() ? 0.0f : fmodf( ClientTime(), 3600.0f ) );
 		if( s_gpu.uS_night >= 0 )      glUniform1f( s_gpu.uS_night, nightFactor );
 		if( s_gpu.uS_intensity >= 0 )  glUniform1f( s_gpu.uS_intensity, ReadCvar( s_cvarIntensity, 1.0f ) );
 		// Clamp the look-only spot-size cvar to a safe range: sigmaPx is divided by sigma^2

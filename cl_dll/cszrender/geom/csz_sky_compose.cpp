@@ -60,6 +60,7 @@ cvar_t *s_cvarDither;     // csz_dither     default "0" (byte-clean A/B); 1 = TP
 cvar_t *s_cvarHlRolloff;  // csz_highlight_rolloff default "1": identity-path overbright shoulder strength (0 = legacy/off A/B)
 cvar_t *s_cvarHlKnee;     // csz_highlight_knee   default "0.95": shoulder onset (maxRGB <= knee unchanged per-pixel)
 cvar_t *s_cvarTiming;     // csz_hdr_timing default "0"; 1 = log the GPU timer ms (Dev level)
+cvar_t *s_cvarVerifyFreeze; // csz_verify_freeze default "0"; 1 = pin per-frame/time/RNG terms to constants (verification infra)
 cvar_t *s_cvarPerfDump;   // csz_perf_dump  default "0" (L0 observability); 1 = orchestrator emits the [csz_perf] line AND forces the in-scene GPU timer query (passive: no draw change)
 // S4 night grade (REWORK-SPEC §S4). All read live each frame; the whole grade is gated by
 // the published nightness so DAY is bit-identical (nightness 0 -> shader skips the block).
@@ -544,6 +545,10 @@ void SkyComposeRegisterCvars()
 		s_cvarHlKnee = gEngfuncs.pfnRegisterVariable( "csz_highlight_knee", "0.95", FCVAR_CLIENTDLL );
 	if( s_cvarTiming == NULL )
 		s_cvarTiming = gEngfuncs.pfnRegisterVariable( "csz_hdr_timing", "0", FCVAR_CLIENTDLL );
+	if( s_cvarVerifyFreeze == NULL )
+		// Verification infra (NOT gameplay): pin per-frame/time/RNG terms to constants so two
+		// captures of the SAME fixed instant are byte-near-identical -> valid machine effect-diff / A/B.
+		s_cvarVerifyFreeze = gEngfuncs.pfnRegisterVariable( "csz_verify_freeze", "0", FCVAR_CLIENTDLL );
 	if( s_cvarPerfDump == NULL )
 		s_cvarPerfDump = gEngfuncs.pfnRegisterVariable( "csz_perf_dump", "0", FCVAR_CLIENTDLL );
 	// S4 night grade knobs (REWORK-SPEC §S4). USER real-machine "口味" knobs; all no-op by day
@@ -578,6 +583,15 @@ bool SkyComposeActive()
 {
 	// Read live so an in-session A/B toggle takes effect next frame.
 	return ReadCvar( s_cvarHdr, 1.0f ) != 0.0f;
+}
+
+// VERIFICATION INFRA: is csz_verify_freeze armed this frame? Read live so an
+// in-session toggle takes effect next frame (matching every other cvar read).
+// Consumed by the resolve (dither off) AND by atmos/fog_volume/stars/dust to pin
+// their per-frame/time/RNG terms to constants. Default 0 -> exact gameplay path.
+bool SkyComposeVerifyFreeze()
+{
+	return ReadCvar( s_cvarVerifyFreeze, 0.0f ) != 0.0f;
 }
 
 // Raw GL name of the sampleable scene depth texture (GL_DEPTH_COMPONENT24,
@@ -736,7 +750,10 @@ void SkyComposeResolve( const struct ref_viewpass_s *rvp, const float clearRgba[
 	if( s_resolve.uEncode >= 0 )
 		glUniform1i( s_resolve.uEncode, ( ReadCvar( s_cvarEncode, 0.0f ) != 0.0f ) ? 1 : 0 );
 	if( s_resolve.uDither >= 0 )
-		glUniform1i( s_resolve.uDither, ( ReadCvar( s_cvarDither, 0.0f ) != 0.0f ) ? 1 : 0 );
+		// Verification infra: csz_verify_freeze forces dither OFF regardless of csz_dither so the
+		// OETF->dither tail adds no per-pixel LSB jitter to the A/B (byte-clean resolve).
+		glUniform1i( s_resolve.uDither,
+			( !SkyComposeVerifyFreeze() && ReadCvar( s_cvarDither, 0.0f ) != 0.0f ) ? 1 : 0 );
 	// L-polish A: identity-path overbright shoulder. Clamp rolloff to [0,1] (blend
 	// factor) and knee to (0,1) so a stray cvar value cannot break the shoulder math.
 	if( s_resolve.uHlRolloff >= 0 )
