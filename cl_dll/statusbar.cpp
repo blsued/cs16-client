@@ -117,8 +117,12 @@ void CHudStatusBar :: ParseStatusString( int line_num )
 			{
 				if ( *src != '%' )
 				{  // just copy the character
-					*dst = *src;
-					dst++, src++;
+					if ( (dst - dst_start) < MAX_STATUSTEXT_LENGTH )
+					{
+						*dst = *src;
+						dst++;
+					}
+					src++;
 				}
 				else
 				{
@@ -128,8 +132,12 @@ void CHudStatusBar :: ParseStatusString( int line_num )
 					// if it's a %, draw a % sign
 					if ( valtype == '%' )
 					{
-						*dst = valtype;
-						dst++, src++;
+						if ( (dst - dst_start) < MAX_STATUSTEXT_LENGTH )
+						{
+							*dst = valtype;
+							dst++;
+						}
+						src++;
 						continue;
 					}
 

@@ -1042,12 +1042,16 @@ bool CHudSpectator::ParseOverviewFile( )
 	m_OverviewData.layers = 0;
 	m_OverviewData.layersHeights[0] = 0.0f;
 	strncpy( m_OverviewData.map, gEngfuncs.pfnGetLevelName(), sizeof(m_OverviewData.map) );
+	m_OverviewData.map[sizeof(m_OverviewData.map)-1] = 0; // strncpy may not NUL-terminate
 
 	if ( strlen( m_OverviewData.map ) == 0 )
 		return false; // not active yet
 
 	strncpy(levelname, m_OverviewData.map + 5, sizeof( levelname ));
-	levelname[strlen(levelname)-4] = 0;
+	levelname[sizeof( levelname )-1] = 0; // strncpy may not NUL-terminate
+	size_t levelnameLen = strlen( levelname );
+	if ( levelnameLen >= 4 ) // strip the ".bsp" extension only if present
+		levelname[levelnameLen-4] = 0;
 	
 	snprintf(filename, sizeof( filename ), "overviews/%s.txt", levelname );
 

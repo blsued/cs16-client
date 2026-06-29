@@ -3216,7 +3216,7 @@ void PM_Move(playermove_t *ppmove, int server)
 
 int PM_GetVisEntInfo(int ent)
 {
-	if (ent >= 0 && ent <= pmove->numvisent)
+	if (ent >= 0 && ent < pmove->numvisent)
 	{
 		return pmove->visents[ent].info;
 	}
@@ -3226,7 +3226,7 @@ int PM_GetVisEntInfo(int ent)
 
 int PM_GetPhysEntInfo(int ent)
 {
-	if (ent >= 0 && ent <= pmove->numphysent)
+	if (ent >= 0 && ent < pmove->numphysent)
 	{
 		return pmove->physents[ent].info;
 	}

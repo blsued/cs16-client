@@ -354,7 +354,8 @@ int CHudSpectatorGui::Draw( float flTime )
 	//if( !label.m_szNameAndHealth[0] )
 	//{
 		int iLen = DrawUtils::HudStringLen( label.m_szNameAndHealth );
-		GetTeamColor( r, g, b, g_PlayerExtraInfo[ g_iUser2 ].teamnumber );
+		if( ValidPlayerIndex( g_iUser2 ) )
+			GetTeamColor( r, g, b, g_PlayerExtraInfo[ g_iUser2 ].teamnumber );
 		DrawUtils::DrawHudString( ScreenWidth * 0.5 - iLen * 0.5, INT_YPOS(9) - gHUD.GetCharHeight() * 0.5 , ScreenWidth,
 								  label.m_szNameAndHealth, r, g, b );
 	//}
@@ -370,7 +371,10 @@ void CHudSpectatorGui::CalcAllNeededData( )
 		static char szMapNameStripped[55];
 		const char *szMapName = gEngfuncs.pfnGetLevelName(); //  "maps/%s.bsp"
 		strncpy( szMapNameStripped, szMapName + 5, sizeof( szMapNameStripped ) );
-		szMapNameStripped[strlen(szMapNameStripped) - 4] = '\0';
+		szMapNameStripped[sizeof( szMapNameStripped ) - 1] = '\0'; // strncpy may not NUL-terminate
+		size_t mapNameLen = strlen( szMapNameStripped );
+		if( mapNameLen >= 4 ) // strip the ".bsp" extension only if present
+			szMapNameStripped[mapNameLen - 4] = '\0';
 		snprintf( label.m_szMap, sizeof( label.m_szMap ), "Map: %s", szMapNameStripped );
 	}
 
@@ -452,7 +456,8 @@ int CHudSpectatorGui::MsgFunc_SpecHealth(const char *pszName, int iSize, void *b
 
 	int health = reader.ReadByte();
 
-	g_PlayerExtraInfo[g_iUser2].health = health;
+	if( ValidPlayerIndex( g_iUser2 ) )
+		g_PlayerExtraInfo[g_iUser2].health = health;
 	gHUD.m_Health.m_iPlayerLastPointedAt = g_iUser2;
 
 	return 1;
@@ -465,7 +470,8 @@ int CHudSpectatorGui::MsgFunc_SpecHealth2(const char *pszName, int iSize, void *
 	int health = reader.ReadByte();
 	int client = reader.ReadByte();
 
-	g_PlayerExtraInfo[client].health = health;
+	if( ValidPlayerIndex( client ) )
+		g_PlayerExtraInfo[client].health = health;
 	gHUD.m_Health.m_iPlayerLastPointedAt = g_iUser2;
 
 	return 1;

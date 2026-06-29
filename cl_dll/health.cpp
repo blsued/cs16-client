@@ -507,7 +507,7 @@ int CHudHealth :: MsgFunc_ClCorpse(const char *pszName, int iSize, void *pbuf)
 		}
 		else if( teamID == TEAM_CT ) // ct
 		{
-			if( g_PlayerExtraInfo[playerID].vip )
+			if( ValidPlayerIndex(playerID) && g_PlayerExtraInfo[playerID].vip )
 				modelidx = PLAYERMODEL_VIP;
 			else if( !BIsValidCTModelIndex( gHUD.cl_min_ct->value ))
 				modelidx = PLAYERMODEL_GIGN;

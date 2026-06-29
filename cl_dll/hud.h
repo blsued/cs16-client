@@ -496,6 +496,10 @@ extern team_info_t			g_TeamInfo[MAX_TEAMS+1];
 extern hostage_info_t		g_HostageInfo[MAX_HOSTAGES+1];
 extern int					g_IsSpectator[MAX_PLAYERS+1];
 
+// Valid 1-based client index into the g_Player*[MAX_PLAYERS+1] tables. Use this
+// to bound any server-pushed index before subscripting those arrays (SEC-D).
+inline bool ValidPlayerIndex( int i ) { return i >= 1 && i <= MAX_PLAYERS; }
+
 
 //
 //-----------------------------------------------------
