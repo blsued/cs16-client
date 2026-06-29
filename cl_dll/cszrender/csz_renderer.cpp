@@ -603,6 +603,7 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	EndPass( kTmVolume );
 
 	BeginPass( kTmTrans );
+	g_world.DrawWater( view, m_frame.brush, m_frame.numBrush );	// slot 14: warped water/turb (world + func_water), drawn first so later transparents depth-sort against it
 	DrawSprites( view, m_frame.sprites, m_frame.numSprites );	// slot 14: sprites (trans domain)
 	g_world.DrawBrushTransparent( view, m_frame.brush, m_frame.numBrush );	// slot 14: transparent brush (trans domain, E1)
 	EndPass( kTmTrans );

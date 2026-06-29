@@ -479,3 +479,76 @@ void main()
 {
 }
 )GLSL";
+
+// Water/turb pass (M2c). A Quake-style sine UV warp animates the diffuse texture
+// (turb surfaces carry no baked lightmap, so the surface is fullbright * night-tint
+// rather than lightmapped), with a compact analytic fog matching the opaque world's
+// per-channel extinction so distant water fogs consistently. u_model is identity for
+// the worldspawn water and a per-entity translate*rotate for func_water brushes.
+static const char kWorldWaterVs[] = R"GLSL(#version 330 core
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in vec2 a_uv;
+uniform mat4 u_viewProj;
+uniform mat4 u_model;
+out vec2 v_uv;
+out vec3 v_worldPos;
+void main()
+{
+	vec4 wp = u_model * vec4( a_pos, 1.0 );
+	v_worldPos = wp.xyz;
+	v_uv = a_uv;
+	gl_Position = u_viewProj * wp;
+}
+)GLSL";
+
+static const char kWorldWaterFs[] = R"GLSL(#version 330 core
+in vec2 v_uv;
+in vec3 v_worldPos;
+uniform sampler2D u_texDiffuse;   // unit 0
+uniform float u_time;             // ClientTime drift clock (animation)
+uniform float u_warpAmp;          // warp amplitude (fraction of one texture tile)
+uniform float u_warpFreq;         // warp spatial frequency (rad per tile)
+uniform float u_warpSpeed;        // warp temporal speed
+uniform vec3  u_ambTint;          // night tint; (1,1,1) neutral (parity with the opaque world)
+uniform float u_wateralpha;       // translucency [0,1]
+uniform vec3  u_camPos;           // camera world position (fog ray origin)
+uniform vec4  u_fog;              // rgb = in-scatter color, w = extinction a (1/units); w<=0 -> off
+uniform vec4  u_fogParams;        // x = height falloff b, z = maxOpacity (y/w unused here)
+uniform vec4  u_fogParams2;       // xyz = per-channel extinction tint (b_ch = a * tint)
+out vec4 fragColor;
+// Compact closed-form per-channel transmittance: the world's analytic height fog
+// (csz_world_shaders cszFogT3) with t0=0, no cutoff and no noise -- enough for water
+// to fog into the distance consistently with the opaque scene.
+vec3 cszWaterFogT( vec3 worldPos, vec3 camPos, vec3 aRGB, float b, float maxOpacity )
+{
+	if( all( lessThanEqual( aRGB, vec3( 0.0 ))))
+		return vec3( 1.0 );
+	vec3 d = worldPos - camPos;
+	float t = length( d );
+	float rdz = ( t > 1e-4 ) ? d.z / t : 0.0;
+	float G;
+	if( abs( b ) < 1e-4 )
+		G = t;                                              // uniform density (divide-by-b guard)
+	else if( abs( rdz ) < 1e-4 )
+		G = exp( -b * camPos.z ) * t;                       // near-horizontal ray (divide-by-rd.z guard)
+	else
+		G = ( 1.0 / b ) * exp( -b * camPos.z ) * ( 1.0 - exp( -b * t * rdz )) / rdz;
+	G = max( G, 0.0 );
+	vec3 T = exp( -max( aRGB * G, vec3( 0.0 )));
+	return max( T, vec3( 1.0 - maxOpacity ));               // server reveal floor (silhouettes/blackout)
+}
+void main()
+{
+	// Quake-style turb warp: each UV axis is displaced by a sine of the OTHER axis
+	// plus the drift clock, so the texture ripples and flows.
+	float ph = u_time * u_warpSpeed;
+	float s = v_uv.x + sin( v_uv.y * u_warpFreq + ph ) * u_warpAmp;
+	float t = v_uv.y + sin( v_uv.x * u_warpFreq + ph ) * u_warpAmp;
+	vec3 col = texture( u_texDiffuse, vec2( s, t )).rgb;
+	col *= u_ambTint;                                       // night darkening parity with the opaque world
+	vec3 aRGB = u_fog.w * u_fogParams2.xyz;                 // per-channel extinction
+	vec3 T = cszWaterFogT( v_worldPos, u_camPos, aRGB, u_fogParams.x, u_fogParams.z );
+	col = col * T + u_fog.rgb * ( 1.0 - T );
+	fragColor = vec4( col, u_wateralpha );
+}
+)GLSL";
