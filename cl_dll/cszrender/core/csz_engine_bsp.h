@@ -68,6 +68,7 @@ namespace csz
 const int kSurfPlaneBack = ( 1 << 1 );		// plane normal points away from the face
 const int kSurfDrawSky = ( 1 << 2 );		// sky surface (M1: skipped, clear color shows)
 const int kSurfDrawTurb = ( 1 << 4 );		// warped water surface (M1: skipped)
+const int kSurfConveyor = ( 1 << 6 );		// SURF_CONVEYOR: scrolling/flowing texture (func_conveyor, "scroll*"); set by ref_gl surface load
 
 // model_s::flags bit: BSP uses 32-bit clipnode/edge types (QBSP2 maps).
 const int kModelQbsp2 = ( 1 << 28 );

@@ -71,6 +71,14 @@ unsigned char s_rgbaScratch[kMaxBlockDim * kMaxBlockDim * 4];
 // the light gamma table; the render_api byte-domain LightToTexGamma is that
 // same table). 264 = lightstyle 'm' (the static style-0 normal value). The
 // remaining x2 overbright lives in the world shader (plan section 2.4).
+unsigned char GammaByte( unsigned char lit )
+{
+	if( gRenderAPI.LightToTexGamma != NULL )
+		return gRenderAPI.LightToTexGamma( lit );
+
+	return lit;
+}
+
 unsigned char SampleToPixel( unsigned char sample )
 {
 	unsigned int scaled = ((unsigned int)sample * 264u ) >> 8;
@@ -78,10 +86,7 @@ unsigned char SampleToPixel( unsigned char sample )
 	if( scaled > 255u )
 		scaled = 255u;
 
-	if( gRenderAPI.LightToTexGamma != NULL )
-		return gRenderAPI.LightToTexGamma( (unsigned char)scaled );
-
-	return (unsigned char)scaled;
+	return GammaByte( (unsigned char)scaled );
 }
 
 }
@@ -183,6 +188,43 @@ void LightmapAtlas::UploadBlock( int page, int x, int y, int w, int h, const uns
 
 	// Bind via the engine wrapper (TMU hygiene, T1 rule); RGBA rows are
 	// always 4-byte aligned so the default UNPACK_ALIGNMENT 4 is correct.
+	BindTextureSlot( 0, slot );
+	glTexSubImage2D( GL_TEXTURE_2D, 0, x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, s_rgbaScratch );
+}
+
+void LightmapAtlas::UploadBlockLit( int page, int x, int y, int w, int h, const unsigned char *rgbLit )
+{
+	if( page < 0 || page >= kMaxPages || rgbLit == NULL )
+		return;
+
+	if( w > kMaxBlockDim || h > kMaxBlockDim )
+	{
+		CSZ_LogError( "lightmap", "lit block %dx%d exceeds scratch limit %d, clamped", w, h, kMaxBlockDim );
+		w = ( w > kMaxBlockDim ) ? kMaxBlockDim : w;
+		h = ( h > kMaxBlockDim ) ? kMaxBlockDim : h;
+	}
+
+	int slot = PageTexSlot( page );
+
+	if( slot == 0 )
+		return;	// PageTexSlot already logged the failure
+
+	// rgbLit holds the already-accumulated, >>8-scaled, clamped light bytes
+	// (caller did the per-style sum); here apply ONLY the engine light gamma.
+	for( int t = 0; t < h; t++ )
+	{
+		for( int s = 0; s < w; s++ )
+		{
+			const unsigned char *src = &rgbLit[( t * w + s ) * 3];
+			unsigned char *dst = &s_rgbaScratch[( t * w + s ) * 4];
+
+			dst[0] = GammaByte( src[0] );
+			dst[1] = GammaByte( src[1] );
+			dst[2] = GammaByte( src[2] );
+			dst[3] = 255;
+		}
+	}
+
 	BindTextureSlot( 0, slot );
 	glTexSubImage2D( GL_TEXTURE_2D, 0, x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, s_rgbaScratch );
 }

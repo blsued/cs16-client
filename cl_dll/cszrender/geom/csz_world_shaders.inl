@@ -58,6 +58,7 @@ layout(location = 3) in vec3 a_normal;
 layout(location = 4) in float a_skyVis;  // S1: geometric sky visibility [0,1] (1=open); baked sidecar
 uniform mat4 u_viewProj;
 uniform mat4 u_model;
+uniform vec2 u_scroll;                    // SURF_CONVEYOR flow: diffuse S/T offset (UV space). (0,0) for non-flowing -> identity.
 out vec2 v_uv;
 out vec2 v_lmuv;
 out vec3 v_normal;
@@ -65,7 +66,10 @@ out vec3 v_worldPos;
 out float v_skyVis;                       // S1: forwarded to FS (S2 replaces the lightmap-luma proxy with it)
 void main()
 {
-	v_uv = a_uv;
+	// Flowing surfaces (func_conveyor / "scroll*") scroll the DIFFUSE uv only; the
+	// lightmap uv (v_lmuv) is untouched so the baked lighting stays put. u_scroll is
+	// fed 0 for every non-flowing draw, so this is byte-identical there.
+	v_uv = a_uv + u_scroll;
 	v_lmuv = a_lmuv;
 	v_skyVis = a_skyVis;
 	// World-space normal forwarded raw (BSP face plane normal, baked world-space
@@ -144,6 +148,11 @@ uniform vec3  u_tpfogPos[CSZ_TPFOG_MAX];    // lantern world positions (above ea
 uniform vec3  u_tpfogColor;                 // shared warm glow color (linear)
 uniform float u_tpfogRadius;                // glow radius (world units); small -> local mist halo
 uniform float u_tpfogIntensity;            // faint glow strength (bounded; clamped sum * this)
+// gl_detail second-TMU overlay: a high-frequency detail texture modulated x2 at a
+// per-texture scale, visible at close range. u_hasDetail 0 -> identity (no bind needed).
+uniform sampler2D u_texDetail;    // unit 3 (bound only when u_hasDetail != 0)
+uniform int   u_hasDetail;        // 0 = off (byte-identical), 1 = modulate albedo by detail
+uniform vec2  u_detailScale;      // per-texture detail tiling (GetDetailScaleForTexture)
 out vec4 fragColor;
 // S3 procedural 2D value noise (finding 6: 2D only -- the GL function table has no
 // glTexImage3D, so this is in-shader hash noise, pure ALU, NO texture binding). Two
@@ -214,6 +223,10 @@ void main()
 	if( u_alphaTest > 0.0 && base.a < u_alphaTest )
 		discard;
 	vec3 albedo = base.rgb;
+	// gl_detail overlay: modulate the base color by a high-frequency detail texture
+	// (classic x2 around mid-grey -> sharpens close-range surfaces). Identity when off.
+	if( u_hasDetail != 0 )
+		albedo *= texture( u_texDetail, v_uv * u_detailScale ).rgb * 2.0;
 	vec3 lm = texture( u_texLightmap, v_lmuv ).rgb;
 	vec3 lit = albedo * lm * ( 2.0 * 128.0 / 192.0 );   // baked daytime radiance (lightmap * overbright)
 	vec3 nrm = normalize( v_normal );
