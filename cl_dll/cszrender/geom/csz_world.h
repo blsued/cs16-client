@@ -62,6 +62,13 @@ public:
 	void DrawBrushLitAdditive( const ViewSetup &view, const SpotLightParams &light,
 		cl_entity_s *const *ents, int count );
 	bool IsBuilt() const;
+	// M2c C-DEC support: the per-local-face camera-visibility array this frame
+	// (1 = visible), as filled by BuildVisibleSet. Length (== world
+	// nummodelsurfaces) is returned via outCount; NULL before the world is built.
+	// The composition root hands this to the decal pass so csz_decal can walk
+	// surf->pdecals on visible faces without a geom sibling include. Read-only;
+	// valid until the next BuildVisibleSet / Destroy.
+	const unsigned char *VisibleFaces( int *outCount ) const;
 	// S1: geometric sky visibility [0,1] sampled at a world point (studio entity
 	// origin). Averages baked skyVis of retained world verts within a small
 	// radius; returns 1.0 (outdoor fail-safe) when the map has no bake.

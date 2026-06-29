@@ -242,6 +242,14 @@ void SetBlend( BlendMode mode )
 		glEnable( GL_BLEND );
 		glBlendFunc( GL_ONE, GL_ONE_MINUS_SRC_ALPHA );
 		break;
+	case kBlendModulate:
+		// Classic GoldSrc decal modulate: result = src*DST_COLOR + dst*SRC_COLOR
+		// = 2*src*dst (the engine's 2x-overbright decal blend; identity at src=0.5).
+		// Equation stays at the GL default GL_FUNC_ADD. Used by csz_decal for the
+		// no-alpha bullet-hole class drawn after the additive light pass.
+		glEnable( GL_BLEND );
+		glBlendFunc( GL_DST_COLOR, GL_SRC_COLOR );
+		break;
 	}
 
 	s_state.blend = (int)mode;

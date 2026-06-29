@@ -26,6 +26,8 @@ set(CSZRENDER_SRC
 	geom/csz_stars.cpp
 	geom/csz_panorama.cpp
 	geom/csz_sprite.cpp
+	geom/csz_decal.cpp
+	geom/csz_triapi.cpp
 	geom/csz_studio.cpp
 	geom/csz_studio_bones.cpp
 	geom/csz_studio_mesh.cpp
