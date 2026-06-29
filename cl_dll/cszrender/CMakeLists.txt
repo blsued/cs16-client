@@ -26,8 +26,11 @@ set(CSZRENDER_SRC
 	geom/csz_stars.cpp
 	geom/csz_panorama.cpp
 	geom/csz_sprite.cpp
-	geom/csz_decal.cpp
-	geom/csz_triapi.cpp
+	geom/csz_decal.cpp       # [m2c-efxa] C-DEC
+	geom/csz_triapi.cpp      # [m2c-efxa] C-TRI
+	geom/csz_beam.cpp        # [m2c-efxb] C-BEAM
+	geom/csz_particle.cpp    # [m2c-efxb] C-PAR
+	geom/csz_efx_shim.cpp    # [m2c-efxb] C-SHIM
 	geom/csz_studio.cpp
 	geom/csz_studio_bones.cpp
 	geom/csz_studio_mesh.cpp
