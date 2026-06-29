@@ -46,6 +46,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 namespace csz
 {
@@ -72,10 +73,32 @@ const int kSpriteFrameSingle = 0;
 const int kSpriteFrameGroup = 1;
 const int kSpriteFrameAngled = 2;	// Xash3D ext: 8-way; M1 draws direction 0
 
-// msprite_t::type, angletype_t (engine sprite.h:54-61). M1 draws EVERY type
-// as view-parallel (plan section 8: parallel/billboard only; known gap for
-// SPR_ORIENTED / upright variants, listed for the T8 report).
-const int kSpriteMaxType = 4;		// SPR_FWD_PARALLEL_ORIENTED
+// msprite_t::type, angletype_t (engine sprite.h:54-61). M2c reproduces every
+// orientation; the values are the classic Quake/GoldSrc angletype_t enum.
+const int kSpriteMaxType = 4;		// SPR_VP_PARALLEL_ORIENTED
+
+// angletype_t values (engine sprite.h). Names follow the GoldSrc enum so the
+// orientation math below reads like the engine's R_GetSpriteAxes.
+const int kSprVPParallelUpright = 0;	// faces the view plane, Z-locked upright
+const int kSprFacingUpright = 1;	// upright, faces the viewer's origin
+const int kSprVPParallel = 2;		// full view-plane billboard (default)
+const int kSprOriented = 3;		// fixed world orientation from entity angles
+const int kSprVPParallelOriented = 4;	// view-parallel, rolled by entity roll
+
+const float kSpriteDegToRad = 3.14159265358979323846f / 180.0f;
+
+// Normalize in place; returns false (leaving v untouched) for a ~zero vector.
+bool SpriteNormalize( float v[3] )
+{
+	float len = sqrtf( v[0] * v[0] + v[1] * v[1] + v[2] * v[2] );
+
+	if( len < 1e-6f )
+		return false;
+
+	float inv = 1.0f / len;
+	v[0] *= inv; v[1] *= inv; v[2] *= inv;
+	return true;
+}
 
 struct EngSpriteFrame			// engine mspriteframe_t
 {
@@ -121,9 +144,13 @@ struct SpriteItem
 {
 	const EngSpriteFrame *frame;
 	float origin[3];
+	float right[3];			// billboard basis, per-type (M2c orientations)
+	float up[3];
 	float color[4];			// rgb = rendercolor (zero promoted to white), a = blend
 	float scale;
 	int rendermode;
+	int spriteType;			// effective angletype_t after the csz_sprite_orient gate
+	bool used8way;			// directional frame was selected from an angled group
 	float distSq;			// to view origin, for far-to-near sorting
 };
 
@@ -145,6 +172,7 @@ struct SpriteState
 	int uViewProj;
 	int uFog, uFogAdditive;		// M2a fog (no tint: sprites are emitters, plan 2.6)
 	int uFogParams, uCamPos;	// analytic base fog (fog M1 Step 2): height b/maxOpacity + ray origin
+	int uAlphaTest;			// M2c kRenderNormal hard cutout threshold (0 = off)
 	unsigned int vao, vbo, ibo;
 };
 
@@ -158,6 +186,18 @@ struct TestSpriteState
 
 SpriteState s_sprite;
 TestSpriteState s_test;
+
+// Per-feature observability cvars (default 1 = engine-parity behavior on;
+// 0 = fall back to the M1 view-parallel / alpha-blend / dir-0 / world-only path).
+cvar_t *s_cvOrient;	// csz_sprite_orient: non-parallel orientations
+cvar_t *s_cvCutout;	// csz_sprite_cutout: kRenderNormal hard alpha-test
+cvar_t *s_cv8way;	// csz_sprite_8way: directional frame selection
+cvar_t *s_cvGlow;	// csz_glow: glow distance scaling + brush-ent occlusion
+
+bool CvarOn( const cvar_t *c )
+{
+	return c != NULL && c->value != 0.0f;
+}
 
 SpriteItem s_items[kMaxItems];
 float s_verts[kMaxItems * kVertsPerQuad * kVertexFloats];
@@ -219,9 +259,15 @@ bool ValidateFrame( const model_t *mod, const EngSpriteFrame *frame )
 
 // Engine-parity frame selection (pinned engine cl_sprite.c R_GetSpriteFrame):
 // clamp index, single frames direct, group frames by time in the cumulative
-// interval table. Angled groups take direction 0 (M1, plan section 8).
-const EngSpriteFrame *SelectFrame( const model_t *mod, const EngSprite *spr, int frame, float time )
+// interval table. Angled groups select an 8-way directional frame from the
+// camera yaw relative to the sprite yaw (csz_sprite_8way); *angledOut latches
+// when a directional pick actually happened (observability).
+const EngSpriteFrame *SelectFrame( const model_t *mod, const EngSprite *spr, int frame, float time,
+	float viewYaw, float entYaw, bool use8way, bool *angledOut )
 {
+	if( angledOut != NULL )
+		*angledOut = false;
+
 	if( frame < 0 )
 		frame = 0;
 	else if( frame >= spr->numframes )
@@ -243,7 +289,24 @@ const EngSpriteFrame *SelectFrame( const model_t *mod, const EngSprite *spr, int
 		}
 
 		if( desc.type == kSpriteFrameAngled )
-			return group->frames[0];	// M1: no 8-way selection
+		{
+			if( !use8way )
+				return group->frames[0];	// directional selection disabled
+
+			// Engine angle->frame selection (Xash3D-FWGS R_GetSpriteFrame,
+			// studied clean-room): map the camera yaw relative to the sprite
+			// yaw onto 8 even buckets. Q_rint is round-half-up here; the &7
+			// wraps the (rint - 4) bias into [0,7] (two's-complement safe).
+			float rel = ( viewYaw - entYaw + 45.0f ) / 360.0f * 8.0f;
+			int af = ( (int)floorf( rel + 0.5f ) - 4 ) & 7;
+
+			if( af < 0 || af >= group->numframes )	// short groups (<8 dirs)
+				af = 0;
+			else if( angledOut != NULL )
+				*angledOut = true;
+
+			return group->frames[af];
+		}
 
 		float fullinterval = group->intervals[group->numframes - 1];
 
@@ -299,6 +362,7 @@ void EnsureGpuObjects()
 	s_sprite.uFogAdditive = UniformLoc( s_sprite.program, "u_fogAdditive" );
 	s_sprite.uFogParams = UniformLoc( s_sprite.program, "u_fogParams" );
 	s_sprite.uCamPos = UniformLoc( s_sprite.program, "u_camPos" );
+	s_sprite.uAlphaTest = UniformLoc( s_sprite.program, "u_alphaTest" );
 
 	UseProgram( s_sprite.program.program );
 	glUniform1i( UniformLoc( s_sprite.program, "u_texDiffuse" ), 0 );
@@ -357,6 +421,73 @@ float DistSqToView( const float p[3], const float viewOrigin[3] )
 	return dx * dx + dy * dy + dz * dz;
 }
 
+// Builds the billboard basis (right/up world axes) for one sprite per its
+// angletype_t, matching the Xash3D-FWGS R_GetSpriteAxes mechanism (studied
+// clean-room). View axes come from the view-matrix rows: vright = row0,
+// vup = row1, vforward = -row2 (GL eye looks down -Z). orientEnabled false
+// forces classic view-parallel for every type (csz_sprite_orient 0). Returns
+// false only for the degenerate near-vertical VP_PARALLEL_UPRIGHT view, where
+// the engine drops the sprite; the caller then culls it.
+bool ComputeSpriteAxes( const ViewSetup &view, int type, const float entAngles[3],
+	const float origin[3], bool orientEnabled, float right[3], float up[3] )
+{
+	const float *m = view.matView.m;
+	float vright[3]   = { m[0], m[4], m[8] };
+	float vup[3]      = { m[1], m[5], m[9] };
+	float vforward[3] = { -m[2], -m[6], -m[10] };
+
+	if( !orientEnabled )
+		type = kSprVPParallel;
+
+	switch( type )
+	{
+	case kSprVPParallelUpright:	// 0: Z-locked upright, faces the view plane
+		if( vforward[2] > 0.999848f || vforward[2] < -0.999848f )
+			return false;		// looking ~straight up/down: engine skips it
+		up[0] = 0.0f; up[1] = 0.0f; up[2] = 1.0f;
+		right[0] = vforward[1]; right[1] = -vforward[0]; right[2] = 0.0f;
+		SpriteNormalize( right );
+		break;
+
+	case kSprFacingUpright:		// 1: upright, faces the viewer's origin
+		up[0] = 0.0f; up[1] = 0.0f; up[2] = 1.0f;
+		right[0] = origin[1] - view.origin[1];
+		right[1] = -( origin[0] - view.origin[0] );
+		right[2] = 0.0f;
+		if( !SpriteNormalize( right ))	// sprite directly over/under the eye
+		{
+			right[0] = vright[0]; right[1] = vright[1]; right[2] = 0.0f;
+			SpriteNormalize( right );
+		}
+		break;
+
+	case kSprOriented:		// 3: fixed world orientation from entity angles
+		AngleVectors( entAngles, NULL, right, up );
+		break;
+
+	case kSprVPParallelOriented:	// 4: view-parallel, rolled by entity roll
+	{
+		float angle = entAngles[2] * kSpriteDegToRad;	// ROLL
+		float sr = sinf( angle ), cr = cosf( angle );
+
+		for( int i = 0; i < 3; i++ )
+		{
+			right[i] = vright[i] * cr + vup[i] * sr;
+			up[i]    = vright[i] * -sr + vup[i] * cr;
+		}
+		break;
+	}
+
+	case kSprVPParallel:		// 2: full view-plane billboard (default)
+	default:
+		right[0] = vright[0]; right[1] = vright[1]; right[2] = vright[2];
+		up[0] = vup[0]; up[1] = vup[1]; up[2] = vup[2];
+		break;
+	}
+
+	return true;
+}
+
 // Resolves one entity into a draw item; returns false when culled/invalid.
 bool BuildItem( const ViewSetup &view, cl_entity_s *ent, SpriteItem &out )
 {
@@ -366,7 +497,10 @@ bool BuildItem( const ViewSetup &view, cl_entity_s *ent, SpriteItem &out )
 	if( !ValidateSprite( mod, spr ))
 		return false;
 
-	const EngSpriteFrame *frame = SelectFrame( mod, spr, (int)ent->curstate.frame, ClientTime());
+	bool use8way = CvarOn( s_cv8way );
+	bool angled = false;
+	const EngSpriteFrame *frame = SelectFrame( mod, spr, (int)ent->curstate.frame, ClientTime(),
+		view.angles[1], ent->angles[1], use8way, &angled );
 
 	if( !ValidateFrame( mod, frame ))
 		return false;
@@ -412,6 +546,27 @@ bool BuildItem( const ViewSetup &view, cl_entity_s *ent, SpriteItem &out )
 	if( scale <= 0.0f )
 		scale = 1.0f;
 
+	// Distance-proportional glow SIZE scaling (engine parity): glow sprites keep
+	// a roughly constant on-screen size as the camera recedes, so the world-space
+	// quad grows with distance (~constant angular size). kGlowSizeCoeff = 1/200 is
+	// the classic GoldSrc reference factor (unit scale at ~200 units). M1 used
+	// curstate.scale alone, so distant glows shrank to specks. Applied BEFORE the
+	// frustum cull so a grown glow is never culled early (safe error = keep it);
+	// csz_glow off keeps the old curstate.scale-only behavior.
+	if( rendermode == kRenderGlow && CvarOn( s_cvGlow ))
+	{
+		const float kGlowSizeCoeff = 1.0f / 200.0f;
+		float gx = origin[0] - view.origin[0];
+		float gy = origin[1] - view.origin[1];
+		float gz = origin[2] - view.origin[2];
+		float distScale = sqrtf( gx * gx + gy * gy + gz * gz ) * kGlowSizeCoeff;
+
+		if( distScale < 1.0f )		// never shrink a near glow below its base size
+			distScale = 1.0f;
+
+		scale *= distScale;
+	}
+
 	// Frustum cull on the scaled model bbox (engine-parity; sprites never
 	// rotate, so translate + scale is exact).
 	float mins[3], maxs[3];
@@ -445,12 +600,20 @@ bool BuildItem( const ViewSetup &view, cl_entity_s *ent, SpriteItem &out )
 	// show through a wall.  The visual TEST pass probes these states.
 	if( rendermode == kRenderGlow )
 	{
+		bool glowFull = CvarOn( s_cvGlow );
 		float start[3] = { view.origin[0], view.origin[1], view.origin[2] };
 		float end[3]   = { origin[0], origin[1], origin[2] };
 		pmtrace_t tr;
 
+		// Occluder set: csz_glow on -> trace world AND brush entities (func_wall/
+		// func_door/...), ignoring studio models and glass-rendermode ents so a
+		// player or a window never flickers a lamp glow.  This matches the engine's
+		// R_GlowSightDistance trace (PM_STUDIO_IGNORE|PM_GLASS_IGNORE).  csz_glow
+		// off restores the M1 world-only trace (brush ents do NOT occlude).
+		int traceFlags = glowFull ? ( PM_STUDIO_IGNORE | PM_GLASS_IGNORE ) : PM_WORLD_ONLY;
+
 		gEngfuncs.pEventAPI->EV_SetTraceHull( 2 );	// 2 = point hull
-		gEngfuncs.pEventAPI->EV_PlayerTrace( start, end, PM_WORLD_ONLY, -1, &tr );
+		gEngfuncs.pEventAPI->EV_PlayerTrace( start, end, traceFlags, -1, &tr );
 
 		// Distance-proportional tolerance instead of a fixed fraction (HIGH-3):
 		// fraction is normalized to ray length, so a constant 0.98 is a wide
@@ -471,6 +634,16 @@ bool BuildItem( const ViewSetup &view, cl_entity_s *ent, SpriteItem &out )
 		if( behind > 0.0f && behind * behind * rayLenSq > kGlowOccludeSlop * kGlowOccludeSlop )
 			return false;
 	}
+
+	// Per-type billboard basis (M2c). orientEnabled folds the type down to
+	// view-parallel when csz_sprite_orient is 0.
+	bool orientOn = CvarOn( s_cvOrient );
+
+	if( !ComputeSpriteAxes( view, (int)spr->type, ent->angles, origin, orientOn, out.right, out.up ))
+		return false;	// degenerate near-vertical upright view: engine drops it
+
+	out.spriteType = orientOn ? (int)spr->type : kSprVPParallel;
+	out.used8way = angled;
 
 	out.frame = frame;
 	out.origin[0] = origin[0];
@@ -531,15 +704,21 @@ bool BuildTestItem( const ViewSetup &view, SpriteItem &out )
 	if( !ValidateSprite( s_test.model, spr ))
 		return false;
 
-	const EngSpriteFrame *frame = SelectFrame( s_test.model, spr, 0, ClientTime());
+	const EngSpriteFrame *frame = SelectFrame( s_test.model, spr, 0, ClientTime(), 0.0f, 0.0f, false, NULL );
 
 	if( !ValidateFrame( s_test.model, frame ))
 		return false;
 
 	// Forward axis from the view matrix (column-major rows; GL eye looks
-	// down -Z, so forward = -row2).
+	// down -Z, so forward = -row2). The test quad is a plain view-parallel
+	// billboard: right = row0, up = row1.
 	const float *m = view.matView.m;
 	float fwd[3] = { -m[2], -m[6], -m[10] };
+
+	out.right[0] = m[0]; out.right[1] = m[4]; out.right[2] = m[8];
+	out.up[0] = m[1]; out.up[1] = m[5]; out.up[2] = m[9];
+	out.spriteType = kSprVPParallel;
+	out.used8way = false;
 
 	out.frame = frame;
 	out.origin[0] = view.origin[0] + fwd[0] * 64.0f;
@@ -591,12 +770,11 @@ void DrawSprites( const ViewSetup &view, cl_entity_s *const *ents, int count )
 
 	EnsureGpuObjects();
 
-	// Billboard axes from the view matrix rows (plan section 8: parallel
-	// orientation only; column-major element (row, col) = m[col*4+row]).
-	const float *m = view.matView.m;
-	float right[3] = { m[0], m[4], m[8] };
-	float up[3] = { m[1], m[5], m[9] };
-
+	// Per-item billboard axes (M2c): each item carries its own right/up basis,
+	// built in BuildItem per the sprite's angletype_t (view-parallel, upright,
+	// facing-upright, oriented, parallel-oriented). The single shared view-row
+	// basis of M1 is gone -- it could only express VP_PARALLEL.
+	//
 	// Engine-parity quad corners (pinned ref gl_sprite.c R_DrawSpriteQuad):
 	// (left,down) uv(0,1) -> (left,up) uv(0,0) -> (right,up) uv(1,0) ->
 	// (right,down) uv(1,1); left/down are negative extents in the frame data.
@@ -617,9 +795,9 @@ void DrawSprites( const ViewSetup &view, cl_entity_s *const *ents, int count )
 			float r = corner[c][0] * it.scale;
 			float u = corner[c][1] * it.scale;
 
-			v[0] = it.origin[0] + right[0] * r + up[0] * u;
-			v[1] = it.origin[1] + right[1] * r + up[1] * u;
-			v[2] = it.origin[2] + right[2] * r + up[2] * u;
+			v[0] = it.origin[0] + it.right[0] * r + it.up[0] * u;
+			v[1] = it.origin[1] + it.right[1] * r + it.up[1] * u;
+			v[2] = it.origin[2] + it.right[2] * r + it.up[2] * u;
 			v[3] = uv[c][0];
 			v[4] = uv[c][1];
 			v[5] = it.color[0];
@@ -650,14 +828,29 @@ void DrawSprites( const ViewSetup &view, cl_entity_s *const *ents, int count )
 		s_verts, GL_STREAM_DRAW );
 	glBindBuffer( GL_ARRAY_BUFFER, 0 );	// attribute bindings live in the VAO
 
-	SetCull( false );	// billboards always face the camera; no winding games
+	// SPR_ORIENTED quads can present either face to the camera, so culling stays
+	// off for every sprite (the billboard/oriented winding is not guaranteed).
+	SetCull( false );
 
+	bool cutoutOn = CvarOn( s_cvCutout );
 	int curFogAdditive = -1;	// force the first item to set it
+	float curAlphaTest = -1.0f;	// force the first item to set it
+
+	// Per-frame feature tallies ([CSZ:sprite] observability).
+	int nOrient = 0, nCutout = 0, n8way = 0, nGlow = 0;
 
 	for( int i = 0; i < numItems; i++ )
 	{
 		const SpriteItem &it = s_items[i];
 		int fogAdditive = 0;
+		float alphaTest = 0.0f;
+
+		if( it.spriteType != kSprVPParallel )
+			nOrient++;
+		if( it.used8way )
+			n8way++;
+		if( it.rendermode == kRenderGlow )
+			nGlow++;
 
 		// Blend state by rendermode (engine-parity, pinned gl_sprite.c
 		// R_DrawSpriteModel:404; plan section 8 step 1). Depth TEST stays on
@@ -687,12 +880,24 @@ void DrawSprites( const ViewSetup &view, cl_entity_s *const *ents, int count )
 			break;
 		case kRenderNormal:
 		default:
-			// M1 approximation: the GL3 path has no fixed-function alpha
-			// test, so cutout-format sprites in normal mode go through
-			// alpha blend (alpha = 1) instead of opaque + alphatest.
-			SetBlend( kBlendAlpha );
-			SetDepthWrite( true );
-			SetDepthTest( true );
+			if( cutoutOn )
+			{
+				// Engine-parity cutout: opaque draw + hard alpha-test discard
+				// in the FS (GL3 core has no fixed-function alpha test), giving
+				// crisp .spr edges with no soft halo and no black box.
+				SetBlend( kBlendNone );
+				SetDepthWrite( true );
+				SetDepthTest( true );
+				alphaTest = 0.5f;
+				nCutout++;
+			}
+			else
+			{
+				// M1 fallback: no alpha test -> soft alpha blend (alpha = 1).
+				SetBlend( kBlendAlpha );
+				SetDepthWrite( true );
+				SetDepthTest( true );
+			}
 			break;
 		}
 
@@ -700,6 +905,12 @@ void DrawSprites( const ViewSetup &view, cl_entity_s *const *ents, int count )
 		{
 			glUniform1i( s_sprite.uFogAdditive, fogAdditive );
 			curFogAdditive = fogAdditive;
+		}
+
+		if( alphaTest != curAlphaTest )
+		{
+			glUniform1f( s_sprite.uAlphaTest, alphaTest );
+			curAlphaTest = alphaTest;
 		}
 
 		BindTextureSlot( 0, it.frame->gl_texturenum );
@@ -721,7 +932,8 @@ void DrawSprites( const ViewSetup &view, cl_entity_s *const *ents, int count )
 		if( now >= s_nextLog )
 		{
 			s_nextLog = now + 1.0f;
-			CSZ_LogDev( "sprite", "drawn %d sprite quads", numItems );
+			CSZ_LogDev( "sprite", "[CSZ:sprite] drawn=%d orient=%d cutout=%d 8way=%d glow=%d",
+				numItems, nOrient, nCutout, n8way, nGlow );
 		}
 	}
 }
@@ -729,6 +941,12 @@ void DrawSprites( const ViewSetup &view, cl_entity_s *const *ents, int count )
 void RegisterSpriteCommands()
 {
 	gEngfuncs.pfnAddCommand( "csz_testsprite", TestSpriteCommand );
+
+	// Per-feature cvars (M2c), default 1 = engine-parity behavior; 0 = M1 fallback.
+	s_cvOrient = gEngfuncs.pfnRegisterVariable( "csz_sprite_orient", "1", FCVAR_CLIENTDLL );
+	s_cvCutout = gEngfuncs.pfnRegisterVariable( "csz_sprite_cutout", "1", FCVAR_CLIENTDLL );
+	s_cv8way   = gEngfuncs.pfnRegisterVariable( "csz_sprite_8way",   "1", FCVAR_CLIENTDLL );
+	s_cvGlow   = gEngfuncs.pfnRegisterVariable( "csz_glow",          "1", FCVAR_CLIENTDLL );
 }
 
 }

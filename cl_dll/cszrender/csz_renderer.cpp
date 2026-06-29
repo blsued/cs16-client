@@ -45,6 +45,7 @@
 #include "geom/csz_sky.h"
 #include "geom/csz_sky_compose.h"
 #include "geom/csz_sprite.h"
+#include "geom/csz_polyblend.h"	// INTEGRATION (M2c): screen-tint / polyblend pass
 #include "geom/csz_studio.h"
 #include "geom/csz_studio_texture.h"
 #include "geom/csz_viewmodel.h"
@@ -278,7 +279,8 @@ void Renderer::OnHudInit()
 	if( m_cvarEnable == NULL )
 		m_cvarEnable = gEngfuncs.pfnRegisterVariable( "csz_renderer", "1", FCVAR_CLIENTDLL );
 
-	RegisterSpriteCommands();	// csz_testsprite (T5)
+	RegisterSpriteCommands();	// csz_testsprite (T5) + M2c csz_sprite_orient/cutout/8way + csz_glow
+	RegisterPolyblendCvars();	// INTEGRATION (M2c): csz_polyblend (default 1) screen-tint pass
 	RegisterLightingCommands();	// csz_testspot + csz_testlight (T6)
 	LightConeRegisterCvars();	// L6a: csz_flashlight_tp (default 1 = world-space visible beam) + _intensity
 	DustRegisterCvars();		// L7: csz_dust (default 1 = gated airborne dust) + _count/_intensity/_size
@@ -626,6 +628,14 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	SkyComposeResolve( rvp, clearColor );
 	if( glCheck )
 		SkyGlCheck( "compose resolve (HDR -> backbuffer)" );
+
+	// INTEGRATION (M2c): screen-tint / polyblend. AFTER the HDR resolve so it
+	// tints the final tonemapped LDR image on FBO 0 (the same display space the
+	// engine's cl.cshifts live in), and BEFORE LeaveTakeover. A no-op when
+	// csz_polyblend is 0 or the combined blend is transparent (the common case).
+	DrawPolyblend( view );						// slot 15.5: content + damage screen tint
+	if( glCheck )
+		SkyGlCheck( "polyblend (screen tint)" );
 
 	LeaveTakeover();						// slot 16
 
