@@ -69,6 +69,13 @@ float ClientTime();                     // gEngfuncs.GetClientTime()
 // is a hud.h global and csz_engine.cpp is the only cszrender TU allowed to touch it.
 bool PlayerIsDead( int idx );
 
+// Local player's HUD health (gHUD.m_Health.m_iHealth, maintained by cl_dll/health.cpp
+// from the Health usermsg). The composition root threads this into ViewSetup.localHealth
+// so the polyblend damage-red shift has a RELIABLE local-health source: the server does
+// NOT populate curstate.health for the local player. Lives here because m_Health is a
+// hud.h global and csz_engine.cpp is the only cszrender TU allowed to touch it.
+int LocalPlayerHealth();
+
 // Active round timing: round start=sunset, end=dawn. false when no round is
 // active (idle / between rounds) -> sky falls back to a free-running cycle.
 bool RoundTiming( float &outDuration, float &outRemaining );

@@ -50,6 +50,11 @@ struct ViewSetup
 	const unsigned char *pvs;      // fat PVS bytes; NULL = everything visible (shadow passes)
 	AmbienceParams ambience;       // BuildViewFromPass sets AmbienceNeutral();
 	                               // composition root overwrites from g_fog each frame
+	int localHealth;               // local player's HUD health (gHUD.m_Health.m_iHealth);
+	                               // FinalizeView defaults 0, composition root sets it on the
+	                               // main view. Threaded here so geom (DrawPolyblend damage
+	                               // shift) reads a reliable health WITHOUT a HUD include --
+	                               // curstate.health is NOT server-populated for the local player.
 };
 void BuildViewFromPass( const struct ref_viewpass_s *rvp, ViewSetup &out );  // main view: zNear=4, zFar=16384
 void BuildSpotLightView( const float origin[3], const float anglesDeg[3],

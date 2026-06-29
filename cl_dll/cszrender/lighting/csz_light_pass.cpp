@@ -478,6 +478,27 @@ void FlashlightTestCommand()
 		count, FlashlightCount() );
 }
 
+// Sphere-vs-frustum cull for omni point lights. Returns true when the light's
+// bounding sphere (origin, radius) lies FULLY behind any frustum plane, i.e. the
+// whole sphere is outside the view. Mirrors the spot path's ConeBounds->CullBox
+// cull, but an omni needs no AABB: it is outside iff it is farther than its radius
+// behind one plane (planes face inward, dist signed). Conservative -- a sphere that
+// straddles a plane is kept, so a visible point light is never wrongly culled.
+bool PointLightOutsideFrustum( const Frustum &fr, const float origin[3], float radius )
+{
+	for( int p = 0; p < fr.numPlanes; p++ )
+	{
+		const Plane &pl = fr.planes[p];
+		float d = pl.normal[0] * origin[0] + pl.normal[1] * origin[1]
+			+ pl.normal[2] * origin[2] + pl.dist;
+
+		if( d < -radius )
+			return true;
+	}
+
+	return false;
+}
+
 }  // anonymous namespace
 
 // L6c: feed the decoupled per-flashlight state table (csz_flashlight_state.h) from
@@ -718,6 +739,15 @@ void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, 
 		// budgeter tier (it ranks spots only); the mirror already capped to nearest-N.
 		if( light->desc.type == kLightPoint )
 		{
+			// Frustum cull (MAJOR perf): an omni point light draws a FULL world+brush+
+			// studio additive pass. The nearest-N mirror cap bounds the count but not the
+			// position, so a behind-camera muzzle flash still pays three full-scene passes
+			// for zero on-screen contribution AND can evict a visible light from the cap.
+			// Skip a point light whose bounding sphere is fully outside the view frustum.
+			// The nearest-N cap stays as a backstop for many on-screen lights.
+			if( PointLightOutsideFrustum( mainView.frustum, light->desc.origin, light->desc.radius ))
+				continue;
+
 			SpotLightParams pp;
 
 			g_lights.BuildPointParams( *light, pp );
