@@ -31,6 +31,7 @@ set(CSZRENDER_SRC
 	geom/csz_beam.cpp        # [m2c-efxb] C-BEAM
 	geom/csz_particle.cpp    # [m2c-efxb] C-PAR
 	geom/csz_efx_shim.cpp    # [m2c-efxb] C-SHIM
+	geom/csz_polyblend.cpp   # [m2c-sprites] C-POLYBLEND
 	geom/csz_studio.cpp
 	geom/csz_studio_bones.cpp
 	geom/csz_studio_mesh.cpp

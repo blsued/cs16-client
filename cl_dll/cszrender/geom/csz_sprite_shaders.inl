@@ -72,6 +72,7 @@ uniform vec4 u_fog;               // rgb = fog color (linear), w = extinction a 
 uniform vec4 u_fogParams;         // x = height falloff b, y = sun glow (unused for emitters), z = maxOpacity
 uniform vec3 u_camPos;            // camera world position (ray origin)
 uniform int u_fogAdditive;        // 1 on additive blend modes (CPU-selected)
+uniform float u_alphaTest;        // >0 -> hard cutout discard at this coverage (kRenderNormal .spr); <=0 off
 out vec4 fragColor;
 // Analytic base-fog transmittance (fog M1 spec 4.3) -- same closed form as the
 // world/studio base passes (height+distance, |b|<eps and |rd.z|<eps guards).
@@ -95,6 +96,11 @@ float cszFogT( vec3 worldPos, vec3 camPos, float a, float b, float maxOpacity )
 void main()
 {
 	vec4 col = texture( u_texDiffuse, v_uv ) * v_color;
+	// Hard alpha-test cutout for kRenderNormal .spr (GL3 core has no fixed-function
+	// alpha test): discard sub-threshold coverage so edges are crisp -- no soft halo,
+	// no black box. v_color.a is 1 for normal mode, so col.a is the texture coverage.
+	if( u_alphaTest > 0.0 && col.a < u_alphaTest )
+		discard;
 	float T = cszFogT( v_worldPos, u_camPos, u_fog.w, u_fogParams.x, u_fogParams.z );
 	if( u_fogAdditive != 0 )
 		col.rgb *= T;                                      // fade to black, never add fog color
