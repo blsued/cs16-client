@@ -133,6 +133,35 @@ void EndPass( PassTimer t )
 		s_passAccumMs[t] += ( gRenderAPI.pfnTime() - s_passBeginTime[t] ) * 1000.0;
 }
 
+// [INTEGRATION SPEC: m2c-efxb / C-TRI] RAII guard for the gEngfuncs.pTriAPI swap.
+// The two TriAPI dispatches (slots 12.7 / 14.7) temporarily point the engine's
+// world-TriAPI pointer at our self-draw table while the mod's HUD_Draw*Triangles
+// run, then restore it. Doing save->swap->BeginDispatch in the ctor and
+// restore->EndDispatch in the dtor guarantees that a non-local exit out of
+// HUD_Draw*Triangles (or any early return later added inside the scope) can never
+// strand gEngfuncs.pTriAPI on the CSZ table -- the engine would otherwise keep
+// self-drawing through our pointer on the following frame.
+struct TriApiSwapScope
+{
+	triangleapi_t *m_saved;
+
+	explicit TriApiSwapScope( const ViewSetup &view )
+	{
+		m_saved = gEngfuncs.pTriAPI;
+		CszTriApiBeginDispatch( view, m_saved );
+		gEngfuncs.pTriAPI = CszTriApiTable();
+	}
+
+	~TriApiSwapScope()
+	{
+		gEngfuncs.pTriAPI = m_saved;
+		CszTriApiEndDispatch();
+	}
+
+	TriApiSwapScope( const TriApiSwapScope & ) = delete;
+	TriApiSwapScope &operator=( const TriApiSwapScope & ) = delete;
+};
+
 // ---------------------------------------------------------------------------
 // Standard-load fps sampling (plan amendment 2 / spec 8.6): aggregates the
 // per-frame path into one Dev-level line per second (throttling rule R8).
@@ -373,27 +402,49 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	// slots 1/2/3/4/8/10/16; the remaining slots are marked below and are
 	// filled by T2-T7 (placeholder comments, not TODOs: each lands inside
 	// its own task).
-	// [INTEGRATION SPEC: m2c-efxb] C-SHIM reconcile. Tied to the TAKEOVER MODE
-	// (csz_renderer != 0), NOT to a per-pass RF_DRAW_WORLD check: the swap must
-	// stay installed across consecutive taken-over frames so inter-frame emit
-	// events are captured. Idempotent -> stable across this frame's sub-passes,
-	// no install/restore churn. csz_efx_shim 0 forces the engine real table.
+	// [INTEGRATION SPEC: m2c-efxb] C-SHIM reconcile. The pEfxAPI swap is committed
+	// only AFTER every early-return gate below passes -- i.e. once we have committed
+	// to taking over THIS frame and our slot-14.5 draw pass is guaranteed to run.
+	// Any bail (dev escape hatch, non-world pass, no world/handshake, GL not ready)
+	// UNINSTALLS the shim so the engine renders that frame with its real efx table:
+	// leaving the shim installed on a frame we do NOT draw would silently swallow the
+	// engine's efx emits (captured into our pools, never rendered). Across CONSECUTIVE
+	// taken-over frames every frame reaches the commit below, so the install persists
+	// (idempotent) and inter-frame emits (weapon prediction / packet processing between
+	// RenderFrame calls) are still captured. csz_efx_shim 0 forces the engine real table.
 	bool takeoverMode = ( m_cvarEnable == NULL || m_cvarEnable->value != 0.0f );	// slot 1: dev escape hatch
-	EfxShimSetActive( takeoverMode );
 	if( !takeoverMode )
+	{
+		EfxShimSetActive( false );				// engine path (full A/B revert): restore the real efx table
 		return 0;
+	}
 
 	// slot 2: menu model preview (flags=0) / cubemap / overview passes stay
 	// on the engine path (UNKNOWN-3 strategy: explicit return 0).
 	if( rvp == NULL || !( rvp->flags & RF_DRAW_WORLD ))
+	{
+		EfxShimSetActive( false );				// non-world pass: do not strand the shim installed
 		return 0;
+	}
 
 	model_t *world = WorldModel();					// slot 3 (modelindex 1 is stable for the frame)
 	if( world == NULL || !m_handshakeOk )
+	{
+		EfxShimSetActive( false );				// not ready to take over: engine draws its own efx
 		return 0;
+	}
 
 	if( !EnsureGlReady() )						// slot 4 (FATAL inside on hard failure)
+	{
+		EfxShimSetActive( false );				// GL not ready: engine draws its own efx
 		return 0;
+	}
+
+	// Committed to taking over this frame: install the efx shim now (idempotent;
+	// stays installed across consecutive taken-over frames). Every exit path above
+	// has uninstalled it, so the engine table is never left swapped on a frame our
+	// slot-14.5 draw pass does not run.
+	EfxShimSetActive( true );
 
 	ViewSetup view;							// slot 5: view + fat PVS
 	BuildViewFromPass( rvp, view );
@@ -637,12 +688,10 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	if( CszTriApiEnabled())
 	{
 		BeginPass( kTmTriapi );
-		triangleapi_t *savedTri = gEngfuncs.pTriAPI;
-		CszTriApiBeginDispatch( view, savedTri );
-		gEngfuncs.pTriAPI = CszTriApiTable();
-		HUD_DrawNormalTriangles();
-		gEngfuncs.pTriAPI = savedTri;
-		CszTriApiEndDispatch();
+		{
+			TriApiSwapScope swap( view );	// ctor: save->swap->BeginDispatch; dtor: restore->EndDispatch
+			HUD_DrawNormalTriangles();
+		}
 		EndPass( kTmTriapi );
 	}
 
@@ -703,6 +752,14 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	// advance their sim on real dt ONCE here -- this is the only (main-pass)
 	// caller, so there is no double-step and no engine frametime is read.
 	// kTmEfx is the efx instrumentation bucket (renamed from kTmDelegate at integration).
+	// TODO(multi-viewpass): the sims (beam/particle/dust + particleman/environment via
+	// the TriAPI dispatch at slot 14.7) advance once per RF_DRAW_WORLD pass. Today there
+	// is exactly ONE such pass per host frame, so they step once per frame as intended.
+	// Beam/particle are additionally self-guarded (their ClientTime() delta is ~0 on a
+	// same-frame re-entry); particleman/dust are NOT. If a future feature renders a
+	// second RF_DRAW_WORLD viewpass in the same host frame (mirror/monitor/split view),
+	// stamp the host frame at ClearScene/begin-frame and make these draw-only (skip the
+	// advance) on repeat passes so the sims do not double-step within one host frame.
 	BeginPass( kTmEfx );
 	BeamDraw( view );
 	ParticleDraw( view );
@@ -715,12 +772,10 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	if( CszTriApiEnabled())
 	{
 		BeginPass( kTmTriapi );
-		triangleapi_t *savedTri = gEngfuncs.pTriAPI;
-		CszTriApiBeginDispatch( view, savedTri );
-		gEngfuncs.pTriAPI = CszTriApiTable();
-		HUD_DrawTransparentTriangles();
-		gEngfuncs.pTriAPI = savedTri;
-		CszTriApiEndDispatch();
+		{
+			TriApiSwapScope swap( view );	// ctor: save->swap->BeginDispatch; dtor: restore->EndDispatch
+			HUD_DrawTransparentTriangles();
+		}
 		EndPass( kTmTriapi );
 	}
 
