@@ -45,6 +45,9 @@
 #include "geom/csz_sky.h"
 #include "geom/csz_sky_compose.h"
 #include "geom/csz_sprite.h"
+#include "geom/csz_beam.h"        // [INTEGRATION SPEC: m2c-efxb] C-BEAM
+#include "geom/csz_particle.h"    // [INTEGRATION SPEC: m2c-efxb] C-PAR
+#include "geom/csz_efx_shim.h"    // [INTEGRATION SPEC: m2c-efxb] C-SHIM
 #include "geom/csz_studio.h"
 #include "geom/csz_studio_texture.h"
 #include "geom/csz_viewmodel.h"
@@ -282,6 +285,9 @@ void Renderer::OnHudInit()
 	RegisterLightingCommands();	// csz_testspot + csz_testlight (T6)
 	LightConeRegisterCvars();	// L6a: csz_flashlight_tp (default 1 = world-space visible beam) + _intensity
 	DustRegisterCvars();		// L7: csz_dust (default 1 = gated airborne dust) + _count/_intensity/_size
+	BeamRegisterCvars();		// [INTEGRATION SPEC: m2c-efxb] C-BEAM: csz_beam (default 1)
+	ParticleRegisterCvars();	// [INTEGRATION SPEC: m2c-efxb] C-PAR: csz_particle (default 1)
+	EfxShimRegisterCvars();		// [INTEGRATION SPEC: m2c-efxb] C-SHIM: csz_efx_shim (default 1; 0 = engine real table)
 	RegisterStudioTextureCvars();	// csz_dev_armskin (spec 4.3.1 layer 1 dev probe)
 	StudioRegisterCvars();		// S4 §7: csz_rim + csz_rim_power (S4-fix: init parity, was lazy in draw prologue)
 	RegisterViewmodelDevCvars();	// csz_dev_viewmodel (dev stand-in model)
@@ -321,6 +327,8 @@ void Renderer::Shutdown()
 		g_spotShadow.Destroy();
 		LightConeShutdown();	// L6a: world beam program + VAO (generation-safe)
 		DustShutdown();		// L7: dust program + stream VBO/VAO (generation-safe)
+		BeamShutdown();		// [INTEGRATION SPEC: m2c-efxb] C-BEAM program + VBO/VAO (generation-safe)
+		ParticleShutdown();	// [INTEGRATION SPEC: m2c-efxb] C-PAR program + VBO/VAO (generation-safe)
 		FogVolumeShutdown();	// fog M1 Step 3: half-res FBO + march/upsample programs (generation-safe)
 		FogGodraysShutdown();	// fog M1 Step 4: half-res occl/scatter FBOs + 3 programs (generation-safe)
 		AtmosShutdown();	// atmosphere LUTs + programs + GPU timer (C2, generation-safe)
@@ -329,6 +337,10 @@ void Renderer::Shutdown()
 			SkyComposeShutdown();	// HDR FBO + resolve program + GPU timer (C1, generation-safe)
 		m_glReady = false;
 	}
+
+	// [INTEGRATION SPEC: m2c-efxb] C-SHIM clean uninstall (pointer restore only,
+	// no GL) -- run unconditionally so the engine efx table is never left swapped.
+	EfxShimShutdown();
 
 	s_worldModel = NULL;
 	CSZ_LogDev( "core", "shutdown" );
@@ -342,7 +354,14 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	// slots 1/2/3/4/8/10/16; the remaining slots are marked below and are
 	// filled by T2-T7 (placeholder comments, not TODOs: each lands inside
 	// its own task).
-	if( m_cvarEnable != NULL && m_cvarEnable->value == 0.0f )	// slot 1: dev escape hatch
+	// [INTEGRATION SPEC: m2c-efxb] C-SHIM reconcile. Tied to the TAKEOVER MODE
+	// (csz_renderer != 0), NOT to a per-pass RF_DRAW_WORLD check: the swap must
+	// stay installed across consecutive taken-over frames so inter-frame emit
+	// events are captured. Idempotent -> stable across this frame's sub-passes,
+	// no install/restore churn. csz_efx_shim 0 forces the engine real table.
+	bool takeoverMode = ( m_cvarEnable == NULL || m_cvarEnable->value != 0.0f );	// slot 1: dev escape hatch
+	EfxShimSetActive( takeoverMode );
+	if( !takeoverMode )
 		return 0;
 
 	// slot 2: menu model preview (flags=0) / cubemap / overview passes stay
@@ -607,6 +626,17 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	g_world.DrawBrushTransparent( view, m_frame.brush, m_frame.numBrush );	// slot 14: transparent brush (trans domain, E1)
 	EndPass( kTmTrans );
 
+	// slot 14.5 [INTEGRATION SPEC: m2c-efxb]: self-drawn beams + particles/tracers
+	// (transparent domain, additive, depth-TEST on / WRITE off, fog-darkened),
+	// AFTER water/sprites/brush-trans and BEFORE the viewmodel (design §4). Both
+	// advance their sim on real dt ONCE here -- this is the only (main-pass)
+	// caller, so there is no double-step and no engine frametime is read.
+	// kTmDelegate is the design's kTmEfx slot (rename OWED to the integrator).
+	BeginPass( kTmDelegate );
+	BeamDraw( view );
+	ParticleDraw( view );
+	EndPass( kTmDelegate );
+
 	BeginPass( kTmViewmodel );
 	DrawViewModelPass( view );					// slot 15: viewmodel (last; own depth range)
 	EndPass( kTmViewmodel );
@@ -668,6 +698,8 @@ void Renderer::NewMap()
 	ResetFatPvs();
 	g_fog.Reset();		// never carry one map's ambience into the next (A1)
 	g_world.Destroy();
+	BeamNewMap();		// [INTEGRATION SPEC: m2c-efxb] drop live beams (no cross-map carry)
+	ParticleNewMap();	// [INTEGRATION SPEC: m2c-efxb] drop live particles/tracers
 	s_worldModel = NULL;
 
 	CSZ_LogDev( "core", "R_NewMap: world invalidated" );

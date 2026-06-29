@@ -26,6 +26,9 @@ set(CSZRENDER_SRC
 	geom/csz_stars.cpp
 	geom/csz_panorama.cpp
 	geom/csz_sprite.cpp
+	geom/csz_beam.cpp        # [INTEGRATION SPEC: m2c-efxb worker] C-BEAM (new, worker-owned)
+	geom/csz_particle.cpp    # [INTEGRATION SPEC: m2c-efxb worker] C-PAR (new, worker-owned)
+	geom/csz_efx_shim.cpp    # [INTEGRATION SPEC: m2c-efxb worker] C-SHIM (new, worker-owned)
 	geom/csz_studio.cpp
 	geom/csz_studio_bones.cpp
 	geom/csz_studio_mesh.cpp
