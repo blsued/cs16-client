@@ -113,7 +113,7 @@ void main()
 	if( u_procedural != 0 )
 	{
 		float r = length( v_uv - vec2( 0.5 )) * 2.0;	// 0 at center .. ~1 at edge midpoints
-		float cov = 1.0 - smoothstep( 0.22, 0.72, r );	// soft round mask, feathered edge
+		float cov = 1.0 - smoothstep( 0.10, 0.40, r );	// small bullet-hole scorch: tight core, feathered edge
 		if( cov <= 0.0 )
 			discard;
 		if( u_modulate != 0 )
