@@ -54,7 +54,8 @@ namespace csz
 namespace
 {
 
-cvar_t *s_cvPolyblend;	// csz_polyblend (default 1)
+cvar_t *s_cvPolyblend;		// csz_polyblend (default 1): master + content tint
+cvar_t *s_cvPolyblendDamage;	// csz_polyblend_damage (default 0): damage-red flash only
 
 struct PolyblendState
 {
@@ -222,7 +223,17 @@ void DrawPolyblend( const ViewSetup &view )
 	if( s_cvPolyblend != NULL && s_cvPolyblend->value == 0.0f )
 		return;
 
-	CShift shifts[2] = { ContentShift( view ), DamageShift( view ) };
+	// Content tint (water/lava/slime) is always part of the master csz_polyblend.
+	// The damage-red flash is split out under csz_polyblend_damage (default 0 = off):
+	// tick DamageShift every frame so its health tracker stays consistent across
+	// toggles, but contribute its red ONLY when the damage cvar is enabled.
+	CShift content = ContentShift( view );
+	CShift damage  = DamageShift( view );
+
+	if( s_cvPolyblendDamage == NULL || s_cvPolyblendDamage->value == 0.0f )
+		damage.percent = 0.0f;
+
+	CShift shifts[2] = { content, damage };
 	float blend[4];
 	int active = CalcBlend( shifts, 2, blend );
 
@@ -269,6 +280,7 @@ void DrawPolyblend( const ViewSetup &view )
 void RegisterPolyblendCvars()
 {
 	s_cvPolyblend = gEngfuncs.pfnRegisterVariable( "csz_polyblend", "1", FCVAR_CLIENTDLL );
+	s_cvPolyblendDamage = gEngfuncs.pfnRegisterVariable( "csz_polyblend_damage", "0", FCVAR_CLIENTDLL );
 }
 
 }
