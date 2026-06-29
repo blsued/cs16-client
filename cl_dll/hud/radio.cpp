@@ -88,53 +88,6 @@ int CHudRadio::MsgFunc_ReloadSound( const char *pszName, int iSize, void *pbuf )
 }
 
 
-static void VoiceIconCallback(struct tempent_s *ent, float frametime, float currenttime)
-{
-	int entIndex = ent->clientIndex;
-	if( !g_PlayerExtraInfo[entIndex].talking )
-	{
-		g_PlayerExtraInfo[entIndex].talking = false;
-		ent->die = 0.0f;
-	}
-}
-
-void CHudRadio::Voice(int entindex, bool bTalking)
-{
-	extra_player_info_t *pplayer;
-	TEMPENTITY *temp;
-	int spr;
-
-	if( entindex < 0 || entindex > MAX_PLAYERS - 1) // bomb can't talk!
-		return;
-
-	pplayer = g_PlayerExtraInfo + entindex;
-
-	if( bTalking == pplayer->talking )
-		return; // user is talking already
-
-	if( !bTalking && pplayer->talking )
-	{
-		pplayer->talking = false;
-		return; // stop talking
-	}
-
-	spr = gEngfuncs.pEventAPI->EV_FindModelIndex( "sprites/voiceicon.spr" );
-	if( !spr ) return;
-
-	temp = gEngfuncs.pEfxAPI->R_DefaultSprite( vec3_origin, spr, 0 );
-	if( !temp ) return;
-
-	pplayer->talking = true; // sprite is created
-
-	temp->flags = FTENT_SPRANIMATELOOP | FTENT_CLIENTCUSTOM | FTENT_PLYRATTACHMENT;
-	temp->tentOffset.z = 40;
-	temp->clientIndex = entindex;
-	temp->callback = VoiceIconCallback;
-	temp->entity.curstate.scale = 0.60f;
-	temp->entity.curstate.rendermode = kRenderTransAdd;
-	temp->die = gHUD.m_flTime + 60.0f; // 60 seconds must be enough?
-}
-
 int CHudRadio::MsgFunc_BotVoice( const char *pszName, int iSize, void *buf )
 {
 	BufferReader reader( pszName, buf, iSize );
@@ -143,8 +96,6 @@ int CHudRadio::MsgFunc_BotVoice( const char *pszName, int iSize, void *buf )
 	int entIndex = reader.ReadByte();
 
 	HUD_VoiceStatus( entIndex, enable );
-
-	// Voice( entIndex, enable );
 
 	return 1;
 }

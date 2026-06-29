@@ -30,7 +30,6 @@ version.
 
 #include "hud.h"
 #include "cl_util.h"
-#include <string.h>
 #include "draw_util.h"
 
 int CHudFPS::Init( void )
@@ -42,7 +41,8 @@ int CHudFPS::Init( void )
 
 	// csz_showfps (NOT cl_showfps, to avoid colliding with any engine cvar):
 	// 1 = show the counter (default), 0 = hide. Archived so it persists.
-	CVAR_CREATE( "csz_showfps", "1", FCVAR_ARCHIVE );
+	// Cache the handle and read ->value per frame (mirrors MOTD.cpp/nvg.cpp).
+	m_pCvarShowFps = CVAR_CREATE( "csz_showfps", "1", FCVAR_ARCHIVE );
 
 	return 1;
 }
@@ -58,7 +58,7 @@ int CHudFPS::Draw( float fTime )
 	if( gHUD.m_iHideHUDDisplay & ( HIDEHUD_ALL ) )
 		return 1;
 
-	if( CVAR_GET_FLOAT( "csz_showfps" ) == 0 )
+	if( m_pCvarShowFps && m_pCvarShowFps->value == 0 )
 		return 1;
 
 	// Instantaneous fps from the per-frame delta (same source CHudTimer reads),

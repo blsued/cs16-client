@@ -104,7 +104,6 @@ int CHudScoreboard :: Init( void )
 
 	InitHUDData();
 
-	cl_showpacketloss = CVAR_CREATE( "cl_showpacketloss", "0", FCVAR_ARCHIVE );
 	cl_showplayerversion = CVAR_CREATE( "cl_showplayerversion", "0", 0 );
 	cl_show_scoreboard_on_death = CVAR_CREATE( "cl_show_scoreboard_on_death", "0", FCVAR_ARCHIVE );
 
@@ -191,12 +190,6 @@ int CHudScoreboard :: DrawScoreboard( float fTime )
 {
 	GetAllPlayersInfo();
 	char ServerName[90];
-
-//	Packetloss removed on Kelly 'shipping nazi' Bailey's orders
-//	if ( cl_showpacketloss && cl_showpacketloss->value && ( ScreenWidth >= 400 ) )
-//	{
-//		can_show_packetloss = 1;
-//	}
 
 	// just sort the list on the fly
 	// list is sorted first by frags, then by deaths

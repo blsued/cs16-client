@@ -410,7 +410,6 @@ Called when a player starts or stops talking.
 
 void DLLEXPORT HUD_VoiceStatus(int entindex, qboolean bTalking)
 {
-	// gHUD.m_Radio.Voice( entindex, bTalking );
 	if ( entindex > 0 && entindex <= gEngfuncs.GetMaxClients() )
 	{
 		if ( bTalking )

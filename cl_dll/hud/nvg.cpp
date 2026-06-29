@@ -98,10 +98,8 @@ int CHudNVG::Draw(float flTime)
 	return 1;
 }
 
-void CHudNVG::Reset( void )
+void CHudNVG::KillLight( void )
 {
-	m_iFlags = 0;
-
 	if( m_pLight )
 	{
 		m_pLight->die = 0; // engine will remove this immediately
@@ -110,18 +108,20 @@ void CHudNVG::Reset( void )
 	}
 }
 
+void CHudNVG::Reset( void )
+{
+	m_iFlags = 0;
+
+	KillLight();
+}
+
 int CHudNVG::MsgFunc_NVGToggle(const char *pszName, int iSize, void *pbuf)
 {
 	BufferReader reader( pszName, pbuf, iSize );
 
 	m_iFlags = reader.ReadByte() ? HUD_DRAW : 0;
 
-	if( m_pLight )
-	{
-		m_pLight->die = 0; // engine will remove this immediately
-
-		m_pLight = NULL; // it's safe to set it 0 now
-	}
+	KillLight();
 	return 1;
 }
 

@@ -398,7 +398,6 @@ private:
 	int m_fLastKillTime;
 	RGBA m_colors;
 	bool m_bDrawStroke;
-	cvar_t *cl_showpacketloss;
 	cvar_t *cl_showplayerversion;
 	cvar_t *cl_show_scoreboard_on_death;
 };
@@ -781,7 +780,6 @@ class CHudRadio: public CHudBase
 {
 public:
 	int Init( void );
-	void Voice(int entindex, bool bTalking );
 	// play a sentence from a radio
 	// [byte] unknown (always 1)
 	// [string] sentence name
@@ -833,6 +831,7 @@ public:
 	int VidInit( void );
 	int Draw( float fTime );
 private:
+	cvar_t *m_pCvarShowFps;	// cached csz_showfps handle (read ->value per frame)
 	float m_fps;		// exponential moving average of the instantaneous fps
 	bool m_bInit;		// false until the EMA has been seeded with the first frame
 };
@@ -896,6 +895,7 @@ public:
 	CHudUserCmd(NVGAdjustUp);
 	CHudUserCmd(NVGAdjustDown);
 private:
+	void KillLight( void );	// drop the NVG dlight (engine removes it next frame)
 	int m_iAlpha;
 	cvar_t *cl_fancy_nvg;
 	dlight_t *m_pLight;
