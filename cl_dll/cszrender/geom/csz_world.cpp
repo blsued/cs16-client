@@ -1225,6 +1225,17 @@ bool WorldRenderer::IsBuilt() const
 	return s_world.built;
 }
 
+// M2c C-DEC support: expose the per-local-face camera-visibility array (1 =
+// visible this frame) BuildVisibleSet maintains, so the decal pass can walk
+// surf->pdecals only on visible faces. Length == nummodelsurfaces (== numFaces);
+// the global BSP surface index of local face i is bsp->firstmodelsurface + i.
+const unsigned char *WorldRenderer::VisibleFaces( int *outCount ) const
+{
+	if( outCount != NULL )
+		*outCount = ( s_world.visible != NULL ) ? s_world.numFaces : 0;
+	return s_world.visible;
+}
+
 // S1 studio sky-visibility sample. Averages baked skyVis of retained world verts
 // within a small radius of the point (the floor luxels under an entity's feet),
 // falling back to the single nearest vert, then to the 1.0 outdoor fail-safe

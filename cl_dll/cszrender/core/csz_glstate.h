@@ -43,7 +43,11 @@ namespace csz
 // Source RGB is premultiplied radiance ADDED on top while the source ALPHA acts as
 // an occlusion/coverage that ATTENUATES the destination behind it -- one mote both
 // adds a faint speck AND slightly dims the light it floats in (L7 dust extinction).
-enum BlendMode { kBlendNone, kBlendAlpha, kBlendAdditive, kBlendAddPremul, kBlendPremulOver };
+// kBlendModulate: classic GoldSrc decal modulate (glBlendFunc(GL_DST_COLOR,
+// GL_SRC_COLOR)) -> result = src*dst + dst*src = 2*src*dst, the engine's "2x
+// overbright" decal blend. The blend identity (no visible effect) is src == 0.5.
+// Used by csz_decal for the no-alpha bullet-hole class drawn after the light pass.
+enum BlendMode { kBlendNone, kBlendAlpha, kBlendAdditive, kBlendAddPremul, kBlendPremulOver, kBlendModulate };
 void EnterTakeover();   // baseline for CSZ passes: depth test LEQUAL + write on, blend/scissor/cull off
 void ApplyMainViewport( const struct ref_viewpass_s *rvp, const float clearRgba[4] ); // bind FBO 0, glViewport(rvp->viewport), clear color+depth
 void LeaveTakeover();   // restore-for-engine whitelist (calibrated in T1); ALWAYS the last call of a taken-over frame

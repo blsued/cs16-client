@@ -45,6 +45,8 @@
 #include "geom/csz_sky.h"
 #include "geom/csz_sky_compose.h"
 #include "geom/csz_sprite.h"
+#include "geom/csz_decal.h"	// INTEGRATION (M2c C-DEC): world/brush decal pass
+#include "geom/csz_triapi.h"	// INTEGRATION (M2c C-TRI): TriAPI emulation dispatch
 #include "geom/csz_studio.h"
 #include "geom/csz_studio_texture.h"
 #include "geom/csz_viewmodel.h"
@@ -56,6 +58,14 @@
 #include "lighting/csz_flashlight_state.h"
 #include "lighting/csz_light_registry.h"
 #include "lighting/csz_shadowmap.h"
+
+// INTEGRATION (M2c C-TRI): the client's 3D-world TriAPI entry points (cl_dll/tri.cpp,
+// DLLEXPORT). The composition root calls them with gEngfuncs.pTriAPI temporarily
+// swapped to csz_triapi so their geometry self-draws (spectator overview /
+// particleman / g_Environment). Declared here rather than via a client header to
+// keep the renderer's include surface to its own module.
+void HUD_DrawNormalTriangles( void );
+void HUD_DrawTransparentTriangles( void );
 
 namespace csz
 {
@@ -279,6 +289,8 @@ void Renderer::OnHudInit()
 		m_cvarEnable = gEngfuncs.pfnRegisterVariable( "csz_renderer", "1", FCVAR_CLIENTDLL );
 
 	RegisterSpriteCommands();	// csz_testsprite (T5)
+	DecalRegisterCvars();		// INTEGRATION (M2c C-DEC): csz_decal (default 1)
+	TriApiRegisterCvars();		// INTEGRATION (M2c C-TRI): csz_triapi (default 1)
 	RegisterLightingCommands();	// csz_testspot + csz_testlight (T6)
 	LightConeRegisterCvars();	// L6a: csz_flashlight_tp (default 1 = world-space visible beam) + _intensity
 	DustRegisterCvars();		// L7: csz_dust (default 1 = gated airborne dust) + _count/_intensity/_size
@@ -318,6 +330,8 @@ void Renderer::Shutdown()
 	{
 		g_world.Destroy();
 		g_studio.DestroyAll();
+		DecalShutdown();	// INTEGRATION (M2c C-DEC): decal program + VBO/VAO (generation-safe)
+		TriApiShutdown();	// INTEGRATION (M2c C-TRI): triapi program + VBO/VAO (generation-safe)
 		g_spotShadow.Destroy();
 		LightConeShutdown();	// L6a: world beam program + VAO (generation-safe)
 		DustShutdown();		// L7: dust program + stream VBO/VAO (generation-safe)
@@ -566,6 +580,18 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	g_world.DrawBrushOpaque( view, m_frame.brush, m_frame.numBrush );	// slot 11.5: opaque brush submodels (E1)
 	EndPass( kTmBrush );
 
+	// slot 11.6 (M2c C-DEC): world/brush decals, ALPHA class (blood/scorch) drawn
+	// BEFORE the additive light pass so they get lit (坑21, SRC_ALPHA). This call
+	// also performs the SINGLE per-frame BSP walk that classifies BOTH decal
+	// classes; the modulate class is drawn later at slot 13.x.
+	{
+		int numVisFaces = 0;
+		const unsigned char *visFaces = g_world.VisibleFaces( &numVisFaces );
+		BeginPass( kTmDecal );
+		DrawDecalsAlpha( view, visFaces, numVisFaces );
+		EndPass( kTmDecal );
+	}
+
 	BeginPass( kTmStudio );
 	g_studio.DrawOpaque( view, m_frame.studio, m_frame.numStudio );	// slot 12: studio opaque
 	EndPass( kTmStudio );
@@ -578,6 +604,14 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	// camera-side by the scene depth (soft fade). Gated by csz_flashlight_tp.
 	LightConeRender( view );
 	EndPass( kTmLights );
+
+	// slot 13.x (M2c C-DEC): decals MODULATE class (classic no-alpha bullet holes)
+	// drawn AFTER the additive light pass with DST_COLOR x SRC_COLOR (the engine's
+	// 2x decal blend), else the additive light over-brightens them (坑21). Draws the
+	// batch slot 11.6 already built this frame (no-op if that pass did not run).
+	BeginPass( kTmDecal );
+	DrawDecalsModulate( view );
+	EndPass( kTmDecal );
 
 	// slot 13.5 (kTmVolume seam): fog M1 Step 3 half-res flashlight ray-march.
 	// After all opaque depth + additive flashlight lighting, before transparent/
@@ -602,11 +636,42 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	DustRender( view );
 	EndPass( kTmVolume );
 
+	// slot 13.9 (M2c C-TRI): OPAQUE TriAPI dispatch -- spectator overview map
+	// (HUD_DrawNormalTriangles). Swap gEngfuncs.pTriAPI to our self-draw table,
+	// call, restore. csz_triapi 0 (dev escape hatch) skips it.
+	if( CszTriApiEnabled())
+	{
+		BeginPass( kTmTriapi );
+		triangleapi_t *savedTri = gEngfuncs.pTriAPI;
+		CszTriApiBeginDispatch( view, savedTri );
+		gEngfuncs.pTriAPI = CszTriApiTable();
+		HUD_DrawNormalTriangles();
+		gEngfuncs.pTriAPI = savedTri;
+		CszTriApiEndDispatch();
+		EndPass( kTmTriapi );
+	}
+
 	BeginPass( kTmTrans );
 	g_world.DrawWater( view, m_frame.brush, m_frame.numBrush );	// slot 14: warped water/turb (world + func_water), drawn first so later transparents depth-sort against it
 	DrawSprites( view, m_frame.sprites, m_frame.numSprites );	// slot 14: sprites (trans domain)
 	g_world.DrawBrushTransparent( view, m_frame.brush, m_frame.numBrush );	// slot 14: transparent brush (trans domain, E1)
 	EndPass( kTmTrans );
+
+	// slot 14.7 (M2c C-TRI): TRANSPARENT TriAPI dispatch -- particleman + g_Environment
+	// (rain/snow) via HUD_DrawTransparentTriangles. Same swap/restore. Called EXACTLY
+	// ONCE per real frame, so particleman/environment step their simulation once (no
+	// double-step, design §4). RenderFog() inside it feeds our fog through csz_triapi.
+	if( CszTriApiEnabled())
+	{
+		BeginPass( kTmTriapi );
+		triangleapi_t *savedTri = gEngfuncs.pTriAPI;
+		CszTriApiBeginDispatch( view, savedTri );
+		gEngfuncs.pTriAPI = CszTriApiTable();
+		HUD_DrawTransparentTriangles();
+		gEngfuncs.pTriAPI = savedTri;
+		CszTriApiEndDispatch();
+		EndPass( kTmTriapi );
+	}
 
 	BeginPass( kTmViewmodel );
 	DrawViewModelPass( view );					// slot 15: viewmodel (last; own depth range)
