@@ -312,7 +312,10 @@ void main()
 	// Studio rendermode output (csz_studio_rendermode). Mode 0 (default) is byte-identical to
 	// the pre-rendermode path; modes 1..3 drive the transparent sub-pass alpha/color source.
 	if( u_studioRender == 2 )
-		fragColor = vec4( u_renderColor, u_renderAmt );          // kRenderTransColor: flat fill
+		// kRenderTransColor: flat fill, but fogged through the SAME analytic T/inscatter
+		// the opaque path applies above -- a flat-colored model far in the fog must fade
+		// into the fog like everything else (was: raw u_renderColor, fog-immune).
+		fragColor = vec4( u_renderColor * T + inscatter * ( 1.0 - T ), u_renderAmt );
 	else if( u_studioRender == 3 )
 		fragColor = vec4( col, base.a * u_renderAmt );           // kRenderTransAlpha: texture alpha
 	else if( u_studioRender == 1 )

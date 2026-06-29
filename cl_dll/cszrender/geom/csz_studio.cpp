@@ -636,7 +636,11 @@ float CszStudioFxBlend( const cl_entity_s *ent, float time )
 	if( !RenderfxEnabled())
 		return amt * ( 1.0f / 255.0f );
 
-	float phase = (float)( ent->index & 31 );	// decorrelate per entity
+	// Decorrelate per entity. The old (index & 31) aliased every 32 entities
+	// (indices 32 apart shared a phase and pulsed in lockstep). Multiply by a
+	// constant coprime-ish to the 2*pi sin period and wrap, so neighbouring and
+	// 32-apart indices land on well-spread phases (no visible lockstep).
+	float phase = fmodf( (float)ent->index * 363.0f, 6.2831853f );	// radians, mod 2*pi
 	float blend = amt;
 
 	switch( ent->curstate.renderfx )

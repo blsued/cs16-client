@@ -115,7 +115,7 @@ model_t *s_worldModel;
 // volume/delegate/triapi; sky until A3) simply accumulate zero.
 // ---------------------------------------------------------------------------
 enum PassTimer { kTmShadow, kTmSky, kTmWorld, kTmBrush, kTmDecal, kTmStudio,
-                 kTmLights, kTmVolume, kTmTrans, kTmDelegate, kTmTriapi,
+                 kTmLights, kTmVolume, kTmTrans, kTmEfx, kTmTriapi,
                  kTmViewmodel, kTmCount };
 
 double s_passAccumMs[kTmCount];
@@ -188,12 +188,12 @@ void SampleFps()
 				avg[i] = s_passAccumMs[i] * inv;
 
 			CSZ_LogDev( "fps", "pass-ms avg: shadow=%.2f sky=%.2f world=%.2f brush=%.2f decal=%.2f "
-				"studio=%.2f lights=%.2f volume=%.2f trans=%.2f delegate=%.2f triapi=%.2f viewmodel=%.2f",
+				"studio=%.2f lights=%.2f volume=%.2f trans=%.2f efx=%.2f triapi=%.2f viewmodel=%.2f",
 				avg[kTmShadow], avg[kTmSky],
 				avg[kTmWorld], avg[kTmBrush],
 				avg[kTmDecal], avg[kTmStudio],
 				avg[kTmLights], avg[kTmVolume],
-				avg[kTmTrans], avg[kTmDelegate],
+				avg[kTmTrans], avg[kTmEfx],
 				avg[kTmTriapi], avg[kTmViewmodel] );
 
 			// L0 observability (csz_perf_dump, default 0; registered in
@@ -209,13 +209,13 @@ void SampleFps()
 			// (forced on via ComposeTimingActive when csz_perf_dump != 0).
 			if( SkyComposePerfDumpEnabled())
 				CSZ_LogInfo( "perf", "[csz_perf] gpu_frame_ms=%.3f shadow=%.3f sky=%.3f world=%.3f brush=%.3f decal=%.3f "
-					"studio=%.3f lights=%.3f volume=%.3f trans=%.3f delegate=%.3f triapi=%.3f viewmodel=%.3f",
+					"studio=%.3f lights=%.3f volume=%.3f trans=%.3f efx=%.3f triapi=%.3f viewmodel=%.3f",
 					SkyComposeLastGpuMs(),
 					avg[kTmShadow], avg[kTmSky],
 					avg[kTmWorld], avg[kTmBrush],
 					avg[kTmDecal], avg[kTmStudio],
 					avg[kTmLights], avg[kTmVolume],
-					avg[kTmTrans], avg[kTmDelegate],
+					avg[kTmTrans], avg[kTmEfx],
 					avg[kTmTriapi], avg[kTmViewmodel] );
 		}
 
@@ -626,6 +626,24 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	g_studio.DrawGlowShells( view, m_frame.studio, m_frame.numStudio );	// slot 12.5: studio glow shells
 	EndPass( kTmStudio );
 
+	// slot 12.7 (M2c C-TRI): OPAQUE TriAPI dispatch -- spectator overview map
+	// (HUD_DrawNormalTriangles). RECONCILED POSITION (integration plan §1): moved
+	// from the worker's isolated 13.9 to the opaque region (after studio opaque/
+	// glowshell, before the additive light pass) so the overview composites against
+	// opaque depth. Swap gEngfuncs.pTriAPI to our self-draw table, call, restore.
+	// csz_triapi 0 (dev escape hatch) skips it.
+	if( CszTriApiEnabled())
+	{
+		BeginPass( kTmTriapi );
+		triangleapi_t *savedTri = gEngfuncs.pTriAPI;
+		CszTriApiBeginDispatch( view, savedTri );
+		gEngfuncs.pTriAPI = CszTriApiTable();
+		HUD_DrawNormalTriangles();
+		gEngfuncs.pTriAPI = savedTri;
+		CszTriApiEndDispatch();
+		EndPass( kTmTriapi );
+	}
+
 	BeginPass( kTmLights );
 	RunLightPasses( view, m_frame.studio, m_frame.numStudio, m_frame.brush, m_frame.numBrush );	// slot 13: additive light passes (spot DIRECT: world+brush+studio lit, world-space)
 	// slot 13.4 (L6a): world-space visible flashlight beam VOLUME. After the spot
@@ -666,21 +684,6 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	DustRender( view );
 	EndPass( kTmVolume );
 
-	// slot 13.9 (M2c C-TRI): OPAQUE TriAPI dispatch -- spectator overview map
-	// (HUD_DrawNormalTriangles). Swap gEngfuncs.pTriAPI to our self-draw table,
-	// call, restore. csz_triapi 0 (dev escape hatch) skips it.
-	if( CszTriApiEnabled())
-	{
-		BeginPass( kTmTriapi );
-		triangleapi_t *savedTri = gEngfuncs.pTriAPI;
-		CszTriApiBeginDispatch( view, savedTri );
-		gEngfuncs.pTriAPI = CszTriApiTable();
-		HUD_DrawNormalTriangles();
-		gEngfuncs.pTriAPI = savedTri;
-		CszTriApiEndDispatch();
-		EndPass( kTmTriapi );
-	}
-
 	BeginPass( kTmTrans );
 	// INTEGRATION (worker/m2c-studio SHOULD 6): cheap ground blob shadows beneath studio
 	// entities. First in the transparent domain (darkens the opaque floor; depth-write off).
@@ -697,11 +700,11 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	// AFTER water/sprites/brush-trans and BEFORE the viewmodel (design §4). Both
 	// advance their sim on real dt ONCE here -- this is the only (main-pass)
 	// caller, so there is no double-step and no engine frametime is read.
-	// kTmDelegate is the design's kTmEfx slot (rename OWED to the integrator).
-	BeginPass( kTmDelegate );
+	// kTmEfx is the efx instrumentation bucket (renamed from kTmDelegate at integration).
+	BeginPass( kTmEfx );
 	BeamDraw( view );
 	ParticleDraw( view );
-	EndPass( kTmDelegate );
+	EndPass( kTmEfx );
 
 	// slot 14.7 (M2c C-TRI): TRANSPARENT TriAPI dispatch -- particleman + g_Environment
 	// (rain/snow) via HUD_DrawTransparentTriangles. Same swap/restore. Called EXACTLY

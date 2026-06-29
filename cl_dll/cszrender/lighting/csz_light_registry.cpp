@@ -267,10 +267,13 @@ void LightRegistry::BuildPointParams( const ActiveLight &light, SpotLightParams 
 	out.color[2] = d.color[2];
 	out.radius = d.radius;
 
-	// cosOuter=-1 (180deg), cosInner just inside it -> coneLegacy == 1 everywhere
-	// the surface can see the light. Denominator (cosInner-cosOuter)=0.001 > 0.
-	out.cosOuter = -1.0f;
-	out.cosInner = -0.999f;
+	// True omni: push the cone band entirely outside [-1,1] so coneLegacy clamps to
+	// 1 for EVERY surface direction (cosTheta in [-1,1]) -- including the exact
+	// antipode. cosOuter=-1/cosInner=-0.999 left a ~2.56deg dead cap opposite out.dir
+	// where coneLegacy fell below 1; cosOuter=-2/cosInner=-1 removes it. Denominator
+	// (cosInner-cosOuter)=1.0 > 0; ndotl still shades back-facing surfaces.
+	out.cosOuter = -2.0f;
+	out.cosInner = -1.0f;
 
 	Mat4Identity( out.matShadow );
 	out.shadowTexSlot = 0;		// shadowless
