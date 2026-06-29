@@ -64,6 +64,11 @@ bool SetupBonesMerged( cl_entity_s *ent, studiohdr_t *carrierHdr, const BoneSetu
 // Resets the per-frame bone cache; called once per frame (StudioRenderer::BeginFrame).
 void ResetBoneCache();
 
+// MUST 1 (csz_attach): number of entities that had world attachments written into
+// ent->attachment[] this frame. Reset by ResetBoneCache; read by the studio pass for
+// the [CSZ:studio] attach count log.
+int StudioFrameAttachCount();
+
 // ---------------------------------------------------------------------------
 // Sequence-frame helpers shared between the draw path (EvaluatePose) and the
 // viewmodel studio-event dispatch pass (csz_viewmodel.cpp). Promoted to the

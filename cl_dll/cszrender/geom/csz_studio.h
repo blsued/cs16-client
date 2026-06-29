@@ -48,6 +48,13 @@ public:
 	void DrawOpaque( const ViewSetup &view, cl_entity_s *const *ents, int count );
 	void DrawDepth( const ViewSetup &lightView, const Frustum &lightCull, cl_entity_s *const *ents, int count );
 	void DrawLitAdditive( const ViewSetup &view, const SpotLightParams &light, cl_entity_s *const *ents, int count );
+	// MUST 2 (csz_studio_rendermode): the non-opaque studio sub-pass. Draws entities whose
+	// curstate.rendermode != kRenderNormal back-to-front with per-rendermode blend state.
+	// Slots into the transparent domain (kTmTrans) by the INTEGRATION SPEC.
+	void DrawTransparent( const ViewSetup &view, cl_entity_s *const *ents, int count );
+	// MUST 3 (csz_renderfx): the additive kRenderFxGlowShell extrude pass. Independent of
+	// rendermode; runs after the opaque studio pass (kTmStudio) per the INTEGRATION SPEC.
+	void DrawGlowShells( const ViewSetup &view, cl_entity_s *const *ents, int count );
 	void DrawSingle( const ViewSetup &view, cl_entity_s *ent );   // viewmodel path; caller owns depth range/projection
 };
 extern StudioRenderer g_studio;

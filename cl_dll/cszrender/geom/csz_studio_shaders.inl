@@ -130,6 +130,17 @@ uniform float u_nightMoon;        // gain on the skyVis-GATED moon directional (
 // Gated by u_nightness so DAY is byte-identical (rim == 0 at nightness 0).
 uniform float u_rimStrength;      // csz_rim: rim-light strength (0 = off)
 uniform float u_rimPower;         // csz_rim_power: Fresnel exponent (higher = tighter edge)
+// Studio rendermode (csz_studio_rendermode): the transparent studio sub-pass feeds these so
+// ONE base program serves both the opaque pass and the back-to-front transparent pass. The
+// GL blend state (alpha vs additive, depth-write/test) is chosen on the CPU per entity to
+// match curstate.rendermode; this uniform only selects the color/alpha SOURCE.
+//   0 = opaque   (a=1, byte-identical to the pre-rendermode studio path)
+//   1 = trans    (rgb = lit col, a = u_renderAmt)        kRenderTransTexture / TransAdd / Glow
+//   2 = color    (rgb = u_renderColor flat fill, a = amt) kRenderTransColor
+//   3 = texalpha (rgb = lit col, a = base.a * u_renderAmt) kRenderTransAlpha
+uniform int  u_studioRender;      // 0 default (opaque) -> day/opaque unaffected
+uniform float u_renderAmt;        // per-entity renderamt/255 (already renderfx-modulated on the CPU)
+uniform vec3 u_renderColor;       // per-entity rendercolor/255 (kRenderTransColor flat fill)
 out vec4 fragColor;
 // S3 procedural 2D value noise (finding 6: 2D only, no glTexImage3D -> in-shader hash
 // noise, pure ALU). Identical to the world base pass so both surfaces eat fog the same way.
@@ -286,7 +297,16 @@ void main()
 	float hg2 = ( 1.0 - CSZ_HG_G * CSZ_HG_G ) / ( 4.0 * 3.14159265 * pow( max( hgD2, 1e-4 ), 1.5 ));
 	inscatter += ( u_moonShaft * u_shaftMask * hg2 ) * u_moonInScatter;
 	col = col * T + inscatter * ( 1.0 - T );
-	fragColor = vec4( col, 1.0 );
+	// Studio rendermode output (csz_studio_rendermode). Mode 0 (default) is byte-identical to
+	// the pre-rendermode path; modes 1..3 drive the transparent sub-pass alpha/color source.
+	if( u_studioRender == 2 )
+		fragColor = vec4( u_renderColor, u_renderAmt );          // kRenderTransColor: flat fill
+	else if( u_studioRender == 3 )
+		fragColor = vec4( col, base.a * u_renderAmt );           // kRenderTransAlpha: texture alpha
+	else if( u_studioRender == 1 )
+		fragColor = vec4( col, u_renderAmt );                    // kRenderTransTexture / Add / Glow
+	else
+		fragColor = vec4( col, 1.0 );                            // kRenderNormal (opaque)
 }
 )GLSL";
 
@@ -398,5 +418,41 @@ void main()
 static const char kStudioDepthFs[] = R"GLSL(#version 330 core
 void main()
 {
+}
+)GLSL";
+
+// Studio glow-shell pass (csz_renderfx kRenderFxGlowShell): a separate ADDITIVE pass that
+// extrudes every skinned vertex OUTWARD along its world normal by u_extrude units and fills
+// the resulting shell with a flat rendercolor. The classic powerup/zombie "glowing skin"
+// look. Skinned position only (no texture/uv); the mesh VAO keeps normals at location 1.
+static const char kStudioShellVs[] = R"GLSL(#version 330 core
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in vec3 a_normal;
+layout(location = 3) in int a_bone;
+uniform mat4 u_viewProj;
+uniform vec4 u_bones[384];
+uniform float u_extrude;          // outward shell thickness (world units)
+void main()
+{
+	int b = a_bone * 3;
+	vec4 p = vec4( a_pos, 1.0 );
+	vec3 worldPos = vec3( dot( u_bones[b], p ), dot( u_bones[b + 1], p ), dot( u_bones[b + 2], p ));
+	vec3 n = normalize( vec3( dot( u_bones[b].xyz, a_normal ),
+	                          dot( u_bones[b + 1].xyz, a_normal ),
+	                          dot( u_bones[b + 2].xyz, a_normal )));
+	worldPos += n * u_extrude;
+	gl_Position = u_viewProj * vec4( worldPos, 1.0 );
+}
+)GLSL";
+
+// Additive blend is glBlendFunc(SRC_ALPHA, ONE), so rgb is NOT premultiplied here: the
+// blender multiplies u_shellColor by u_shellAlpha as it adds (renderamt dims the glow).
+static const char kStudioShellFs[] = R"GLSL(#version 330 core
+uniform vec3 u_shellColor;
+uniform float u_shellAlpha;
+out vec4 fragColor;
+void main()
+{
+	fragColor = vec4( u_shellColor, u_shellAlpha );
 }
 )GLSL";

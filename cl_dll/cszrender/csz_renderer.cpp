@@ -568,6 +568,9 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 
 	BeginPass( kTmStudio );
 	g_studio.DrawOpaque( view, m_frame.studio, m_frame.numStudio );	// slot 12: studio opaque
+	// INTEGRATION (worker/m2c-studio MUST 3): additive glow-shell pass (kRenderFxGlowShell).
+	// After opaque world+studio depth, so shells are occluded by nearer geometry; depth-write off.
+	g_studio.DrawGlowShells( view, m_frame.studio, m_frame.numStudio );	// slot 12.5: studio glow shells
 	EndPass( kTmStudio );
 
 	BeginPass( kTmLights );
@@ -603,6 +606,9 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	EndPass( kTmVolume );
 
 	BeginPass( kTmTrans );
+	// INTEGRATION (worker/m2c-studio MUST 2): non-opaque studio entities, back-to-front. First
+	// in the transparent domain so later sprites/brush (their own sorted lists) composite over.
+	g_studio.DrawTransparent( view, m_frame.studio, m_frame.numStudio );	// slot 14.0: studio transparent
 	DrawSprites( view, m_frame.sprites, m_frame.numSprites );	// slot 14: sprites (trans domain)
 	g_world.DrawBrushTransparent( view, m_frame.brush, m_frame.numBrush );	// slot 14: transparent brush (trans domain, E1)
 	EndPass( kTmTrans );

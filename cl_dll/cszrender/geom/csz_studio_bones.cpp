@@ -866,8 +866,67 @@ bool ViewModelMirror( const cl_entity_s *ent, const studiohdr_t *hdr )
 	return mirror;
 }
 
+// ---------------------------------------------------------------------------
+// Studio attachment computation (MUST 1, csz_attach). The studiohdr carries up
+// to N attachment points (an offset in a named bone's local space); cl_entity_t
+// holds 4 world-space slots that muzzleflash / tracer-origin / FOLLOW sprites
+// (csz_sprite.cpp MOVETYPE_FOLLOW path, csz_viewmodel.cpp muzzle events) read.
+// Stock parity: StudioCalcAttachments transforms each attachment's local org by
+// its bone's world matrix. Gated by csz_attach (default 1; 0 = pre-attachment).
+// ---------------------------------------------------------------------------
+cvar_t *s_attachCvar = NULL;
+bool s_attachQueried = false;
+int s_attachCount = 0;	// per-frame count of entities that received attachments (reset in ResetBoneCache)
+
+bool AttachmentsEnabled()
+{
+	if( !s_attachQueried )
+	{
+		s_attachQueried = true;
+		s_attachCvar = gEngfuncs.pfnGetCvarPointer( "csz_attach" );
+	}
+
+	// Fail-safe ON until the cvar registers (HUD init runs before any frame).
+	return ( s_attachCvar == NULL ) || ( s_attachCvar->value != 0.0f );
+}
+
+// world[3][4] (row vectors) applied to a local point -> world point.
+inline void TransformPoint( const float m[3][4], const float in[3], float out[3] )
+{
+	out[0] = m[0][0] * in[0] + m[0][1] * in[1] + m[0][2] * in[2] + m[0][3];
+	out[1] = m[1][0] * in[0] + m[1][1] * in[1] + m[1][2] * in[2] + m[1][3];
+	out[2] = m[2][0] * in[0] + m[2][1] * in[1] + m[2][2] * in[2] + m[2][3];
+}
+
+// Writes WORLD attachment positions into ent->attachment[0..3] from the freshly
+// built s_world bone chain. Must run AFTER BuildWorldBones fills s_world.
+void StudioCalcAttachments( cl_entity_s *ent, const studiohdr_t *hdr, int numBones )
+{
+	if( !AttachmentsEnabled() || hdr->numattachments <= 0 )
+		return;
+
+	const mstudioattachment_t *patt =
+		(const mstudioattachment_t *)((const byte *)hdr + hdr->attachmentindex );
+	int n = hdr->numattachments;
+
+	if( n > 4 )
+		n = 4;	// cl_entity_t carries 4 attachment slots
+
+	for( int i = 0; i < n; i++ )
+	{
+		int bone = patt[i].bone;
+
+		if( bone < 0 || bone >= numBones )
+			bone = 0;
+
+		TransformPoint( s_world[bone], patt[i].org, ent->attachment[i] );
+	}
+
+	s_attachCount++;
+}
+
 // Local pose (s_pos/s_q) -> world 3x4 chain (s_world) -> BoneSetup rows.
-void BuildWorldBones( const cl_entity_s *ent, const studiohdr_t *hdr, BoneSetup &out )
+void BuildWorldBones( cl_entity_s *ent, const studiohdr_t *hdr, BoneSetup &out )
 {
 	int numBones = NumBonesClamped( hdr );
 	const mstudiobone_t *pbones = (const mstudiobone_t *)((const byte *)hdr + hdr->boneindex );
@@ -923,6 +982,9 @@ void BuildWorldBones( const cl_entity_s *ent, const studiohdr_t *hdr, BoneSetup 
 			out.gpuBones[i][r * 4 + 3] = s_world[i][r][3];
 		}
 	}
+
+	// MUST 1: world attachment points (muzzle/tracer/FOLLOW-sprite origins).
+	StudioCalcAttachments( ent, hdr, numBones );
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,6 +1090,12 @@ float EstimateFrame( const mstudioseqdesc_t *pseqdesc, const cl_entity_s *ent, f
 void ResetBoneCache()
 {
 	s_cacheCount = 0;
+	s_attachCount = 0;
+}
+
+int StudioFrameAttachCount()
+{
+	return s_attachCount;
 }
 
 bool SetupBones( cl_entity_s *ent, studiohdr_t *hdr, float time, const BoneSetup **out )
