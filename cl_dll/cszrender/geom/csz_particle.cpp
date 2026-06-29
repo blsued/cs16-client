@@ -132,7 +132,7 @@ struct ParticleGpu
 	GLuint vao, vbo;
 	int    gpuGeneration;
 	bool   built, failedThisGen;
-	int    uMatViewProj, uMatView, uDepthTex, uViewSize, uFade, uSoftFade, uFog, uFogParams, uCamPos, uZNear, uZFar;
+	int    uMatViewProj, uMatView, uDepthTex, uViewport, uFade, uSoftFade, uFog, uFogParams, uCamPos, uZNear, uZFar;
 };
 ParticleGpu s_gpu;
 
@@ -227,7 +227,7 @@ bool EnsureBuilt()
 	s_gpu.uMatViewProj = UniformLoc( s_gpu.prog, "u_matViewProj" );
 	s_gpu.uMatView     = UniformLoc( s_gpu.prog, "u_matView" );
 	s_gpu.uDepthTex    = UniformLoc( s_gpu.prog, "u_depthTex" );
-	s_gpu.uViewSize    = UniformLoc( s_gpu.prog, "u_viewSize" );
+	s_gpu.uViewport    = UniformLoc( s_gpu.prog, "u_viewport" );
 	s_gpu.uFade        = UniformLoc( s_gpu.prog, "u_fade" );
 	s_gpu.uSoftFade    = UniformLoc( s_gpu.prog, "u_softFade" );
 	s_gpu.uFog         = UniformLoc( s_gpu.prog, "u_fog" );
@@ -366,26 +366,10 @@ void ParticleEmitRocketTrail( const float *start, const float *end, int type )
 	}
 }
 
-void ParticleEmitSpriteTrail( int type, const float *start, const float *end, int modelIndex,
-	int count, float life, float size, float amplitude, int renderamt, float speed )
-{
-	(void)type; (void)modelIndex; (void)amplitude; (void)renderamt; (void)speed;
-	float d[3] = { end[0]-start[0], end[1]-start[1], end[2]-start[2] };
-	float dist = sqrtf( d[0]*d[0]+d[1]*d[1]+d[2]*d[2] );
-	if( dist < 1.0f ) return;
-	if( count < 1 ) count = 1;
-	if( count > 64 ) count = 64;
-	if( life <= 0.0f ) life = 1.0f;
-	if( size <= 0.0f ) size = 3.0f;
-	const float col[3] = { 0.35f, 0.33f, 0.30f };
-	for( int i = 0; i < count; i++ )
-	{
-		float t = (float)i / (float)count;
-		float pos[3] = { start[0]+d[0]*t, start[1]+d[1]*t, start[2]+d[2]*t };
-		float vel[3] = { RandF(-5.0f,5.0f), RandF(-5.0f,5.0f), RandF( 2.0f, 10.0f ) };
-		SpawnParticle( pos, vel, col, 0.6f, size * 0.5f, life * RandF( 0.7f, 1.1f ), -6.0f, 0.6f, false );
-	}
-}
+// NOTE: R_Sprite_Trail is intentionally NOT redirected here -- the engine draws
+// its FTENT sprite tempents directly (csz_efx_shim passthrough), so a redirect
+// would double-draw. The former ParticleEmitSpriteTrail helper was never called
+// and has been removed.
 
 void ParticleEmitTracer( const float *start, const float *end )
 {
@@ -560,11 +544,16 @@ void ParticleDraw( const ViewSetup &view )
 	{
 		SkyComposeBindTex( 0, GL_TEXTURE_2D, depthTex );
 		if( s_gpu.uDepthTex >= 0 ) glUniform1i( s_gpu.uDepthTex, kSkyTmuBase + 0 );
-		float fViewSize[2] = { (float)( view.viewport[0] + view.viewport[2] ),
-		                       (float)( view.viewport[1] + view.viewport[3] ) };
-		if( fViewSize[0] < 1.0f ) fViewSize[0] = 1.0f;
-		if( fViewSize[1] < 1.0f ) fViewSize[1] = 1.0f;
-		if( s_gpu.uViewSize >= 0 ) glUniform2fv( s_gpu.uViewSize, 1, fViewSize );
+		// Pass the actual 3D viewport rect (x,y,w,h). The shader samples the
+		// viewport-sized depth tex at (gl_FragCoord.xy - vp.xy)/vp.zw, which is
+		// origin-correct -- the old (vp.x+vp.w, vp.y+vp.h) divisor only matched
+		// when the viewport origin was (0,0). Full-window pass: vp.xy==0, so the
+		// same formula still reduces to gl_FragCoord/extent.
+		float fViewport[4] = { (float)view.viewport[0], (float)view.viewport[1],
+		                       (float)view.viewport[2], (float)view.viewport[3] };
+		if( fViewport[2] < 1.0f ) fViewport[2] = 1.0f;   // guard zero extent (div)
+		if( fViewport[3] < 1.0f ) fViewport[3] = 1.0f;
+		if( s_gpu.uViewport >= 0 ) glUniform4fv( s_gpu.uViewport, 1, fViewport );
 		// soft path = dust contract: depth test/write OFF, soft intersection in-shader
 		SetDepthTest( false );
 		SetDepthWrite( false );

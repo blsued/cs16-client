@@ -250,8 +250,29 @@ BeamSlot *AllocSlot()
 	return NULL;
 }
 
-// Fill the shared beam_s fields from the emit args (engine convention: r/g/b and
-// brightness arrive in 0..255; we normalise to linear-ish [0,1] for the shader).
+// Per-value scale heuristic for beam brightness / colour channels. The emit
+// sites arrive on TWO different scales and a single /255 cannot serve both:
+//   gauss (ev_hldm.cpp R_BeamPoints/EntPoint): brightness 128, rgb up to 255
+//                                               -> classic 0..255 scale.
+//   egon  (ev_hldm.cpp, hardware path):         brightness 0.7, rgb ~0.5 (with
+//                                               the odd raw channel like b=125)
+//                                               -> mostly already-normalised.
+// A flat /255 turns egon's 0.7 into ~0.003 -> INVISIBLE. So: treat any value > 1
+// as 0..255 (divide by 255), pass values in [0,1] through unchanged, then clamp
+// to [0,1]. This makes BOTH gauss and egon visible.
+// NOTE: the resulting colour/brightness MAGNITUDE is a visual-TEST tunable -- the
+// intent here is VISIBILITY for both weapons, not final colour calibration.
+float NormColor( float v )
+{
+	if( v > 1.0f ) v *= ( 1.0f / 255.0f );   // 0..255 scale -> normalise
+	if( v < 0.0f ) return 0.0f;
+	if( v > 1.0f ) return 1.0f;              // clamp (e.g. raw > 255)
+	return v;
+}
+
+// Fill the shared beam_s fields from the emit args. Colour is normalised here via
+// NormColor (the dual-scale heuristic above); brightness is stored RAW and
+// normalised on the alpha path in BeamDraw with the SAME NormColor.
 void FillCommon( BeamSlot *s, int modelIndex, float life, float width, float amplitude,
 	float brightness, float speed, int startFrame, float framerate, float r, float g, float b )
 {
@@ -262,14 +283,14 @@ void FillCommon( BeamSlot *s, int modelIndex, float life, float width, float amp
 	p.die        = now + life;
 	p.width      = width;
 	p.amplitude  = amplitude;
-	p.brightness = brightness;
+	p.brightness = brightness;   // raw; BeamDraw alpha path applies NormColor
 	p.speed      = speed;
 	p.frameRate  = framerate;
 	p.frame      = (float)startFrame;
 	p.modelIndex = modelIndex;
-	p.r = r * ( 1.0f / 255.0f );
-	p.g = g * ( 1.0f / 255.0f );
-	p.b = b * ( 1.0f / 255.0f );
+	p.r = NormColor( r );
+	p.g = NormColor( g );
+	p.b = NormColor( b );
 
 	s->used      = true;
 	s->spawnTime = now;
@@ -451,8 +472,9 @@ void BeamDraw( const ViewSetup &view )
 
 		// fade: short finite beams fade out over the last quarter of life; long
 		// (egon-style) beams just hold full brightness until the client kills them.
-		float alpha = s.pub.brightness * ( 1.0f / 255.0f );
-		if( alpha > 1.0f ) alpha = 1.0f;
+		// brightness uses the SAME dual-scale heuristic as the colour channels
+		// (gauss passes 128, egon passes 0.7) so both weapons are visible.
+		float alpha = NormColor( s.pub.brightness );
 		if( s.life < 5.0f )
 		{
 			float tNorm = ( now - s.spawnTime ) / s.life;

@@ -143,6 +143,26 @@ void Shim_R_RunParticleEffect( float *org, float *dir, int color, int count )
 	LogOwedOnce( 5, "R_RunParticleEffect" );
 	s_realEfx->R_RunParticleEffect( org, dir, color, count );
 }
+void Shim_R_ParticleExplosion( float *org )
+{
+	LogOwedOnce( 6, "R_ParticleExplosion" );
+	s_realEfx->R_ParticleExplosion( org );
+}
+void Shim_R_Blood( float *org, float *dir, int pcolor, int speed )
+{
+	LogOwedOnce( 7, "R_Blood" );
+	s_realEfx->R_Blood( org, dir, pcolor, speed );
+}
+void Shim_R_LavaSplash( float *org )
+{
+	LogOwedOnce( 8, "R_LavaSplash" );
+	s_realEfx->R_LavaSplash( org );
+}
+void Shim_R_TeleportSplash( float *org )
+{
+	LogOwedOnce( 9, "R_TeleportSplash" );
+	s_realEfx->R_TeleportSplash( org );
+}
 
 void InstallShim()
 {
@@ -176,6 +196,10 @@ void InstallShim()
 	s_shimEfx.R_BeamCirclePoints       = Shim_R_BeamCirclePoints;
 	s_shimEfx.R_BeamLightning          = Shim_R_BeamLightning;
 	s_shimEfx.R_RunParticleEffect      = Shim_R_RunParticleEffect;
+	s_shimEfx.R_ParticleExplosion      = Shim_R_ParticleExplosion;
+	s_shimEfx.R_Blood                  = Shim_R_Blood;
+	s_shimEfx.R_LavaSplash             = Shim_R_LavaSplash;
+	s_shimEfx.R_TeleportSplash         = Shim_R_TeleportSplash;
 
 	// deliberately UNtouched (handled elsewhere, drawn correctly already):
 	//   R_DecalShoot     -> engine decal clip path (decision A)

@@ -62,7 +62,9 @@ void main()
 
 static const char kParticleFsBody[] = R"GLSL(
 uniform sampler2D u_depthTex;   // scene depth (raw, compare-mode NONE); sky unit
-uniform vec2  u_viewSize;       // full-res scene size (gl_FragCoord basis)
+uniform vec4  u_viewport;       // 3D viewport rect in window px (x,y,w,h); the depth
+                                // tex is viewport-sized, so subtract the origin and
+                                // divide by the extent -> origin-correct sample uv
 uniform float u_fade;           // soft depth-fade band (world units)
 uniform int   u_softFade;       // 1 = HDR path (depth tex valid): soft fade; 0 = hard depth test
 uniform vec4  u_fog;            // rgb = fog color (linear), w = extinction a (1/units); w<=0 -> off
@@ -106,7 +108,7 @@ void main()
 		// depth test/write OFF on the HDR path: do soft intersection in-shader
 		// from the SAMPLED scene depth (dust precedent: avoids a read/test
 		// feedback loop on the shared depth attachment).
-		vec2  uv = gl_FragCoord.xy / u_viewSize;
+		vec2  uv = ( gl_FragCoord.xy - u_viewport.xy ) / u_viewport.zw;
 		float dscene = texture( u_depthTex, uv ).r;
 		float sceneZ = ( dscene < 1.0 ) ? linViewZ( dscene ) : 1.0e9;   // sky = no occluder
 		if( vViewZ > sceneZ + u_fade )

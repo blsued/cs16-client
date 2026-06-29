@@ -43,7 +43,9 @@
 //   R_BulletImpactParticles -> dust puff (alpha smoke)
 //   R_StreakSplash          -> impact sparks (additive, palette colour)
 //   R_SparkEffect/Shower/Streaks -> ricochet sparks (additive, orange)
-//   R_RocketTrail / R_Sprite_Trail -> smoke/ember trail along the segment
+//   R_RocketTrail           -> smoke/ember trail along the segment
+//   (R_Sprite_Trail is NOT redirected: engine draws its FTENT sprite tempents
+//    directly via the shim passthrough; redirecting would double-draw)
 //   R_TracerEffect          -> a short bright VIEW-ALIGNED streak (degenerate ribbon)
 // The shader INCLUDES fog/csz_fog_shaders.inl (linViewZ for the soft depth fade)
 // and applies the analytic base fog so black-fog darkens distant particles --
@@ -70,7 +72,5 @@ void ParticleEmitSparkEffect( const float *pos, int count, int velMin, int velMa
 void ParticleEmitSparkShower( const float *pos );
 void ParticleEmitSparkStreaks( const float *pos, int count, int velMin, int velMax );
 void ParticleEmitRocketTrail( const float *start, const float *end, int type );
-void ParticleEmitSpriteTrail( int type, const float *start, const float *end, int modelIndex,
-	int count, float life, float size, float amplitude, int renderamt, float speed );
 void ParticleEmitTracer( const float *start, const float *end );
 }
