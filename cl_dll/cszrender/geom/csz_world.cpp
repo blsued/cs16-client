@@ -2483,7 +2483,9 @@ void WorldRenderer::DrawWater( const ViewSetup &view, cl_entity_s *const *ents, 
 	int drawn = 0;
 
 	// --- Worldspawn water (submodel 0, identity model, camera PVS gated) ---
-	if( haveWorldWater )
+	// Skip entirely when effectively invisible (csz_wateralpha ~= 0): drawing it would
+	// still SetDepthWrite(true) above and z-occlude transparents queued behind the water.
+	if( haveWorldWater && wateralpha > 0.004f )
 	{
 		Mat4 identity;
 		Mat4Identity( identity );
@@ -2529,6 +2531,11 @@ void WorldRenderer::DrawWater( const ViewSetup &view, cl_entity_s *const *ents, 
 		// otherwise it inherits the global csz_wateralpha.
 		float entAlpha = ( ent->curstate.rendermode != kRenderNormal )
 			? (float)ent->curstate.renderamt * ( 1.0f / 255.0f ) : wateralpha;
+
+		// Effectively invisible (renderamt 0 / csz_wateralpha ~= 0): skip so this water
+		// doesn't SetDepthWrite(true) and z-occlude transparents queued behind it.
+		if( entAlpha <= 0.004f )
+			continue;
 
 		Mat4 model;
 		BuildBrushModelMatrix( ent, model );

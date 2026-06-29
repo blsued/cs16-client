@@ -66,6 +66,17 @@ bool RoundTiming( float &outDuration, float &outRemaining )
 	return gHUD.m_Timer.GetRoundTiming( ClientTime(), outDuration, outRemaining );
 }
 
+int LocalPlayerHealth()
+{
+	// gHUD.m_Health.m_iHealth is the client-side HUD health (set from the Health usermsg
+	// in cl_dll/health.cpp), the reliable local-player health under takeover. Clamp to a
+	// sane domain so a transient negative/garbage frame can't kick the damage shift.
+	int hp = gHUD.m_Health.m_iHealth;
+	if( hp < 0 )    hp = 0;
+	if( hp > 1000 ) hp = 1000;
+	return hp;
+}
+
 bool PlayerIsDead( int idx )
 {
 	// g_PlayerExtraInfo is sized [MAX_PLAYERS+1]; valid player slots are 1..MAX_PLAYERS

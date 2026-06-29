@@ -87,6 +87,7 @@ void FinalizeView( ViewSetup &out, bool disableFar )
 	FrustumFromMatrix( out.matViewProj, disableFar, out.frustum );
 	out.pvs = NULL;
 	out.ambience = AmbienceNeutral();
+	out.localHealth = 0;	// composition root sets the main view's value; default 0 = unknown
 }
 
 }

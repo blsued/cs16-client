@@ -398,6 +398,8 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	ViewSetup view;							// slot 5: view + fat PVS
 	BuildViewFromPass( rvp, view );
 	view.pvs = UpdateFatPvs( view.origin );
+	view.localHealth = LocalPlayerHealth();				// reliable local health for DrawPolyblend's damage shift
+									// (curstate.health is not server-populated for the local player)
 
 	s_worldModel = world;						// slot 6: world build + visible set
 	g_world.EnsureBuilt( world );

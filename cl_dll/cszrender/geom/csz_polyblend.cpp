@@ -42,7 +42,9 @@
 #include "../core/csz_shader.h"
 #include "../core/csz_view.h"
 
-#include "cl_entity.h"	// cl_entity_t (local-player health for the damage shift)
+// geom stays CORE-ONLY: the local-player health for the damage shift arrives via
+// ViewSetup.localHealth, populated at the composition root (csz_renderer.cpp) from
+// gHUD.m_Health.m_iHealth -- no HUD / cl_entity include here.
 
 namespace csz
 {
@@ -135,12 +137,14 @@ CShift ContentShift( const ViewSetup &view )
 	return c;
 }
 
-// Damage red flash (CSHIFT_DAMAGE). Reads the local player's health each frame;
-// on a drop, kicks the red shift (proxying the engine's blood/armor count by the
-// health delta) and decays it at the GoldSrc rate (percent -= frametime*150).
-// If health is unreadable (stays 0), this is a silent no-op -- the content shift
-// still works. Returns {255,0,0, percent}.
-CShift DamageShift()
+// Damage red flash (CSHIFT_DAMAGE). Reads the local player's health each frame from
+// ViewSetup.localHealth (the reliable HUD health threaded in by the composition root --
+// curstate.health is NOT server-populated for the local player, so the old read was a
+// silent no-op). On a drop, kicks the red shift (proxying the engine's blood/armor count
+// by the health delta) and decays it at the GoldSrc rate (percent -= frametime*150).
+// If health is unreadable (stays 0), this is a silent no-op -- the content shift still
+// works. Returns {255,0,0, percent}.
+CShift DamageShift( const ViewSetup &view )
 {
 	float now = ClientTime();
 	float dt = ( s_dmg.lastTime > 0.0f && now > s_dmg.lastTime ) ? ( now - s_dmg.lastTime ) : 0.0f;
@@ -151,8 +155,7 @@ CShift DamageShift()
 	if( s_dmg.percent < 0.0f )
 		s_dmg.percent = 0.0f;
 
-	cl_entity_t *plr = gEngfuncs.GetLocalPlayer();
-	int hp = ( plr != NULL ) ? plr->curstate.health : 0;
+	int hp = view.localHealth;
 
 	if( hp > 0 && hp <= 255 )
 	{
@@ -219,7 +222,7 @@ void DrawPolyblend( const ViewSetup &view )
 	if( s_cvPolyblend != NULL && s_cvPolyblend->value == 0.0f )
 		return;
 
-	CShift shifts[2] = { ContentShift( view ), DamageShift() };
+	CShift shifts[2] = { ContentShift( view ), DamageShift( view ) };
 	float blend[4];
 	int active = CalcBlend( shifts, 2, blend );
 
