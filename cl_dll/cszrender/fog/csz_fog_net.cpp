@@ -54,10 +54,6 @@ namespace
 // .. 0.1 vanishes geometry within a short radius) with hundreds of steps to spare.
 const float kCszFogFixedDivisor = 16384.0f;
 
-// Wire v1 byte count (version..sunGlow). A shorter packet defaults the missing
-// tail; a longer one (future version) ignores the extra bytes.
-const int kCszFogWireV1Bytes = 12;
-
 }
 
 void CszFogOnMessage( const unsigned char *payload, int size )
@@ -99,7 +95,8 @@ void CszFogOnMessage( const unsigned char *payload, int size )
 	st.maxOpacity = maxByte > 0 ? (float)maxByte * ( 1.0f / 255.0f ) : 1.0f;	// 0 -> 1
 
 	// Length-tolerant reads: default any field a short packet does not carry.
-	st.fogR = ( size > 4 ) ? ( (int)payload[4] & 0xFF ) : 0;
+	// (size >= 5 is guaranteed above, so payload[4] is always present.)
+	st.fogR = (int)payload[4] & 0xFF;
 	st.fogG = ( size > 5 ) ? ( (int)payload[5] & 0xFF ) : 0;
 	st.fogB = ( size > 6 ) ? ( (int)payload[6] & 0xFF ) : 0;
 
@@ -111,9 +108,8 @@ void CszFogOnMessage( const unsigned char *payload, int size )
 	st.heightFalloffB = (float)fallRaw / kCszFogFixedDivisor;
 	st.sunGlow        = (float)sunByte * ( 1.0f / 255.0f );
 
-	// size > kCszFogWireV1Bytes: any appended fields from a higher version are
-	// ignored here (forward-compat); a v1 client decodes a v2 packet cleanly.
-	(void)kCszFogWireV1Bytes;
+	// Any appended fields from a higher version are ignored here (forward-compat);
+	// a v1 client decodes a v2 packet cleanly.
 
 	g_fog.ApplyCszFog( st );
 }

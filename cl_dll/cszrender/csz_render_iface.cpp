@@ -136,7 +136,6 @@ bool IsWhitelistedNull( const char *member )
 // FATALs on the first non-whitelisted NULL member; logs whitelisted NULLs.
 void AuditRenderApi( const render_api_t *api )
 {
-	int unexpectedNull = 0;
 	char reason[128];
 
 #define CSZ_AUDIT_MEMBER( name ) \
@@ -148,7 +147,6 @@ void AuditRenderApi( const render_api_t *api )
 		} \
 		else \
 		{ \
-			unexpectedNull++; \
 			snprintf( reason, sizeof( reason ), "%s is NULL in render_api_t", #name ); \
 			CSZ_FatalInit( "core", reason ); \
 		} \
@@ -156,7 +154,8 @@ void AuditRenderApi( const render_api_t *api )
 	CSZ_RENDER_API_MEMBERS( CSZ_AUDIT_MEMBER )
 #undef CSZ_AUDIT_MEMBER
 
-	CSZ_LogInfo( "core", "render_api audit OK (unexpected NULL: %d)", unexpectedNull );
+	// Any non-whitelisted NULL FATALs above, so reaching here means none were found.
+	CSZ_LogInfo( "core", "render_api audit OK" );
 }
 
 // ---------------------------------------------------------------------------

@@ -165,14 +165,21 @@ void SampleFps()
 
 			double inv = 1.0 / (double)s_frames;
 
+			// Per-pass frame-averaged CPU ms, computed once and shared by both the
+			// Dev "fps" line and the csz_perf_dump line below (the format strings are
+			// frozen / harness-parsed; only the duplicated *inv operands are folded).
+			double avg[kTmCount];
+			for( int i = 0; i < kTmCount; i++ )
+				avg[i] = s_passAccumMs[i] * inv;
+
 			CSZ_LogDev( "fps", "pass-ms avg: shadow=%.2f sky=%.2f world=%.2f brush=%.2f decal=%.2f "
 				"studio=%.2f lights=%.2f volume=%.2f trans=%.2f delegate=%.2f triapi=%.2f viewmodel=%.2f",
-				s_passAccumMs[kTmShadow] * inv, s_passAccumMs[kTmSky] * inv,
-				s_passAccumMs[kTmWorld] * inv, s_passAccumMs[kTmBrush] * inv,
-				s_passAccumMs[kTmDecal] * inv, s_passAccumMs[kTmStudio] * inv,
-				s_passAccumMs[kTmLights] * inv, s_passAccumMs[kTmVolume] * inv,
-				s_passAccumMs[kTmTrans] * inv, s_passAccumMs[kTmDelegate] * inv,
-				s_passAccumMs[kTmTriapi] * inv, s_passAccumMs[kTmViewmodel] * inv );
+				avg[kTmShadow], avg[kTmSky],
+				avg[kTmWorld], avg[kTmBrush],
+				avg[kTmDecal], avg[kTmStudio],
+				avg[kTmLights], avg[kTmVolume],
+				avg[kTmTrans], avg[kTmDelegate],
+				avg[kTmTriapi], avg[kTmViewmodel] );
 
 			// L0 observability (csz_perf_dump, default 0; registered in
 			// csz_sky_compose.cpp). When armed, emit ONE parseable line per sample
@@ -189,12 +196,12 @@ void SampleFps()
 				CSZ_LogInfo( "perf", "[csz_perf] gpu_frame_ms=%.3f shadow=%.3f sky=%.3f world=%.3f brush=%.3f decal=%.3f "
 					"studio=%.3f lights=%.3f volume=%.3f trans=%.3f delegate=%.3f triapi=%.3f viewmodel=%.3f",
 					SkyComposeLastGpuMs(),
-					s_passAccumMs[kTmShadow] * inv, s_passAccumMs[kTmSky] * inv,
-					s_passAccumMs[kTmWorld] * inv, s_passAccumMs[kTmBrush] * inv,
-					s_passAccumMs[kTmDecal] * inv, s_passAccumMs[kTmStudio] * inv,
-					s_passAccumMs[kTmLights] * inv, s_passAccumMs[kTmVolume] * inv,
-					s_passAccumMs[kTmTrans] * inv, s_passAccumMs[kTmDelegate] * inv,
-					s_passAccumMs[kTmTriapi] * inv, s_passAccumMs[kTmViewmodel] * inv );
+					avg[kTmShadow], avg[kTmSky],
+					avg[kTmWorld], avg[kTmBrush],
+					avg[kTmDecal], avg[kTmStudio],
+					avg[kTmLights], avg[kTmVolume],
+					avg[kTmTrans], avg[kTmDelegate],
+					avg[kTmTriapi], avg[kTmViewmodel] );
 		}
 
 		for( int i = 0; i < kTmCount; i++ )
@@ -343,7 +350,8 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	if( rvp == NULL || !( rvp->flags & RF_DRAW_WORLD ))
 		return 0;
 
-	if( WorldModel() == NULL || !m_handshakeOk )			// slot 3
+	model_t *world = WorldModel();					// slot 3 (modelindex 1 is stable for the frame)
+	if( world == NULL || !m_handshakeOk )
 		return 0;
 
 	if( !EnsureGlReady() )						// slot 4 (FATAL inside on hard failure)
@@ -353,8 +361,7 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	BuildViewFromPass( rvp, view );
 	view.pvs = UpdateFatPvs( view.origin );
 
-	model_t *world = WorldModel();					// slot 6: world build + visible set
-	s_worldModel = world;
+	s_worldModel = world;						// slot 6: world build + visible set
 	g_world.EnsureBuilt( world );
 	g_world.BuildVisibleSet( view );
 

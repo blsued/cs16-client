@@ -145,10 +145,7 @@ bool EnsureVolTarget( int w, int h )
 	if( h < 1 ) h = 1;
 
 	if( s_vol.gpuGeneration != GpuGeneration() )
-	{
-		ForgetVol();
-		s_vol.gpuGeneration = GpuGeneration();
-	}
+		ForgetVol();	// gpuGeneration is re-synced unconditionally just below
 
 	if( s_vol.valid && s_vol.width == w && s_vol.height == h )
 		return true;
@@ -396,8 +393,7 @@ void FogVolumeRender( const ViewSetup &view )
 	if( fullW < 1 ) fullW = 1;
 	if( fullH < 1 ) fullH = 1;
 
-	int hr = (int)( ReadCvar( s_cvarHalfres, 1.0f ) + 0.5f );
-	int div = ( hr == 2 ) ? 4 : ( hr == 0 ? 1 : 2 );
+	int div = FogHalfresDivisor( s_cvarHalfres );
 	int halfW = fullW / div; if( halfW < 1 ) halfW = 1;
 	int halfH = fullH / div; if( halfH < 1 ) halfH = 1;
 
@@ -476,9 +472,8 @@ void FogVolumeRender( const ViewSetup &view )
 	s_marchFrame = ( s_marchFrame + 1u ) & 1023u;
 	float frame = (float)s_marchFrame;
 
-	float fTarget[2]  = { (float)halfW, (float)halfH };
+	float fHalfSize[2] = { (float)halfW, (float)halfH };	// march u_targetSize == upsample u_halfSize
 	float fFullSize[2] = { (float)fullW, (float)fullH };
-	float fHalfSize[2] = { (float)halfW, (float)halfH };
 
 	// ===================== Pass 1: half-res ray-march =========================
 	BindFbo( s_vol.fbo );
@@ -505,7 +500,7 @@ void FogVolumeRender( const ViewSetup &view )
 	if( s_gpu.mInvProj >= 0 )     glUniformMatrix4fv( s_gpu.mInvProj, 1, GL_FALSE, invProj.m );
 	if( s_gpu.mInvViewProj >= 0 ) glUniformMatrix4fv( s_gpu.mInvViewProj, 1, GL_FALSE, invViewProj.m );
 
-	if( s_gpu.mTargetSize >= 0 ) glUniform2fv( s_gpu.mTargetSize, 1, fTarget );
+	if( s_gpu.mTargetSize >= 0 ) glUniform2fv( s_gpu.mTargetSize, 1, fHalfSize );
 	if( s_gpu.mCamPos >= 0 )     glUniform3fv( s_gpu.mCamPos, 1, view.origin );
 	if( s_gpu.mSpotOrigin >= 0 ) glUniform3fv( s_gpu.mSpotOrigin, 1, spot.origin );
 	if( s_gpu.mSpotDir >= 0 )    glUniform3fv( s_gpu.mSpotDir, 1, spot.dir );

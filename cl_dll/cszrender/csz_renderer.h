@@ -62,7 +62,6 @@ public:
 	void ProcessUserData( model_t *mod, qboolean create, const byte *buffer );
 	// --- entity ingest (HUD_AddEntity hook, T3) ---
 	void AddEntity( int type, cl_entity_t *ent );
-	FrameEntities &Frame() { return m_frame; }
 	int GpuGeneration() const { return m_gpuGeneration; }
 private:
 	bool EnsureGlReady();        // one-shot lazy GL init (loader+caps+shaders); FATAL inside on hard fail

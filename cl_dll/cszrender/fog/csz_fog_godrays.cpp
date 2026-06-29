@@ -43,6 +43,7 @@
 #include "../core/csz_view.h"
 #include "../geom/csz_sky_compose.h"
 #include "../geom/csz_sunmoon.h"       // CszGodraySource (FOG Step 4 body contract)
+#include "csz_fog_volume.h"            // FogHalfresDivisor (shared half-res divisor)
 
 #include <math.h>
 #include <stdio.h>
@@ -123,6 +124,15 @@ void DestroyTargetSameContext( GrTarget &t )
 	ForgetTarget( t );
 }
 
+// Teardown one target: delete its GL objects on the same context, else just forget.
+void ShutdownTarget( GrTarget &t )
+{
+	if( t.gpuGeneration == GpuGeneration() )
+		DestroyTargetSameContext( t );
+	else
+		ForgetTarget( t );
+}
+
 // Ensure a half-res RGBA16F FBO at (w,h) on the live generation. Mirrors the
 // generation rule + completeness check + B-class degrade of EnsureVolTarget
 // (csz_fog_volume.cpp). LINEAR + CLAMP_TO_EDGE (the scatter/composite sample it
@@ -133,10 +143,7 @@ bool EnsureTarget( GrTarget &t, const char *tag, int w, int h )
 	if( h < 1 ) h = 1;
 
 	if( t.gpuGeneration != GpuGeneration() )
-	{
-		ForgetTarget( t );
-		t.gpuGeneration = GpuGeneration();
-	}
+		ForgetTarget( t );	// gpuGeneration is re-synced unconditionally just below
 
 	if( t.valid && t.width == w && t.height == h )
 		return true;
@@ -233,8 +240,7 @@ int HalfresDivisor()
 		s_halfresLookedUp = true;
 		s_cvarHalfres = gEngfuncs.pfnGetCvarPointer( "csz_fog_halfres" );
 	}
-	int hr = (int)( ReadCvar( s_cvarHalfres, 1.0f ) + 0.5f );
-	return ( hr == 2 ) ? 4 : ( hr == 0 ? 1 : 2 );
+	return FogHalfresDivisor( s_cvarHalfres );
 }
 
 }  // anonymous namespace
@@ -427,17 +433,8 @@ void FogGodraysRender( const ViewSetup &view )
 
 void FogGodraysShutdown()
 {
-	bool sameContext = ( s_occl.gpuGeneration == GpuGeneration() );
-	if( sameContext )
-		DestroyTargetSameContext( s_occl );
-	else
-		ForgetTarget( s_occl );
-
-	sameContext = ( s_scatter.gpuGeneration == GpuGeneration() );
-	if( sameContext )
-		DestroyTargetSameContext( s_scatter );
-	else
-		ForgetTarget( s_scatter );
+	ShutdownTarget( s_occl );
+	ShutdownTarget( s_scatter );
 
 	if( s_gpu.built && s_gpu.gpuGeneration == GpuGeneration() )
 	{

@@ -60,9 +60,6 @@ class FogController
 {
 public:
 	void Reset();                          // map change / disconnect -> Neutral (clears the CszFog latch)
-	// payload = AMBIENCE cmd body (45 bytes, layout 2.6), cmd/version already
-	// stripped by the dispatcher. Logs decoded values once at Info level.
-	void OnAmbienceEnvelope( const unsigned char *payload, int size );
 	// fog M1 Step 6: apply a decoded server CszFog state into the ambience
 	// snapshot via the shared ApplyRaw mapping, and latch CszFog authority so a
 	// later legacy Fog cannot downgrade it (spec 3.9). active=false clears to
@@ -82,12 +79,9 @@ extern FogController g_fog;
 // serverFogMask defaults to 1.0 (csz_fog_server_mask "1", no server override) so
 // density*1.0 is an IEEE-exact identity => pixel-for-pixel the pre-L0 fog. The
 // renderer applies this once at the view.ambience snapshot (the single chokepoint
-// every fog consumer reads). RESERVED: a future server-authoritative blackout
-// calls CszFogSetServerMask() (e.g. from MsgFunc_Fog); until then the cvar is the
-// sole source.
+// every fog consumer reads).
 void  CszFogRegisterCvars();            // registers csz_fog_server_mask + csz_fog_base (always; Release-safe)
-void  CszFogSetServerMask( float m );   // future server drive; clamps to [0,1]; m<0 clears override
-float CszFogServerMask();               // live [0,1]: override if armed, else the cvar (default 1.0)
+float CszFogServerMask();               // live [0,1]: the csz_fog_server_mask cvar (default 1.0)
 
 // L1 fog-base correctness A/B switch (csz_fog_base, default "1"). The Step 2
 // analytic base fog audited correct on all five optical points (radial 3D

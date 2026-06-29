@@ -33,10 +33,20 @@
  * exception statement from your version.
  */
 #pragma once
+#include "../core/csz_engine.h"   // cvar_t, csz::ReadCvar
 namespace csz
 {
 struct ViewSetup;
 struct SpotLightParams;
+
+// Resolve csz_fog_halfres into a render-target divisor (1 full / 2 half / 4
+// quarter). Shared by FogVolumeRender and the god-ray pass; each owns its own
+// size policy (ceil-from-view vs floor-from-full), so ONLY this formula is shared.
+inline int FogHalfresDivisor( cvar_t *cv )
+{
+	int hr = (int)( ReadCvar( cv, 1.0f ) + 0.5f );
+	return ( hr == 2 ) ? 4 : ( hr == 0 ? 1 : 2 );
+}
 
 // fog M1 Step 3 -- half-res flashlight ray-march producing shadowed light shafts
 // (the "Unreal-like" volumetric layer). Gated behind csz_fog_quality >= 1; needs

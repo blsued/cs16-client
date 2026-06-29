@@ -52,17 +52,11 @@ FogController g_fog;
 namespace
 {
 
-// AMBIENCE payload length (plan 2.3: cmd 1 body, cmd/version already stripped).
-const int kAmbiencePayloadBytes = 45;
-
 // L0 black-fog decouple seam (CONVENTIONS.md). serverFogMask is a [0,1] scalar the
 // renderer multiplies into the client fog density once per frame at the single
-// view.ambience snapshot. Default source = the csz_fog_server_mask cvar ("1" =
-// 1.0 = IEEE-exact identity => pixel-for-pixel the pre-L0 fog). A future
-// server-authoritative black-fog drive overrides it via CszFogSetServerMask();
-// s_serverMaskOverride < 0 means "no override, use the cvar".
+// view.ambience snapshot. Source = the csz_fog_server_mask cvar ("1" =
+// 1.0 = IEEE-exact identity => pixel-for-pixel the pre-L0 fog).
 cvar_t *s_cvarServerMask;            // csz_fog_server_mask, default "1"
-float   s_serverMaskOverride = -1.0f;
 
 // L1 fog-base correctness A/B switch (csz_fog_base, default "1"). 1 = corrected
 // analytic base fog (verbatim); 0 = legacy uniform-density fallback (heightFalloff
@@ -89,10 +83,6 @@ struct RawAmbience
 	float moonElevDeg, moonYawDeg, moonSizeDeg;
 	int moonR, moonG, moonB;
 	float moonHalo;
-	bool moonlightOn;
-	float mlElevDeg, mlYawDeg;
-	int mlR, mlG, mlB;
-	float mlIntensity;
 	// Analytic base fog (fog M1 Step 2). No wire field yet (the versioned CszFog
 	// channel is Step 6); these are set only via csz_devfogx for now and default
 	// to the environmental look (b=0, glow=0, maxOpacity=1, no bypass).
@@ -189,15 +179,6 @@ void ApplyRaw( const RawAmbience &raw )
 		p.moonHalo = raw.moonHalo;
 	}
 
-	if( raw.moonlightOn )
-	{
-		p.moonlightEnabled = true;
-		ElevYawToDir( raw.mlElevDeg, raw.mlYawDeg, p.moonlightDir );
-		p.moonlightColor[0] = (float)raw.mlR * ( 1.0f / 255.0f ) * raw.mlIntensity;
-		p.moonlightColor[1] = (float)raw.mlG * ( 1.0f / 255.0f ) * raw.mlIntensity;
-		p.moonlightColor[2] = (float)raw.mlB * ( 1.0f / 255.0f ) * raw.mlIntensity;
-	}
-
 	s_raw = raw;
 	s_current = p;
 
@@ -205,7 +186,6 @@ void ApplyRaw( const RawAmbience &raw )
 	// envelope; the per-field comparison against the server config is this
 	// protocol's runtime unit test).
 	char moonText[96];
-	char moonlightText[96];
 
 	if( raw.moonOn )
 	{
@@ -217,38 +197,9 @@ void ApplyRaw( const RawAmbience &raw )
 		snprintf( moonText, sizeof( moonText ), "moon=off" );
 	}
 
-	if( raw.moonlightOn )
-	{
-		snprintf( moonlightText, sizeof( moonlightText ), "moonlight(elev=%.1f yaw=%.1f %d,%d,%d i=%.2f)",
-			raw.mlElevDeg, raw.mlYawDeg, raw.mlR, raw.mlG, raw.mlB, raw.mlIntensity );
-	}
-	else
-	{
-		snprintf( moonlightText, sizeof( moonlightText ), "moonlight=off" );
-	}
-
-	CSZ_LogInfo( "fog", "ambience set: fog(%d,%d,%d d=%f) tint(%d,%d,%d) %s %s",
+	CSZ_LogInfo( "fog", "ambience set: fog(%d,%d,%d d=%f) tint(%d,%d,%d) %s",
 		raw.fogR, raw.fogG, raw.fogB, raw.fogDensity, raw.tintR, raw.tintG, raw.tintB,
-		moonText, moonlightText );
-}
-
-// --- little-endian readers (explicit shift-and-mask discipline, plan 2.3) ---
-
-unsigned int ReadU32le( const unsigned char *p )
-{
-	return ( (unsigned int)p[0] & 0xFF )
-	     | (( (unsigned int)p[1] & 0xFF ) << 8 )
-	     | (( (unsigned int)p[2] & 0xFF ) << 16 )
-	     | (( (unsigned int)p[3] & 0xFF ) << 24 );
-}
-
-float ReadF32le( const unsigned char *p )
-{
-	unsigned int bits = ReadU32le( p );
-	float f;
-
-	memcpy( &f, &bits, sizeof( f ));	// raw IEEE-754 bits (WRITE_LONG(*(int*)&f) on the server)
-	return f;
+		moonText );
 }
 
 #ifdef CSZ_DEV_TOOLS
@@ -365,7 +316,7 @@ void FogController::Reset()
 // through the shared ApplyRaw mapping (one chokepoint) and latches CszFog authority
 // so a later legacy Fog cannot downgrade the ambience (spec 3.9). The non-fog
 // ambience (tint/moon) starts from Neutral: CszFog is the authoritative fog source
-// for M1 and there is no other production ambience writer (OnAmbienceEnvelope dead).
+// for M1 and there is no other production ambience writer.
 void FogController::ApplyCszFog( const CszFogState &st )
 {
 	if( !st.active )
@@ -395,60 +346,6 @@ void FogController::ApplyCszFog( const CszFogState &st )
 bool FogController::HasCszState() const
 {
 	return s_hasCszState;
-}
-
-void FogController::OnAmbienceEnvelope( const unsigned char *payload, int size )
-{
-	// Fixed-length body; every group is always present, flags gate effect
-	// only (plan 2.3: the parser has no branch-dependent lengths).
-	if( payload == NULL || size != kAmbiencePayloadBytes )
-	{
-		CSZ_LogWarn( "fog", "AMBIENCE payload size %d (expected %d); message ignored", size, kAmbiencePayloadBytes );
-		return;
-	}
-
-	int flags = (int)payload[0] & 0xFF;
-	RawAmbience raw = NeutralRaw();
-
-	if( flags & 0x01 )	// bit0 fogEnabled
-	{
-		raw.fogR = (int)payload[1] & 0xFF;
-		raw.fogG = (int)payload[2] & 0xFF;
-		raw.fogB = (int)payload[3] & 0xFF;
-		raw.fogDensity = ReadF32le( payload + 4 );
-	}
-
-	if( flags & 0x02 )	// bit1 tintEnabled
-	{
-		raw.tintR = (int)payload[8] & 0xFF;
-		raw.tintG = (int)payload[9] & 0xFF;
-		raw.tintB = (int)payload[10] & 0xFF;
-	}
-
-	if( flags & 0x04 )	// bit2 moonEnabled
-	{
-		raw.moonOn = true;
-		raw.moonElevDeg = ReadF32le( payload + 11 );
-		raw.moonYawDeg = ReadF32le( payload + 15 );
-		raw.moonSizeDeg = ReadF32le( payload + 19 );
-		raw.moonR = (int)payload[23] & 0xFF;
-		raw.moonG = (int)payload[24] & 0xFF;
-		raw.moonB = (int)payload[25] & 0xFF;
-		raw.moonHalo = ReadF32le( payload + 26 );
-	}
-
-	if( flags & 0x08 )	// bit3 moonlightEnabled
-	{
-		raw.moonlightOn = true;
-		raw.mlElevDeg = ReadF32le( payload + 30 );
-		raw.mlYawDeg = ReadF32le( payload + 34 );
-		raw.mlR = (int)payload[38] & 0xFF;
-		raw.mlG = (int)payload[39] & 0xFF;
-		raw.mlB = (int)payload[40] & 0xFF;
-		raw.mlIntensity = ReadF32le( payload + 41 );
-	}
-
-	ApplyRaw( raw );	// Info-level decoded-value echo lives there
 }
 
 const AmbienceParams &FogController::Current() const
@@ -488,22 +385,10 @@ bool CszFogBaseCorrected()
 	return s_cvarFogBase != NULL ? ( s_cvarFogBase->value != 0.0f ) : true;
 }
 
-// Reserved hook for a future server-authoritative black-fog drive (e.g. mapped
-// from gmsgFog in hud_msg.cpp MsgFunc_Fog). m < 0 clears the override and falls
-// back to the cvar; m in [0,1] forces serverFogMask. Not wired this period.
-void CszFogSetServerMask( float m )
-{
-	s_serverMaskOverride = m < 0.0f ? -1.0f : ClampUnit( m );
-}
-
-// Live serverFogMask in [0,1]: the server override if armed, else the
-// csz_fog_server_mask cvar (default 1.0). Fails safe to 1.0 (identity) if the
-// cvar was never registered.
+// Live serverFogMask in [0,1]: the csz_fog_server_mask cvar (default 1.0). Fails
+// safe to 1.0 (identity) if the cvar was never registered.
 float CszFogServerMask()
 {
-	if( s_serverMaskOverride >= 0.0f )
-		return s_serverMaskOverride;
-
 	return s_cvarServerMask != NULL ? ClampUnit( s_cvarServerMask->value ) : 1.0f;
 }
 
