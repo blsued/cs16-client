@@ -24,4 +24,4 @@
 - geom/csz_world.cpp : FaceRec fields, anim-face list, AnimateLightStyles, UpdateWorldDynamics,
    R_TextureAnimation, draw-loop texanim/scroll/detail + observability log
 
-## Status: IMPLEMENTING
+## Status: DONE — Win32 Release build green (cszrender.lib + client.dll). DIFFS_READY_UNVERIFIED (runtime shader+visual OWED to TEST). See INTEGRATION-SPEC-B.md
