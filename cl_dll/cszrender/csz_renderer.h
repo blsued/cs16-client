@@ -42,6 +42,10 @@ struct FrameEntities
 	cl_entity_t *studio[kMaxEntities];  int numStudio;
 	cl_entity_t *sprites[kMaxEntities]; int numSprites;
 	cl_entity_t *brush[kMaxEntities];   int numBrush;
+	// INTEGRATION (M2 local-player shadow): the local first-person body, filtered
+	// out of studio[] (camera-inside-own-head) but kept here for a SHADOW-ONLY
+	// depth ingest. NULL in third person (then it draws normally via studio[]).
+	cl_entity_t *localPlayer;
 	void Clear();
 };
 

@@ -56,6 +56,7 @@
 #include "lighting/csz_flashlight_state.h"
 #include "lighting/csz_light_registry.h"
 #include "lighting/csz_shadowmap.h"
+#include "lighting/csz_engine_lights.h"	// INTEGRATION (M2): engine dlight/elight mirror
 
 namespace csz
 {
@@ -254,6 +255,7 @@ void FrameEntities::Clear()
 	numStudio = 0;
 	numSprites = 0;
 	numBrush = 0;
+	localPlayer = NULL;	// INTEGRATION (M2): re-ingested each frame in AddEntity
 }
 
 bool Renderer::OnHandshake( render_api_t *api )
@@ -280,6 +282,7 @@ void Renderer::OnHudInit()
 
 	RegisterSpriteCommands();	// csz_testsprite (T5)
 	RegisterLightingCommands();	// csz_testspot + csz_testlight (T6)
+	RegisterEngineLightCvars();	// INTEGRATION (M2): csz_dlight/csz_elight + _max/_intensity (engine dlight/elight mirror)
 	LightConeRegisterCvars();	// L6a: csz_flashlight_tp (default 1 = world-space visible beam) + _intensity
 	DustRegisterCvars();		// L7: csz_dust (default 1 = gated airborne dust) + _count/_intensity/_size
 	RegisterStudioTextureCvars();	// csz_dev_armskin (spec 4.3.1 layer 1 dev probe)
@@ -462,6 +465,9 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	FlashlightPublishToRegistry();					// slot 7.55: L6b -- mirror the decoupled
 									// per-flashlight state table into g_lights
 									// (real per-player flashlight feed wired at slot 7.5)
+	CollectEngineLights( view );					// slot 7.56: INTEGRATION (M2) -- mirror engine
+									// dlights (muzzle/explosion/TE_DLIGHT) + elights into the
+									// registry point bands (nearest-N); RunLightPasses adds them
 	g_lights.UpdateMatrices();					// slot 7.6: light matrix update
 	LightBudgetCompute( view );					// slot 7.65: L6b -- rank visible beams,
 									// assign budgetTier (full/cheap/cull) before any pass reads it
@@ -469,7 +475,7 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	EnterTakeover();						// slot 8
 
 	BeginPass( kTmShadow );
-	RenderShadowMaps( view, m_frame.studio, m_frame.numStudio );	// slot 9: shadow maps (before main clear)
+	RenderShadowMaps( view, m_frame.studio, m_frame.numStudio, m_frame.localPlayer );	// slot 9: shadow maps (before main clear); INTEGRATION (M2): local body cast shadow-only
 	EndPass( kTmShadow );
 
 	// Slot 10 clear: with fog on, the clear color IS the fog color -- the sky
@@ -740,7 +746,16 @@ void Renderer::AddEntity( int type, cl_entity_t *ent )
 		// cl_game.c wires it to CL_GetViewModel); M1 simplification: a
 		// trigger_camera view would hide the local body, accepted gap.
 		if( ent->player && ent == gEngfuncs.GetLocalPlayer() && !CL_IsThirdPerson())
+		{
+			// INTEGRATION (M2 local-player shadow): keep the local body OUT of the
+			// color/lit passes (studio[]) -- the camera-inside-own-head filter -- but
+			// retain it for the SHADOW-ONLY depth ingest so the body casts a shadow
+			// into the spot shadow map. RenderShadowMaps draws it depth-only; it is
+			// never added to studio[], so it still does not draw in first person.
+			// (Viewmodel shadow is the OTHER cluster's job; this is the body.)
+			m_frame.localPlayer = ent;
 			return;
+		}
 
 		if( m_frame.numStudio < FrameEntities::kMaxEntities )
 		{

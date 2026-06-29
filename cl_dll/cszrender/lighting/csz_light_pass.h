@@ -39,7 +39,11 @@ namespace csz
 struct ViewSetup;
 // Studio entity list is passed down from the composition root (lighting never
 // reads the Renderer; one-way dependency rule).
-void RenderShadowMaps( const ViewSetup &mainView, cl_entity_s *const *studioEnts, int studioCount ); // T7; honors cvar csz_light_shadow (B-class, default 1)
+void RenderShadowMaps( const ViewSetup &mainView, cl_entity_s *const *studioEnts, int studioCount,
+	cl_entity_s *localPlayerShadow ); // T7; honors cvar csz_light_shadow (B-class, default 1).
+	// localPlayerShadow (M2, may be NULL): the local first-person body, filtered out of the
+	// color/lit passes (camera-inside-own-head) but ingested SHADOW-ONLY into the depth pass
+	// so it casts into the spot shadow map. Viewmodel shadow is a separate cluster.
 void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, int studioCount,
 	cl_entity_s *const *brushEnts, int brushCount );   // T6; per active light: cull -> world+brush+studio additive
 void CollectRealFlashlights( const ViewSetup &mainView );  // L6c: feed the per-flashlight state table from live player state (local eye + other players' EF_DIMLIGHT) each frame; dev csz_flashlight_test overrides

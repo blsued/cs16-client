@@ -71,6 +71,12 @@ void UpdateSlot( ActiveLight &light )
 {
 	const LightDesc &d = light.desc;
 
+	// Point (omni) lights carry no view/proj/frustum: they never cast a shadow
+	// map (cube shadows are out of M2 scope) and are culled by distance rank in
+	// the engine-light mirror, not by a cone frustum. Skip the spot matrix math.
+	if( d.type == kLightPoint )
+		return;
+
 	// Spot projection: square cone, near 0.1, far = attenuation radius.
 	Mat4Perspective( d.fov, d.fov, 0.1f, d.radius, light.matProj );
 	Mat4ViewQuake( d.origin, d.angles, light.matView );
@@ -204,6 +210,79 @@ void LightRegistry::BuildSpotParams( const ActiveLight &light, SpotLightParams &
 	out.hotspotGain  = ReadCvar( GetCvarCached( &s_hot,      "csz_flashlight_hotspot" ),       1.4f );
 	out.hotspotSharp = ReadCvar( GetCvarCached( &s_hotSharp, "csz_flashlight_hotspot_sharp" ), 8.0f );
 	out.directGain   = ReadCvar( GetCvarCached( &s_dgain,    "csz_flashlight_direct_gain" ),   1.8f );
+}
+
+void LightRegistry::ResetEngineBand( int base, int count )
+{
+	if( base < 0 || base + count > kMaxLights )
+		CSZ_FatalInit( "lighting", "ResetEngineBand range out of bounds" );
+
+	for( int i = base; i < base + count; i++ )
+		s_slots[i].used = false;
+}
+
+int LightRegistry::PutEngineLight( int base, int count, const LightDesc &desc )
+{
+	if( base < 0 || base + count > kMaxLights )
+		CSZ_FatalInit( "lighting", "PutEngineLight range out of bounds" );
+
+	for( int i = base; i < base + count; i++ )
+	{
+		if( s_slots[i].used )
+			continue;
+
+		ActiveLight &light = s_slots[i];
+
+		light.used = true;
+		light.key = i;			// band slot is its own key (rebuilt every frame)
+		light.desc = desc;
+		light.shadowTexSlot = 0;	// point lights are shadowless (no cube map in M2)
+		light.budgetTier = 0;		// kBudgetFull: the budgeter ranks only spots, so pin
+						// point lights so RunLightPasses never skips them
+		UpdateSlot( light );		// no-op for kLightPoint, kept for contract symmetry
+		return i;
+	}
+
+	return -1;	// band full (caller already capped to count via distance rank)
+}
+
+void LightRegistry::BuildPointParams( const ActiveLight &light, SpotLightParams &out ) const
+{
+	const LightDesc &d = light.desc;
+
+	out.origin[0] = d.origin[0];
+	out.origin[1] = d.origin[1];
+	out.origin[2] = d.origin[2];
+
+	// Omni: no axis. The legacy linear-cone path (v3=0) with cosOuter=-1 lights
+	// every direction except an infinitesimal sliver opposite this arbitrary dir;
+	// ndotl already shades surfaces facing away, so the sliver is invisible. Point
+	// it straight down (the most-occluded direction for floor-standing geometry).
+	out.dir[0] = 0.0f;
+	out.dir[1] = 0.0f;
+	out.dir[2] = -1.0f;
+
+	out.color[0] = d.color[0];	// intensity premultiplied by the engine-light mirror
+	out.color[1] = d.color[1];
+	out.color[2] = d.color[2];
+	out.radius = d.radius;
+
+	// cosOuter=-1 (180deg), cosInner just inside it -> coneLegacy == 1 everywhere
+	// the surface can see the light. Denominator (cosInner-cosOuter)=0.001 > 0.
+	out.cosOuter = -1.0f;
+	out.cosInner = -0.999f;
+
+	Mat4Identity( out.matShadow );
+	out.shadowTexSlot = 0;		// shadowless
+
+	// Legacy linear-cone profile carries the premultiplied color unscaled:
+	// v3=0 -> shaped=coneLegacy(==1), gain=mix(1,directGain,0)=1. The crisp v3
+	// hotspot/edge are spot-only; leaving them zeroed keeps the omni pool flat.
+	out.v3 = 0.0f;
+	out.edgeExp = 1.0f;
+	out.hotspotGain = 0.0f;
+	out.hotspotSharp = 1.0f;
+	out.directGain = 1.0f;
 }
 
 }

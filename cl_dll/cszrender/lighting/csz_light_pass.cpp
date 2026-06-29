@@ -602,7 +602,8 @@ void CollectRealFlashlights( const ViewSetup &mainView )
 	}
 }
 
-void RenderShadowMaps( const ViewSetup &mainView, cl_entity_s *const *studioEnts, int studioCount )
+void RenderShadowMaps( const ViewSetup &mainView, cl_entity_s *const *studioEnts, int studioCount,
+	cl_entity_s *localPlayerShadow )
 {
 	// B-class quality seam (plan section 10 step 2): csz_light_shadow 0 keeps
 	// every light shadowless this frame -- UpdateMatrices already reset all
@@ -641,7 +642,7 @@ void RenderShadowMaps( const ViewSetup &mainView, cl_entity_s *const *studioEnts
 		if( shadowed >= 1 )
 			continue;
 
-		g_spotShadow.RenderDepth( *light, mainView, studioEnts, studioCount );
+		g_spotShadow.RenderDepth( *light, mainView, studioEnts, studioCount, localPlayerShadow );
 
 		if( light->shadowTexSlot != 0 )
 			shadowed++;
@@ -709,6 +710,23 @@ void RunLightPasses( const ViewSetup &mainView, cl_entity_s *const *studioEnts, 
 			continue;	// expires this frame; DecayFrame reaps it next ClearScene
 
 		active++;
+
+		// M2 engine point lights (dlights/elights mirrored by csz_engine_lights):
+		// omni additive contribution to world + brush + studio. Same DrawLitAdditive
+		// path as the spot direct pool, but BuildPointParams degenerates the cone to
+		// omni (cosOuter=-1, v3=0) and carries the premultiplied color/radius. No
+		// budgeter tier (it ranks spots only); the mirror already capped to nearest-N.
+		if( light->desc.type == kLightPoint )
+		{
+			SpotLightParams pp;
+
+			g_lights.BuildPointParams( *light, pp );
+			g_world.DrawLitAdditive( mainView, pp );
+			g_world.DrawBrushLitAdditive( mainView, pp, brushEnts, brushCount );
+			g_studio.DrawLitAdditive( mainView, pp, studioEnts, studioCount );
+			drawn++;
+			continue;
+		}
 
 		if( light->desc.type != kLightSpot )
 			continue;	// M1 implements spot only (plan 2.2 LightType note)
