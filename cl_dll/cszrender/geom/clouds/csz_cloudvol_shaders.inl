@@ -180,13 +180,23 @@ float HeightGradient( float hf )
 // MSVC C2026: a single raw string literal caps ~16 KB -- split into adjacent literals (the
 // compiler concatenates them into one contiguous GLSL source; identical text, no semantic change).
 R"GLSL(
-// MACRO SPATIAL COVERAGE FIELD over world horizontal XY (Quake Z-up). LOW-FREQUENCY (period
-// 1/u_covFreq ~42000u >> marchFar) so ONE "weather cell" spans the reachable sky => clouds-here /
-// clear-there with NO visible repeat; two INCOMMENSURATE taps (ratio 0.73) push the field's own
-// period to their LCM. World-anchored (u_covDrift default 0); the cloud texture drifts THROUGH it.
+// MACRO SPATIAL COVERAGE FIELD over world horizontal XY (Quake Z-up). HERO: the period is now SHORT
+// (1/u_covFreq ~16000u, ~marchFar) so ~4-8 discrete "weather cells" (puff centers) land in the
+// reachable sky instead of one mass. A short period would re-expose the f1 tap's GRID repeat across a
+// wide sky (~40000u footprint = ~2.5 periods) -- the user's #1 tiling complaint -- so three things
+// de-grid it: (1) a very-low-freq world-space DOMAIN WARP displaces each cell CENTER by up to ~0.35 of
+// a period, scattering the puffs off any lattice; (2) a second INCOMMENSURATE tap (ratio 0.73, weight
+// 0.4) whose period (~21900u) shares no small LCM with f1; (3) high cov_contrast so only sharp peaks
+// survive (fewer features to look repetitive). World-anchored (u_covDrift default 0) => no shimmer.
 float CoverageField( vec2 wxy )
 {
 	vec2 q  = wxy + u_windVec.xy * ( u_time * u_covDrift );
+	// de-grid DOMAIN WARP: sample a very-low-freq offset (period ~1/(u_covFreq*0.38) ~= 2.6 cells, so it
+	// distorts smoothly over the whole sky -- no high-freq edge noise) and push q by up to ~0.35 of a
+	// cell period. This is what guarantees the few puffs sit at irregular, NON-repeating positions.
+	float cellU = 1.0 / max( u_covFreq, 1e-9 );
+	vec2  warp  = ( texture( u_base3d, vec3( q * ( u_covFreq * 0.38 ), 0.137 ) ).gb * 2.0 - 1.0 ) * ( cellU * 0.35 );
+	q += warp;
 	float f1 = texture( u_base3d, vec3( q * u_covFreq, 0.317 ) ).r;
 	float f2 = texture( u_base3d, vec3( q * ( u_covFreq * 0.73 ) + vec2( 0.41, 0.19 ), 0.622 ) ).r;
 	return clamp( 0.6 * f1 + 0.4 * f2, 0.0, 1.0 );
@@ -197,7 +207,7 @@ float CoverageField( vec2 wxy )
 //   animate(drift+evolve) -> domain-warp + incommensurate de-tile taps
 //   STAGE 1 DILATE  : base = remap(perlinWorley.r, worleyFBM-1, 1, 0,1)        (round billows)
 //                     x HeightGradient (M3: smoothstep flat base, rounded dome, ->0 at both faces)
-//   STAGE 2 CARVE+LIFT : cloud = pow( remap(base, 1-cov, 1, 0,1), 0.6 )        (crisp edge, core re-LIFTED to ~1.0)
+//   STAGE 2 CARVE+LIFT : cloud = pow( remap(base, 1-cov, 1, 0,1), 0.45 )       (crisp edge, core re-LIFTED to ~1.0)
 //   STAGE 3 ERODE   : canonical remap-subtract (M2), self-localizing to the rim (billow base / wispy top)
 // M1 restores the pow(.,0.6) body-lift the v2 rebuild had deleted: WITHOUT a ~1.0 core the canonical
 // erosion's remap range collapses and erases the whole body into smoke-threads (Skybolt's documented
@@ -243,7 +253,7 @@ float SampleCloudDensity( vec3 p, int detail )
 	// pow(.,0.6) RE-LIFTS interiors so the core plateaus near 1.0. The deleted `* cov` cap (cov~0.55)
 	// used to pin the whole body at ~0.55, which broke STAGE-3's edge localization. The pow-lift is the
 	// Nubis coverage-dilation precondition: interior solid, only the feathery boundary stays low.
-	float cloud = pow( remap( base, 1.0 - cov, 1.0, 0.0, 1.0 ), 0.6 );
+	float cloud = pow( remap( base, 1.0 - cov, 1.0, 0.0, 1.0 ), 0.45 );  // HERO: 0.6->0.45 plateaus the core nearer 1.0 => fuller, more SOLID body, feeds STAGE-3 edge localization harder
 
 	// STAGE 3 CANONICAL remap-subtract erosion (M2, Schneider/Nubis): self-localizing -- now that M1
 	// lifts the core to ~1.0, raising the remap's lower input bound by `modifier*erode` eats ONLY the

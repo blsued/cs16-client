@@ -155,8 +155,8 @@ cvar_t *s_cvWindSpeed;   // csz_clouds_wind_speed    60    [0..600]     horizont
 cvar_t *s_cvEvolve;      // csz_clouds_evolve        35    [0..400]     volume-EVOLVE (morph) rate
 // PATH A (macro cloud distribution) hot cvars: the low-freq world-XY coverage FIELD that gives
 // "clouds in some regions, clear sky in others" + the incommensurate base de-tile.
-cvar_t *s_cvCovScale;    // csz_clouds_cov_scale     42000 [8000..120000] coverage-FIELD world period (freq=1/scale); >> footprint => no visible repeat
-cvar_t *s_cvCovContrast; // csz_clouds_cov_contrast  0.85  [0..2]         field spread around the preset coverage level (per-weather preset; HIGH=scattered gaps, LOW=mild overcast variation)
+cvar_t *s_cvCovScale;    // csz_clouds_cov_scale     16000 [8000..120000] coverage-FIELD world period (freq=1/scale); SHORT enough to pack ~4-8 puffs in view, de-grided by the CoverageField domain-warp + 0.73x tap
+cvar_t *s_cvCovContrast; // csz_clouds_cov_contrast  1.10  [0..2]         field spread around the coverage level (HIGH + low level => sparse discrete puffs with big clear-sky gaps)
 cvar_t *s_cvCovDrift;    // csz_clouds_cov_drift      0.0   [0..2]         weather-system world drift fraction of wind (0 = world-static field; existing cloud drift/evolve unchanged)
 cvar_t *s_cvDetile;      // csz_clouds_detile         0.5   [0..0.5]       blend weight of the incommensurate (0.73x) second base tap (de-repeats within-region shape; 0 = old single tap)
 
@@ -194,8 +194,8 @@ void RegisterCvarsImpl()
 	s_cvDbgMode       = gEngfuncs.pfnRegisterVariable( "csz_clouds_dbg_mode",        "0",    FCVAR_CLIENTDLL );
 	// REBUILD v2 NEW cvars: the single nightness luminance authority + the half-res sharpness pipeline.
 	s_cvNightLum    = gEngfuncs.pfnRegisterVariable( "csz_clouds_night_lum",    "0.06", FCVAR_CLIENTDLL );  // midnight cloud luma as a fraction of day (set EQUAL to the world day-for-night floor). Single night dimming authority.
-	s_cvFineDiv     = gEngfuncs.pfnRegisterVariable( "csz_clouds_fine_div",     "2",    FCVAR_CLIENTDLL );  // PERF: in-cloud fine-step divisor (dtFine = dtCoarse / fine_div). 4->2 HALVES in-cloud iters (the looking-up 9-10ms peak driver) while leaving dtCoarse -- hence first-hit/silhouette precision + thin-wisp catching (SHARPNESS) -- untouched. dtFine 4.4->8.9u stays ~34x oversampled vs the 300u detail field; energy-conserving Beer-Lambert keeps density/transmittance. Live cvar: A/B 2/3/4 without a rebuild.
-	s_cvCas         = gEngfuncs.pfnRegisterVariable( "csz_clouds_cas",          "0.2",  FCVAR_CLIENTDLL );  // M4: 0.5->0.2 -- CAS crisps the high-freq strands we are REMOVING, so back it off (upsample pass; 0 = bilateral only)
+	s_cvFineDiv     = gEngfuncs.pfnRegisterVariable( "csz_clouds_fine_div",     "3",    FCVAR_CLIENTDLL );  // PERF: in-cloud fine-step divisor (dtFine = dtCoarse / fine_div). HERO: 2->3 -- a few sparse dense puffs (low coverage) make the extra INTERIOR samples affordable while removing under-integration banding inside the now-opaque cores. Live cvar: A/B 2/3/4 without a rebuild.
+	s_cvCas         = gEngfuncs.pfnRegisterVariable( "csz_clouds_cas",          "0.10", FCVAR_CLIENTDLL );  // HERO: 0.2->0.10 -- rounded hero puffs have little high-freq edge to crisp; back CAS off so it does not re-introduce the fray we are smoothing away (upsample pass; 0 = bilateral only)
 	s_cvDepthSigma  = gEngfuncs.pfnRegisterVariable( "csz_clouds_depth_sigma",  "0.01", FCVAR_CLIENTDLL );  // joint-bilateral DEPTH edge-stop falloff (1/world-u of linear depth) -> crisp vs terrain
 	s_cvAlphaSigma  = gEngfuncs.pfnRegisterVariable( "csz_clouds_alpha_sigma",  "8.0",  FCVAR_CLIENTDLL );  // joint-bilateral cloud-ALPHA edge-stop falloff -> crisp cloud-vs-sky silhouette
 	// LOOK hot cvars (swept live, no rebuild). Defaults = the iter-2 SUBSTANCE-LOCK target:
@@ -217,11 +217,11 @@ void RegisterCvarsImpl()
 	// detailscale 1400->300 (fine crisp wisps, not coarse 43u lumps), hbase 0.15->0.12 (feathered
 	// flat base), htop 0.55->0.45 (rounded dome), erode_depth->0.55 (edge bite), sunfwd 1.7->0.6
 	// (bound day forward beam), moon 1.9->1.0 (RELATIVE dial; csz_clouds_night_lum owns dimming).
-	s_cvCoverage    = gEngfuncs.pfnRegisterVariable( "csz_clouds_coverage",    "0.55",  FCVAR_CLIENTDLL );  // M4: 0.40->0.55 -- scattered-but-substantial cumulus
-	s_cvDensity     = gEngfuncs.pfnRegisterVariable( "csz_clouds_density",     "1.6",   FCVAR_CLIENTDLL );  // M4: 1.15->1.6 -- raise optical opacity (on top of M1, not a substitute)
-	s_cvSigma       = gEngfuncs.pfnRegisterVariable( "csz_clouds_sigma",       "0.006", FCVAR_CLIENTDLL );  // M4: 0.0045->0.006 -- extinction coeff
-	s_cvBaseScale   = gEngfuncs.pfnRegisterVariable( "csz_clouds_basescale",   "2000",  FCVAR_CLIENTDLL );  // REBUILD: distinct cumulus across deck; de-tile hides the 2000u repeat
-	s_cvDetail      = gEngfuncs.pfnRegisterVariable( "csz_clouds_detail",      "0.35",  FCVAR_CLIENTDLL );  // M4: 0.85->0.35 -- subtle edge erosion (R4 #4)
+	s_cvCoverage    = gEngfuncs.pfnRegisterVariable( "csz_clouds_coverage",    "0.30",  FCVAR_CLIENTDLL );  // HERO: 0.55->0.30 -- field LEVEL down so most columns fall below threshold => clear-sky gaps; only the few field peaks become puffs. Sparse, not a deck.
+	s_cvDensity     = gEngfuncs.pfnRegisterVariable( "csz_clouds_density",     "3.0",   FCVAR_CLIENTDLL );  // HERO: 1.6->3.0 -- density scale on the [0,1] scalar; pushes the few puffs' cores past opacity (solid, not translucent). On top of M1, not a substitute.
+	s_cvSigma       = gEngfuncs.pfnRegisterVariable( "csz_clouds_sigma",       "0.015", FCVAR_CLIENTDLL );  // HERO: 0.006->0.015 -- extinction coeff; sigma*density*thick >> 4 => fully opaque hero cores.
+	s_cvBaseScale   = gEngfuncs.pfnRegisterVariable( "csz_clouds_basescale",   "3200",  FCVAR_CLIENTDLL );  // HERO: 2000->3200 -- larger base cells = bigger, ROUNDED low-freq billow lobes (hero-sized puffs, not popcorn). De-tile taps hide the repeat.
+	s_cvDetail      = gEngfuncs.pfnRegisterVariable( "csz_clouds_detail",      "0.22",  FCVAR_CLIENTDLL );  // HERO: 0.35->0.22 -- subtler edge erosion so detail frays ONLY the rim, never the rounded interior
 	s_cvDetailScale = gEngfuncs.pfnRegisterVariable( "csz_clouds_detailscale", "1000",  FCVAR_CLIENTDLL );  // M4: 300->1000 -- smoke-strand (~20-75u) -> cauliflower-lobe scale
 	s_cvHBase       = gEngfuncs.pfnRegisterVariable( "csz_clouds_hbase",       "0.16",  FCVAR_CLIENTDLL );  // M3: 0.12->0.16 -- smoothstep flat base end (R1 §1b)
 	s_cvHTop        = gEngfuncs.pfnRegisterVariable( "csz_clouds_htop",        "0.88",  FCVAR_CLIENTDLL );  // M3: 0.45->0.88 -- rounded dome fade-out start (R1 §1b)
@@ -247,7 +247,7 @@ void RegisterCvarsImpl()
 	// STRUCTURE hot cvars (iter-3): stacked cauliflower turrets + shadowed valleys + irregular base.
 	// Defaults already show clearly separated lobes with internal shadow pockets out of the box.
 	s_cvBillow      = gEngfuncs.pfnRegisterVariable( "csz_clouds_billow",      "0.10",  FCVAR_CLIENTDLL );  // DEPRECATED (v3): turret hard-carve removed
-	s_cvErodeDepth  = gEngfuncs.pfnRegisterVariable( "csz_clouds_erode_depth", "0.25",  FCVAR_CLIENTDLL );  // M4: 0.55->0.25 -- shallower canonical remap-subtract erosion bite
+	s_cvErodeDepth  = gEngfuncs.pfnRegisterVariable( "csz_clouds_erode_depth", "0.20",  FCVAR_CLIENTDLL );  // HERO: 0.25->0.20 -- shallower remap-subtract lower bound: keep the cauliflower rim, stop the lace that thins the body
 	s_cvErodeOct    = gEngfuncs.pfnRegisterVariable( "csz_clouds_erode_oct",   "3",     FCVAR_CLIENTDLL );
 	// codex compare2: LOWER selfshadow (1.6 -> 0.85) so cores read DEEP GREY, not the black-smoke
 	// charcoal the prior 1.6 produced; the cap-light + tonal range keep the lit/shadow contrast.
@@ -275,8 +275,8 @@ void RegisterCvarsImpl()
 	s_cvEvolve      = gEngfuncs.pfnRegisterVariable( "csz_clouds_evolve",       "35",   FCVAR_CLIENTDLL );
 	// PATH A (macro cloud distribution): coverage-FIELD scale/contrast/drift + base de-tile.
 	// cov_contrast is re-pushed per weather preset (scattered=high gaps, overcast=mild variation).
-	s_cvCovScale    = gEngfuncs.pfnRegisterVariable( "csz_clouds_cov_scale",    "42000", FCVAR_CLIENTDLL );
-	s_cvCovContrast = gEngfuncs.pfnRegisterVariable( "csz_clouds_cov_contrast", "0.85",  FCVAR_CLIENTDLL );
+	s_cvCovScale    = gEngfuncs.pfnRegisterVariable( "csz_clouds_cov_scale",    "16000", FCVAR_CLIENTDLL );  // HERO: 42000->16000 -- cell period; packs ~4-8 discrete weather cells (puff centers) into the reachable sky (footprint ~marchFar 20000 across). The shader CoverageField domain-warp + 0.73x incommensurate tap keep this short period from reading as a GRID (the #1 tiling complaint). A/B 12000-20000 for exact count.
+	s_cvCovContrast = gEngfuncs.pfnRegisterVariable( "csz_clouds_cov_contrast", "1.10",  FCVAR_CLIENTDLL );  // HERO: 0.85->1.10 -- sharpen the existence threshold so a column is decisively inside-a-puff or clear (no wisp band). Paired with the LOW 0.30 level => sparse discrete puffs, big gaps.
 	s_cvCovDrift    = gEngfuncs.pfnRegisterVariable( "csz_clouds_cov_drift",    "0.0",   FCVAR_CLIENTDLL );
 	s_cvDetile      = gEngfuncs.pfnRegisterVariable( "csz_clouds_detile",       "0.5",   FCVAR_CLIENTDLL );
 	s_cvarsReady = true;
