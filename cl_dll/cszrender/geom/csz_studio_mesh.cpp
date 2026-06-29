@@ -101,6 +101,8 @@ void ReleaseModel( StudioModelGpu &m )
 					glDeleteVertexArrays( 1, &mesh.vao );
 				if( mesh.vbo != 0 )
 					glDeleteBuffers( 1, &mesh.vbo );
+				if( mesh.ibo != 0 )
+					glDeleteBuffers( 1, &mesh.ibo );
 			}
 		}
 
@@ -191,9 +193,12 @@ bool BuildOneMesh( const studiohdr_t *hdr, const mstudiomodel_t *psub,
 
 	int vertCount = tris * 3;
 	float *verts = new( std::nothrow ) float[(size_t)vertCount * ( kVertexBytes / sizeof( float ))];
+	unsigned int *indices = new( std::nothrow ) unsigned int[(size_t)vertCount];
 
-	if( verts == NULL )
+	if( verts == NULL || indices == NULL )
 	{
+		delete[] verts;
+		delete[] indices;
 		CSZ_LogError( "studio", "out of memory building mesh for %s", hdr->name );
 		return false;
 	}
@@ -242,11 +247,17 @@ bool BuildOneMesh( const studiohdr_t *hdr, const mstudiomodel_t *psub,
 		ptricmds += 4 * n;
 	}
 
+	for( int k = 0; k < cursor; k++ )
+		indices[k] = (unsigned int)k;
+
 	glGenVertexArrays( 1, &out.vao );
 	BindVao( out.vao );
 	glGenBuffers( 1, &out.vbo );
 	glBindBuffer( GL_ARRAY_BUFFER, out.vbo );
 	glBufferData( GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)cursor * kVertexBytes ), verts, GL_STATIC_DRAW );
+	glGenBuffers( 1, &out.ibo );
+	glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, out.ibo );
+	glBufferData( GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)((size_t)cursor * sizeof( unsigned int )), indices, GL_STATIC_DRAW );
 
 	glEnableVertexAttribArray( 0 );
 	glVertexAttribPointer( 0, 3, GL_FLOAT, GL_FALSE, kVertexBytes, (const void *)0 );
@@ -257,12 +268,16 @@ bool BuildOneMesh( const studiohdr_t *hdr, const mstudiomodel_t *psub,
 	glEnableVertexAttribArray( 3 );
 	glVertexAttribIPointer( 3, 1, GL_INT, kVertexBytes, (const void *)( 8 * sizeof( float )));
 
+	// VAO captures the element binding; unbind VAO first so the IBO unbind
+	// below does not strip it out of the VAO state.
 	BindVao( 0 );
 	glBindBuffer( GL_ARRAY_BUFFER, 0 );
+	glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, 0 );
 
 	delete[] verts;
+	delete[] indices;
 
-	out.indexCount = cursor;	// vertex count for glDrawArrays (verts are in triangle order)
+	out.indexCount = cursor;
 	return true;
 }
 

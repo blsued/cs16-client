@@ -431,7 +431,7 @@ void DrawModelMeshes( StudioModelGpu *gpu, const studiohdr_t *hdr, int body,
 		}
 
 		BindVao( mesh.vao );
-		glDrawArrays( GL_TRIANGLES, 0, mesh.indexCount );	// verts emitted in triangle order; identity IBO removed
+		glDrawElements( GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, (const void *)0 );
 	}
 }
 
