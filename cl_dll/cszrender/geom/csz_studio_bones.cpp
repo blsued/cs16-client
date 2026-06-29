@@ -16,9 +16,11 @@
  * Bone math adapted from this fork's own StudioModelRenderer.cpp /
  * GameStudioModelRenderer.cpp / studio_util.cpp / pm_shared/pm_math.cpp
  * (HLSDK lineage, sanctioned source per plan section 6). Differences from
- * stock are deliberate M1 reductions: no bone controllers, no sequence
- * transition fade, no latched-state interpolation, seqgroup 0 only, and
- * NO mutation of cl_entity_t/curstate (gait state lives in this file).
+ * stock are deliberate reductions: no sequence transition fade, no
+ * latched-state interpolation, seqgroup 0 only. Bone controllers + mouth
+ * are now applied (SHOULD 5, csz_bonelerp). M2c writes WORLD attachment
+ * points into ent->attachment[] (MUST 1, csz_attach) -- the one sanctioned
+ * mutation of cl_entity_t; gait state still lives privately in this file.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the

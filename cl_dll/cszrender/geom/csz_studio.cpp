@@ -43,6 +43,9 @@
 #include "../core/csz_log.h"
 #include "../core/csz_shader.h"
 
+#include "pm_defs.h"	// PM_WORLD_ONLY, pmtrace_t -- SHOULD 6 blob-shadow ground trace
+#include "event_api.h"	// gEngfuncs.pEventAPI->EV_SetTraceHull / EV_PlayerTrace
+
 #include <math.h>
 #include <stdlib.h>	// qsort (transparent studio back-to-front sort)
 
@@ -109,6 +112,18 @@ struct StudioState
 };
 
 StudioState s_studio;
+
+// SHOULD 6 blob-shadow GPU state (own program + dynamic VBO; lifecycle mirrors the sprite pass).
+struct BlobState
+{
+	bool ready;
+	int gpuGeneration;
+	ShaderProgram program;
+	int uViewProj;
+	unsigned int vao, vbo;
+};
+
+BlobState s_blob;
 
 void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 {
@@ -595,9 +610,11 @@ cvar_t *s_rimPowerCvar = NULL;
 cvar_t *s_rendermodeCvar = NULL;	// csz_studio_rendermode
 cvar_t *s_renderfxCvar = NULL;		// csz_renderfx
 cvar_t *s_chromeCvar = NULL;		// csz_chrome (SHOULD 4)
+cvar_t *s_blobCvar = NULL;		// csz_blobshadow (SHOULD 6)
 
 inline bool RendermodeEnabled() { return ( s_rendermodeCvar == NULL ) || ( s_rendermodeCvar->value != 0.0f ); }
 inline bool RenderfxEnabled()   { return ( s_renderfxCvar == NULL ) || ( s_renderfxCvar->value != 0.0f ); }
+inline bool BlobShadowEnabled() { return ( s_blobCvar == NULL ) || ( s_blobCvar->value != 0.0f ); }
 // SHOULD 4: 1 = per-bone chrome (default ON / fail-safe), 0 = legacy global view-basis sphere map.
 inline int  ChromeMode()        { return ( s_chromeCvar == NULL || s_chromeCvar->value != 0.0f ) ? 1 : 0; }
 
@@ -1019,6 +1036,134 @@ bool DrawShellEntity( const ViewSetup &view, cl_entity_s *ent, float extrude )
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// SHOULD 6 blob-shadow geometry. Each entity contributes one ground-aligned disc fan.
+// ---------------------------------------------------------------------------
+inline float ClampFloat( float v, float lo, float hi )
+{
+	return ( v < lo ) ? lo : (( v > hi ) ? hi : v );
+}
+
+const int kBlobSegments = 12;
+const int kBlobVertsPerBlob = kBlobSegments * 3;	// fan as independent triangles
+const int kBlobFloats = 4;				// pos3 + alpha1
+const int kMaxBlobs = 128;
+
+float s_blobVerts[kMaxBlobs * kBlobVertsPerBlob * kBlobFloats];
+
+void EnsureBlobGpu()
+{
+	if( s_blob.ready && s_blob.gpuGeneration == GpuGeneration())
+		return;
+
+	if( s_blob.gpuGeneration != GpuGeneration())
+	{
+		s_blob.program.program = 0;	// stale generation: forget, never delete (T1 rule)
+		s_blob.vao = s_blob.vbo = 0;
+	}
+
+	BuildProgram( "csz_studio_blob", kStudioBlobVs, kStudioBlobFs, true, s_blob.program );
+	s_blob.uViewProj = UniformLoc( s_blob.program, "u_viewProj" );
+
+	glGenVertexArrays( 1, &s_blob.vao );
+	BindVao( s_blob.vao );
+	glGenBuffers( 1, &s_blob.vbo );
+	glBindBuffer( GL_ARRAY_BUFFER, s_blob.vbo );
+
+	const int stride = kBlobFloats * (int)sizeof( float );
+
+	glEnableVertexAttribArray( 0 );
+	glVertexAttribPointer( 0, 3, GL_FLOAT, GL_FALSE, stride, (const void *)0 );
+	glEnableVertexAttribArray( 1 );
+	glVertexAttribPointer( 1, 1, GL_FLOAT, GL_FALSE, stride, (const void *)( 3 * sizeof( float )));
+
+	BindVao( 0 );
+	glBindBuffer( GL_ARRAY_BUFFER, 0 );
+
+	s_blob.gpuGeneration = GpuGeneration();
+	s_blob.ready = true;
+}
+
+// Traces the ground below an entity and appends one disc fan into s_blobVerts. Returns the
+// number of floats written (0 = no ground / no blob). vbase points at this blob's slot.
+int BuildBlob( const cl_entity_s *ent, const studiohdr_t *hdr, float strength, float *vbase )
+{
+	if( gEngfuncs.pEventAPI == NULL )
+		return 0;
+
+	float start[3] = { ent->origin[0], ent->origin[1], ent->origin[2] };
+	float end[3] = { ent->origin[0], ent->origin[1], ent->origin[2] - 4096.0f };
+	pmtrace_t tr;
+
+	gEngfuncs.pEventAPI->EV_SetTraceHull( 2 );	// point hull
+	gEngfuncs.pEventAPI->EV_PlayerTrace( start, end, PM_WORLD_ONLY, -1, &tr );
+
+	if( tr.allsolid || tr.fraction >= 1.0f )
+		return 0;	// no ground beneath
+
+	float n[3] = { tr.plane.normal[0], tr.plane.normal[1], tr.plane.normal[2] };
+	float nlen = sqrtf( n[0] * n[0] + n[1] * n[1] + n[2] * n[2] );
+
+	if( nlen < 1e-3f )
+	{
+		n[0] = 0.0f; n[1] = 0.0f; n[2] = 1.0f;	// degenerate plane: assume flat floor
+	}
+	else
+	{
+		n[0] /= nlen; n[1] /= nlen; n[2] /= nlen;
+	}
+
+	// Tangent basis on the ground plane.
+	float ref[3] = { 0.0f, 0.0f, 1.0f };
+
+	if( fabsf( n[2] ) > 0.99f )
+	{
+		ref[0] = 1.0f; ref[1] = 0.0f; ref[2] = 0.0f;
+	}
+
+	float t1[3] = { ref[1] * n[2] - ref[2] * n[1], ref[2] * n[0] - ref[0] * n[2], ref[0] * n[1] - ref[1] * n[0] };
+	float t1len = sqrtf( t1[0] * t1[0] + t1[1] * t1[1] + t1[2] * t1[2] );
+
+	if( t1len < 1e-3f )
+		return 0;
+
+	t1[0] /= t1len; t1[1] /= t1len; t1[2] /= t1len;
+
+	float t2[3] = { n[1] * t1[2] - n[2] * t1[1], n[2] * t1[0] - n[0] * t1[2], n[0] * t1[1] - n[1] * t1[0] };
+
+	// Radius from the entity probe (feet-ish footprint, not the full body sphere).
+	float radius = ClampFloat( EntityProbeRadius( ent, hdr ) * 0.6f, 10.0f, 32.0f );
+	const float kLift = 1.0f;	// raise the disc off the surface (anti z-fight, plus polygon offset)
+	float center[3] = {
+		tr.endpos[0] + n[0] * kLift,
+		tr.endpos[1] + n[1] * kLift,
+		tr.endpos[2] + n[2] * kLift };
+
+	const float kTwoPi = 6.2831853f;
+	float *v = vbase;
+
+	for( int i = 0; i < kBlobSegments; i++ )
+	{
+		float a0 = ( (float)i / (float)kBlobSegments ) * kTwoPi;
+		float a1 = ( (float)( i + 1 ) / (float)kBlobSegments ) * kTwoPi;
+		float c0 = cosf( a0 ), s0 = sinf( a0 );
+		float c1 = cosf( a1 ), s1 = sinf( a1 );
+
+		// center (dark), rim a0 (0), rim a1 (0)
+		v[0] = center[0]; v[1] = center[1]; v[2] = center[2]; v[3] = strength; v += kBlobFloats;
+		v[0] = center[0] + ( t1[0] * c0 + t2[0] * s0 ) * radius;
+		v[1] = center[1] + ( t1[1] * c0 + t2[1] * s0 ) * radius;
+		v[2] = center[2] + ( t1[2] * c0 + t2[2] * s0 ) * radius;
+		v[3] = 0.0f; v += kBlobFloats;
+		v[0] = center[0] + ( t1[0] * c1 + t2[0] * s1 ) * radius;
+		v[1] = center[1] + ( t1[1] * c1 + t2[1] * s1 ) * radius;
+		v[2] = center[2] + ( t1[2] * c1 + t2[2] * s1 ) * radius;
+		v[3] = 0.0f; v += kBlobFloats;
+	}
+
+	return kBlobVertsPerBlob * kBlobFloats;
+}
+
 }
 
 // S4-fix (codex S4 Low): register the studio rim cvars once at HUD init, parity with the
@@ -1041,6 +1186,8 @@ void StudioRegisterCvars()
 	// SHOULD 5: csz_bonelerp (read by the bones module via pfnGetCvarPointer). Controllers +
 	// mouth only; cross-sequence transition lerp + multi-seqgroup deferred (see report).
 	gEngfuncs.pfnRegisterVariable( "csz_bonelerp", "1", FCVAR_CLIENTDLL );
+	if( s_blobCvar == NULL )	// SHOULD 6
+		s_blobCvar = gEngfuncs.pfnRegisterVariable( "csz_blobshadow", "1", FCVAR_CLIENTDLL );
 }
 
 void StudioRenderer::OnModelUnloaded( model_t *mod )
@@ -1082,6 +1229,24 @@ void StudioRenderer::DestroyAll()
 			DestroyProgram( s_studio.shellProgram );
 		else
 			s_studio.shellProgram.program = 0;
+	}
+
+	// SHOULD 6 blob GPU objects (own generation guard).
+	if( s_blob.ready || s_blob.program.program != 0 )
+	{
+		if( s_blob.gpuGeneration == GpuGeneration())
+		{
+			if( s_blob.program.program != 0 )
+				DestroyProgram( s_blob.program );
+			if( s_blob.vao != 0 )
+				glDeleteVertexArrays( 1, &s_blob.vao );
+			if( s_blob.vbo != 0 )
+				glDeleteBuffers( 1, &s_blob.vbo );
+		}
+
+		s_blob.program.program = 0;
+		s_blob.vao = s_blob.vbo = 0;
+		s_blob.ready = false;
 	}
 
 	s_studio.shaderReady = false;
@@ -1141,7 +1306,9 @@ void StudioRenderer::DrawDepth( const ViewSetup &lightView, const Frustum &light
 
 	for( int i = 0; i < count; i++ )
 	{
-		if( ents[i] != NULL && DrawEntity( cullView, ents[i], true, NULL ))
+		// MUST 2: transparent entities do not write solid shadow-map depth (a ghost/additive
+		// model should not cast an opaque shadow). Opaque + glowshell models still do.
+		if( ents[i] != NULL && !IsTransparentEntity( ents[i] ) && DrawEntity( cullView, ents[i], true, NULL ))
 			drawn++;
 	}
 
@@ -1170,7 +1337,9 @@ void StudioRenderer::DrawLitAdditive( const ViewSetup &view, const SpotLightPara
 
 	for( int i = 0; i < count; i++ )
 	{
-		if( ents[i] != NULL && DrawEntity( view, ents[i], true, &light ))
+		// MUST 2: transparent entities are not lit opaque-style here (they have no opaque depth
+		// for the additive flashlight to land on; they self-light in the transparent sub-pass).
+		if( ents[i] != NULL && !IsTransparentEntity( ents[i] ) && DrawEntity( view, ents[i], true, &light ))
 			drawn++;
 	}
 
@@ -1317,6 +1486,83 @@ void StudioRenderer::DrawGlowShells( const ViewSetup &view, cl_entity_s *const *
 	{
 		s_nextStatsTime = now + 1.0f;
 		CSZ_LogDev( "studio", "glowshell %d studio entities", s_shellDrawn );
+	}
+}
+
+void StudioRenderer::DrawBlobShadows( const ViewSetup &view, cl_entity_s *const *ents, int count )
+{
+	if( count <= 0 || !BlobShadowEnabled())
+		return;
+
+	const float kMaxDist = 2000.0f;
+	const float kMaxDistSq = kMaxDist * kMaxDist;
+	const float kStrength = 0.45f;	// center darkness (alpha)
+
+	int numBlobs = 0;
+	int numFloats = 0;
+
+	for( int i = 0; i < count && numBlobs < kMaxBlobs; i++ )
+	{
+		cl_entity_s *ent = ents[i];
+
+		if( ent == NULL )
+			continue;
+
+		float dx = ent->origin[0] - view.origin[0];
+		float dy = ent->origin[1] - view.origin[1];
+		float dz = ent->origin[2] - view.origin[2];
+
+		if( dx * dx + dy * dy + dz * dz > kMaxDistSq )
+			continue;
+
+		model_t *mod = NULL;
+		studiohdr_t *hdr = ResolveStudioModel( ent, &mod );
+
+		if( hdr == NULL )
+			continue;
+
+		int wrote = BuildBlob( ent, hdr, kStrength, &s_blobVerts[numFloats] );
+
+		if( wrote > 0 )
+		{
+			numFloats += wrote;
+			numBlobs++;
+		}
+	}
+
+	if( numBlobs == 0 )
+		return;
+
+	EnsureBlobGpu();
+
+	UseProgram( s_blob.program.program );
+	glUniformMatrix4fv( s_blob.uViewProj, 1, GL_FALSE, view.matViewProj.m );
+
+	BindVao( s_blob.vao );
+	glBindBuffer( GL_ARRAY_BUFFER, s_blob.vbo );
+	glBufferData( GL_ARRAY_BUFFER, (GLsizeiptr)( (size_t)numFloats * sizeof( float )), s_blobVerts, GL_STREAM_DRAW );
+	glBindBuffer( GL_ARRAY_BUFFER, 0 );
+
+	SetBlend( kBlendAlpha );
+	SetDepthWrite( false );
+	SetDepthTest( true );
+	SetCull( false );
+	SetPolygonOffset( true, -1.0f, -1.0f );	// pull the coplanar disc toward the camera (anti z-fight)
+
+	glDrawArrays( GL_TRIANGLES, 0, numBlobs * kBlobVertsPerBlob );
+
+	SetPolygonOffset( false, 0.0f, 0.0f );
+	SetBlend( kBlendNone );
+	SetDepthWrite( true );
+	BindVao( 0 );
+
+	static float s_nextStatsTime;
+	float now = ClientTime();
+
+	if( now >= s_nextStatsTime )
+	{
+		s_nextStatsTime = now + 1.0f;
+		CSZ_LogDev( "studio", "blobshadow %d studio entities", numBlobs );
 	}
 }
 

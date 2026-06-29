@@ -475,3 +475,28 @@ void main()
 	fragColor = vec4( u_shellColor, u_shellAlpha );
 }
 )GLSL";
+
+// SHOULD 6 blob/drop shadow (csz_blobshadow): a cheap dark ground disc beneath each studio
+// entity (classic r_shadows look), separate from the projected shadow maps. Pre-built world-
+// space disc verts carry a per-vertex alpha (dark at center, 0 at the rim) for a soft falloff;
+// the FS just paints black at that alpha (alpha blend darkens the ground).
+static const char kStudioBlobVs[] = R"GLSL(#version 330 core
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in float a_alpha;
+uniform mat4 u_viewProj;
+out float v_alpha;
+void main()
+{
+	v_alpha = a_alpha;
+	gl_Position = u_viewProj * vec4( a_pos, 1.0 );
+}
+)GLSL";
+
+static const char kStudioBlobFs[] = R"GLSL(#version 330 core
+in float v_alpha;
+out vec4 fragColor;
+void main()
+{
+	fragColor = vec4( 0.0, 0.0, 0.0, v_alpha );
+}
+)GLSL";

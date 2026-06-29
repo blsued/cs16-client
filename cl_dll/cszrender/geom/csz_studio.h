@@ -55,6 +55,9 @@ public:
 	// MUST 3 (csz_renderfx): the additive kRenderFxGlowShell extrude pass. Independent of
 	// rendermode; runs after the opaque studio pass (kTmStudio) per the INTEGRATION SPEC.
 	void DrawGlowShells( const ViewSetup &view, cl_entity_s *const *ents, int count );
+	// SHOULD 6 (csz_blobshadow): cheap dark ground discs beneath studio entities (classic
+	// r_shadows look), separate from the projected shadow maps. Transparent domain.
+	void DrawBlobShadows( const ViewSetup &view, cl_entity_s *const *ents, int count );
 	void DrawSingle( const ViewSetup &view, cl_entity_s *ent );   // viewmodel path; caller owns depth range/projection
 };
 extern StudioRenderer g_studio;

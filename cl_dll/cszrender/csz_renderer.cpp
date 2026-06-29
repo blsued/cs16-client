@@ -606,6 +606,9 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	EndPass( kTmVolume );
 
 	BeginPass( kTmTrans );
+	// INTEGRATION (worker/m2c-studio SHOULD 6): cheap ground blob shadows beneath studio
+	// entities. First in the transparent domain (darkens the opaque floor; depth-write off).
+	g_studio.DrawBlobShadows( view, m_frame.studio, m_frame.numStudio );	// slot 13.9: studio blob shadows
 	// INTEGRATION (worker/m2c-studio MUST 2): non-opaque studio entities, back-to-front. First
 	// in the transparent domain so later sprites/brush (their own sorted lists) composite over.
 	g_studio.DrawTransparent( view, m_frame.studio, m_frame.numStudio );	// slot 14.0: studio transparent
