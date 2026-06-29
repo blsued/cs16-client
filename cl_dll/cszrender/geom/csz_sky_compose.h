@@ -294,6 +294,18 @@ void AtmosShutdown();
 // -----------------------------------------------------------------------------
 void SkyComposeRegisterCvars();
 bool SkyComposeActive();   // csz_hdr != 0 (read live each call)
+// VERIFICATION INFRA (csz_verify_freeze, default 0). NOT a gameplay feature: a
+// machine-verification gate for TIME-VARYING render effects. When 1, every
+// per-frame / time / RNG term that makes two captures of the SAME fixed instant
+// differ run-to-run is pinned to a constant, so effect-diff (toggle one effect's
+// own cvar) and A/B become byte-near-identical, grade-stable gates:
+//   * resolve dither forced OFF (compose);
+//   * sky adaptive eye-adaptation exposure pinned to a fixed value (atmos);
+//   * fog-volume animated-IGN frame offset pinned to 0 (fog_volume);
+//   * star twinkle u_time pinned to a constant (stars);
+//   * dust temporal integration frozen (dt=0, dust).
+// Read live each call so an in-session toggle takes effect next frame.
+bool SkyComposeVerifyFreeze();
 // S4 (REWORK-SPEC §S4): the renderer publishes the live phase nightness [0,1] each frame
 // (after PublishLighting, before the resolve) so the resolve's night grade (exposure / shadow
 // toe / Purkinje) follows the phase curve. Day (nightness 0) -> the resolve skips the whole

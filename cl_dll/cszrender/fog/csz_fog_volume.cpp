@@ -470,7 +470,11 @@ void FogVolumeRender( const ViewSetup &view )
 	// float precision) so the dither lattice shifts every frame -- no temporal history.
 	static unsigned int s_marchFrame = 0u;
 	s_marchFrame = ( s_marchFrame + 1u ) & 1023u;
-	float frame = (float)s_marchFrame;
+	// Verification infra: this lattice shift advances every RENDERED frame (free-running counter),
+	// so two captures of the SAME fixed instant land on different s_marchFrame and the fog volume
+	// differs run-to-run. csz_verify_freeze pins it to 0 -> the in-scatter is byte-stable for the
+	// machine effect-diff / A/B.
+	float frame = SkyComposeVerifyFreeze() ? 0.0f : (float)s_marchFrame;
 
 	float fHalfSize[2] = { (float)halfW, (float)halfH };	// march u_targetSize == upsample u_halfSize
 	float fFullSize[2] = { (float)fullW, (float)fullH };

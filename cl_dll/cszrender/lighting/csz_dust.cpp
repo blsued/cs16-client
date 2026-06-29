@@ -393,6 +393,11 @@ void DustRender( const ViewSetup &view )
 	const float now = ClientTime();
 	float dt = ( s_lastTime > 0.0f ) ? ( now - s_lastTime ) : 0.0f;
 	if( dt < 0.0f || dt > 0.25f ) dt = 0.0f;   // first frame / pause / map change: no jump
+	// Verification infra: csz_verify_freeze halts the temporal integration (dt=0) so the mote pool
+	// stays pinned at its deterministic hash-seeded positions -- two captures of the SAME fixed
+	// instant are identical even if ClientTime() differs by an epsilon run-to-run. (now is still
+	// used below for cone die-time gating, which is itself deterministic at a fixed instant.)
+	if( SkyComposeVerifyFreeze() ) dt = 0.0f;
 	s_lastTime = now;
 
 	// Camera billboard basis (screen-aligned quads from the view angles).

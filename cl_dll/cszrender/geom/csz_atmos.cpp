@@ -563,6 +563,12 @@ bool AtmosDrawSky( const ViewSetup &view )
 	// untouched; only the overall scale adapts. csz_atmos_exposure is a manual
 	// EV multiplier on top (default 1.0).
 	float sunElevDeg = asinf( ( s_sunWorld[2] < -1.0f ) ? -1.0f : ( s_sunWorld[2] > 1.0f ? 1.0f : s_sunWorld[2] ) ) / kDegToRad;
+	// Verification infra: csz_verify_freeze pins the eye-adaptation INPUT to a fixed elevation (0deg)
+	// so the auto-exposure is a deterministic constant decoupled from the live sun position -- two
+	// captures of the same fixed instant cannot drift in overall scale, and toggling an effect cvar
+	// cannot move global exposure under the A/B. 0deg -> proxy 1 -> adaptive 150 (mid-band, sane look).
+	if( SkyComposeVerifyFreeze() )
+		sunElevDeg = 0.0f;
 	float key = ( sunElevDeg < 5.0f ) ? sunElevDeg : 5.0f;          // cap the bright-end influence
 	float proxy = powf( 10.0f, key / 6.0f );                        // ~1 decade brighter per +6deg
 	float adaptive = 150.0f / ( ( proxy > 1.0e-3f ) ? proxy : 1.0e-3f );
