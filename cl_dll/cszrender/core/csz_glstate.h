@@ -59,4 +59,8 @@ void BindFbo( unsigned int fbo );                // 0 = default framebuffer
 void UseProgram( unsigned int program );
 void BindVao( unsigned int vao );
 void BindTextureSlot( int tmu, int texSlot );    // via gRenderAPI.GL_Bind (ENGINE slot id, not raw GL name)
+// Diagnostic: when `gate` cvar != 0, log a non-clean glGetError at a named step
+// under `tag` (always clears the error -- probe semantics). Shared by the per-pass
+// DbgErr wrappers (atmos/stars).
+void DbgGlError( struct cvar_s *gate, const char *tag, const char *where );
 }

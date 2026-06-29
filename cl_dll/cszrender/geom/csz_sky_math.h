@@ -56,6 +56,15 @@ inline float Smooth01( float edge0, float edge1, float x )
 	return t * t * ( 3.0f - 2.0f * t );
 }
 
+// Illuminated fraction of the moon disc for a phase p in [0,1]: full(p=1)->1,
+// quarter(0.5)->0.5, new(0)->0. Callers handle the legacy "phase<0 => full" case.
+inline float MoonLitFractionFromPhase( float p )
+{
+	p = clampf01( p );
+	float a = ( 1.0f - p ) * 3.14159265358979323846f;
+	return 0.5f * ( 1.0f + cosf( a ) );
+}
+
 const float kDegToRad = 3.14159265358979323846f / 180.0f;
 
 // Elevation+yaw (degrees) -> unit world direction, FROM the scene TOWARD the

@@ -139,11 +139,7 @@ StarsGpu s_gpu;
 
 void DbgErr( const char *where )
 {
-	if( ReadCvar( s_cvarDiag, 0.0f ) == 0.0f )
-		return;
-	GLenum e = glGetError();
-	if( e != GL_NO_ERROR )
-		CSZ_LogDev( "stars", "GL error 0x%x at %s", (unsigned int)e, where );
+	DbgGlError( s_cvarDiag, "stars", where );
 }
 
 void RegisterCvars()
@@ -421,9 +417,13 @@ void StarsContribute( const ViewSetup &view )
 	// inserted in csz_renderer.cpp immediately BEFORE this StarsContribute. The galactic
 	// basis + camera-basis + MW colour/uniform setup went with it; the panorama pass keeps
 	// its own copy of the galactic frame, so band/stars/moon stay mutually aligned.)
+	//
+	// Viewport pixel size (with the headless 1920x1080 fallback), shared by the
+	// star-points upload here and the diag-probe upload below (view.viewport is not
+	// mutated between them).
+	float vpW = ( view.viewport[2] > 0 ) ? (float)view.viewport[2] : 1920.0f;
+	float vpH = ( view.viewport[3] > 0 ) ? (float)view.viewport[3] : 1080.0f;
 	{
-		float vpW = ( view.viewport[2] > 0 ) ? (float)view.viewport[2] : 1920.0f;
-		float vpH = ( view.viewport[3] > 0 ) ? (float)view.viewport[3] : 1080.0f;
 		float resScale = vpH / 1080.0f;
 		if( resScale < 0.5f ) resScale = 0.5f;
 
@@ -501,8 +501,6 @@ void StarsContribute( const ViewSetup &view )
 	// success evidence for the real star field.
 	if( ReadCvar( s_cvarDiag, 0.0f ) != 0.0f )
 	{
-		float vpW = ( view.viewport[2] > 0 ) ? (float)view.viewport[2] : 1920.0f;
-		float vpH = ( view.viewport[3] > 0 ) ? (float)view.viewport[3] : 1080.0f;
 		float vpVec[3] = { vpW, vpH, 0.0f };
 		SetBlend( kBlendNone );          // replace -- guaranteed coverage
 		UseProgram( s_gpu.progDiag.program );

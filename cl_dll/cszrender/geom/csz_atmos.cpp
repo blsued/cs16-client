@@ -149,11 +149,7 @@ const float kDegToRad = 3.14159265358979323846f / 180.0f;
 // csz_atmos_timing != 0 (off in normal play). Clears the error (probe semantics).
 void DbgErr( const char *where )
 {
-	if( ReadCvar( s_cvarTiming, 0.0f ) == 0.0f )
-		return;
-	GLenum e = glGetError();
-	if( e != GL_NO_ERROR )
-		CSZ_LogDev( "atmos", "GL error 0x%x at %s", (unsigned int)e, where );
+	DbgGlError( s_cvarTiming, "atmos", where );
 }
 
 void ForgetGpu()

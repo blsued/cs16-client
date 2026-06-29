@@ -403,9 +403,14 @@ void PanoramaContribute( const ViewSetup &view )
 	float upS[3]    = { up[0] * tanY,    up[1] * tanY,    up[2] * tanY };
 
 	// Galactic basis (orthonormalised from the frozen RAW constants -- the SAME frame
-	// the baked catalog + the live star gold-core path use).
-	float galPole[3], galCenter[3], galY[3];
-	GalacticBasis( galPole, galCenter, galY );
+	// the baked catalog + the live star gold-core path use). Invariant -> compute once.
+	static float galPole[3], galCenter[3], galY[3];
+	static bool galReady = false;
+	if( !galReady )
+	{
+		GalacticBasis( galPole, galCenter, galY );
+		galReady = true;
+	}
 
 	// Moon BODY occluder + Task D wash base luminance (same source the stars use).
 	float moonOccDir[3] = { 0.0f, 0.0f, 1.0f };

@@ -431,7 +431,7 @@ void DrawModelMeshes( StudioModelGpu *gpu, const studiohdr_t *hdr, int body,
 		}
 
 		BindVao( mesh.vao );
-		glDrawElements( GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, (const void *)0 );
+		glDrawArrays( GL_TRIANGLES, 0, mesh.indexCount );	// verts emitted in triangle order; identity IBO removed
 	}
 }
 
@@ -753,7 +753,7 @@ void StudioRenderer::DestroyAll()
 void StudioRenderer::BeginFrame( float time )
 {
 	s_studio.time = time;
-	ResetBoneCache( time );
+	ResetBoneCache();
 }
 
 void StudioRenderer::DrawOpaque( const ViewSetup &view, cl_entity_s *const *ents, int count )

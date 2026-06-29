@@ -1025,9 +1025,8 @@ float EstimateFrame( const mstudioseqdesc_t *pseqdesc, const cl_entity_s *ent, f
 	return (float)f;
 }
 
-void ResetBoneCache( float time )
+void ResetBoneCache()
 {
-	(void)time;
 	s_cacheCount = 0;
 }
 

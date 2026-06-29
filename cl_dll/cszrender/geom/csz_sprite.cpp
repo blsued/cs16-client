@@ -302,15 +302,9 @@ void EnsureGpuObjects()
 
 	UseProgram( s_sprite.program.program );
 	glUniform1i( UniformLoc( s_sprite.program, "u_texDiffuse" ), 0 );
-
-	const float kFogOff[4] = { 0.0f, 0.0f, 0.0f, 0.0f };	// fog off until fed (DrawSprites)
-	const float kFogParamsDefault[4] = { 0.0f, 0.0f, 1.0f, 0.0f };	// b=0, glow=0, maxOpacity=1 (no floor)
-	const float kCamPosZero[3] = { 0.0f, 0.0f, 0.0f };
-
-	glUniform4fv( s_sprite.uFog, 1, kFogOff );
-	glUniform4fv( s_sprite.uFogParams, 1, kFogParamsDefault );
-	glUniform3fv( s_sprite.uCamPos, 1, kCamPosZero );
-	glUniform1i( s_sprite.uFogAdditive, 0 );
+	// u_fog / u_fogParams / u_camPos / u_fogAdditive are fed per-frame by DrawSprites
+	// (which forces u_fogAdditive on item 0 via curFogAdditive=-1) before the first
+	// draw, so no init-time defaults are needed here.
 	UseProgram( 0 );
 
 	glGenVertexArrays( 1, &s_sprite.vao );
@@ -352,6 +346,15 @@ void EnsureGpuObjects()
 
 	s_sprite.gpuGeneration = GpuGeneration();
 	s_sprite.shaderReady = true;
+}
+
+// Squared distance from a world point to the view origin (sprite sort key).
+float DistSqToView( const float p[3], const float viewOrigin[3] )
+{
+	float dx = p[0] - viewOrigin[0];
+	float dy = p[1] - viewOrigin[1];
+	float dz = p[2] - viewOrigin[2];
+	return dx * dx + dy * dy + dz * dz;
 }
 
 // Resolves one entity into a draw item; returns false when culled/invalid.
@@ -490,11 +493,7 @@ bool BuildItem( const ViewSetup &view, cl_entity_s *ent, SpriteItem &out )
 	out.scale = scale;
 	out.rendermode = rendermode;
 
-	float dx = origin[0] - view.origin[0];
-	float dy = origin[1] - view.origin[1];
-	float dz = origin[2] - view.origin[2];
-
-	out.distSq = dx * dx + dy * dy + dz * dz;
+	out.distSq = DistSqToView( origin, view.origin );
 	return true;
 }
 
@@ -551,11 +550,7 @@ bool BuildTestItem( const ViewSetup &view, SpriteItem &out )
 	out.scale = 1.0f;
 	out.rendermode = kRenderTransAdd;	// depth test ON, depth write OFF
 
-	float dx = out.origin[0] - view.origin[0];
-	float dy = out.origin[1] - view.origin[1];
-	float dz = out.origin[2] - view.origin[2];
-
-	out.distSq = dx * dx + dy * dy + dz * dz;
+	out.distSq = DistSqToView( out.origin, view.origin );
 	return true;
 }
 

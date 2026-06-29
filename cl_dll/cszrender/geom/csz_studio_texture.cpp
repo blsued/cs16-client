@@ -299,6 +299,18 @@ bool HasModelPrefix( const char *base )
 	return ( base[0] == 'v' || base[0] == 'p' || base[0] == 'w' ) && base[1] == '_';
 }
 
+// If the last candidate carries a v_/p_/w_ model prefix, append a de-prefixed copy
+// (so a pack section authored once for a weapon's v_/p_/w_ trio still matches).
+void AppendDeprefixed( char candidates[][64], int &numCand )
+{
+	if( HasModelPrefix( candidates[numCand - 1] ))
+	{
+		strncpy( candidates[numCand], candidates[numCand - 1] + 2, sizeof( candidates[0] ) - 1 );
+		candidates[numCand][sizeof( candidates[0] ) - 1] = '\0';
+		numCand++;
+	}
+}
+
 // texture.ini layer: section candidates per spec 4.3.1 / pack convention, in
 // order: disk base name; disk base minus v_/p_/w_ (the pack authors one
 // section per weapon covering its v_/p_/w_ trio); internal studiohdr name
@@ -317,13 +329,7 @@ const char *IniLookup( model_t *mod, const studiohdr_t *hdr, const char *texKeyL
 	{
 		BaseName( mod->name, candidates[numCand], sizeof( candidates[0] ));
 		numCand++;
-
-		if( HasModelPrefix( candidates[numCand - 1] ))
-		{
-			strncpy( candidates[numCand], candidates[numCand - 1] + 2, sizeof( candidates[0] ) - 1 );
-			candidates[numCand][sizeof( candidates[0] ) - 1] = '\0';
-			numCand++;
-		}
+		AppendDeprefixed( candidates, numCand );
 	}
 
 	if( hdr != NULL && hdr->name[0] != '\0' )
@@ -333,13 +339,7 @@ const char *IniLookup( model_t *mod, const studiohdr_t *hdr, const char *texKeyL
 		if( strcmp( candidates[numCand], candidates[0] ) != 0 )
 		{
 			numCand++;
-
-			if( HasModelPrefix( candidates[numCand - 1] ))
-			{
-				strncpy( candidates[numCand], candidates[numCand - 1] + 2, sizeof( candidates[0] ) - 1 );
-				candidates[numCand][sizeof( candidates[0] ) - 1] = '\0';
-				numCand++;
-			}
+			AppendDeprefixed( candidates, numCand );
 		}
 	}
 

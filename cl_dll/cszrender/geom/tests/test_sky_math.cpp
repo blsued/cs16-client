@@ -208,7 +208,8 @@ int main()
 		bool crossed = false;
 		float prev = SunElevDeg( 0.84f );
 		float at = 0.0f;
-		for( float ph = 0.84f; ph <= 0.88f + 1e-6f; ph += 0.0005f )
+		// Start one step past the seed: ph=0.84f would recompute prev (no sign change possible).
+		for( float ph = 0.84f + 0.0005f; ph <= 0.88f + 1e-6f; ph += 0.0005f )
 		{
 			float cur = SunElevDeg( ph );
 			if( ( prev < 0.0f && cur >= 0.0f ) || ( prev > 0.0f && cur <= 0.0f ) )

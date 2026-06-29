@@ -309,10 +309,11 @@ bool EnsureHdrTarget( int w, int h )
 	if( s_hdr.failedThisGen )
 		return false;   // already failed on this generation; do not retry (logged once)
 
-	// Resize on a LIVE context: delete the old names first.
+	// Resize on a LIVE context: delete the old names first. gpuGeneration already
+	// holds GpuGeneration() on every path reaching here (synced in the foreign-gen
+	// branch above; otherwise that branch's test was already false).
 	if( s_hdr.fbo != 0 || s_hdr.colorTex != 0 || s_hdr.depthTex != 0 )
 		DestroyHdrSameContext();
-	s_hdr.gpuGeneration = GpuGeneration();
 
 	// Color: RGBA16F, LINEAR + CLAMP_TO_EDGE (filterable for future use; the
 	// resolve samples via texelFetch for an exact copy). Bound on a SKY unit so

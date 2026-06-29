@@ -39,8 +39,8 @@ namespace csz
 {
 struct StudioMeshGpu
 {
-	unsigned int vao, vbo, ibo;
-	int indexCount;
+	unsigned int vao, vbo;
+	int indexCount;   // vertex count (verts emitted in triangle order; drawn with glDrawArrays)
 	int texSlot;       // mstudiotexture_t::index (engine slot; verify nonzero at build, else white texture)
 	int texFlags;      // STUDIO_NF_* of the bound texture (chrome/masked/fullbright)
 	int bodypart;      // owning bodypart

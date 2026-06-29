@@ -242,6 +242,17 @@ void EnsureMoonTexture()
 		return;
 	}
 
+	// GL_MAX_TEXTURE_SIZE guard (mirrors the panorama loader): reject an over-large
+	// base level rather than feeding it to glTexImage2D. Bounds the size math below;
+	// the legit small moon disc is far under the limit, so this is behavior-neutral.
+	const int maxTex = Caps().maxTextureSize;
+	if( w > maxTex || h > maxTex )
+	{
+		gEngfuncs.COM_FreeFile( raw );
+		CSZ_LogWarn( "sunmoon", "GL_MAX_TEXTURE_SIZE %d < moon %dx%d -- using procedural fallback disc", maxTex, w, h );
+		return;
+	}
+
 	const unsigned char *p = (const unsigned char *)( raw + 20 );
 	const unsigned char *end = (const unsigned char *)raw + len;
 
@@ -255,7 +266,7 @@ void EnsureMoonTexture()
 	for( int lv = 0; lv < nLev; lv++ )
 	{
 		size_t bytes = (size_t)lw * (size_t)lh * 3;
-		if( p + bytes > end ) { ok = false; break; }
+		if( bytes > (size_t)( end - p ) ) { ok = false; break; }	// overflow-safe (no pointer-past-end UB)
 		glTexImage2D( GL_TEXTURE_2D, lv, GL_RGB8, lw, lh, 0, GL_RGB, GL_UNSIGNED_BYTE, p );
 		p += bytes;
 		if( lw > 1 ) lw /= 2;
@@ -563,8 +574,8 @@ bool MoonBodyOccluder( const ViewSetup &view, float outDir[3], float &outAngR, f
 	float moonVis;
 	if( dbg == 1 )
 	{
-		float fwd[3], right[3], up[3];
-		AngleVectors( view.angles, fwd, right, up );
+		float fwd[3];
+		AngleVectors( view.angles, fwd, NULL, NULL );	// only fwd consumed here
 		moonDir[0] = fwd[0]; moonDir[1] = fwd[1]; moonDir[2] = fwd[2];
 		moonVis = 1.0f;
 	}
@@ -611,11 +622,7 @@ bool MoonBodyOccluder( const ViewSetup &view, float outDir[3], float &outAngR, f
 			if( mp < 0.0f )
 				litFrac = 1.0f;                     // legacy always-full moon
 			else
-			{
-				float p = sunmoon::Clampf( mp, 0.0f, 1.0f );
-				float a = ( 1.0f - p ) * 3.14159265358979323846f;
-				litFrac = 0.5f * ( 1.0f + cosf( a ) );
-			}
+				litFrac = skymath::MoonLitFractionFromPhase( mp );
 			float mz = -realSunDir[2];              // sin(moon altitude) == moonDir.z
 			altF = ( mz > 0.0f ) ? sqrtf( mz ) : 0.0f;
 		}
@@ -661,16 +668,16 @@ CszGodraySrc CszGodraySource( const ViewSetup &view )
 	float moonVisOverride = -1.0f, sunVisOverride = -1.0f;
 	if( dbg == 1 )
 	{
-		float fwd[3], right[3], up[3];
-		AngleVectors( view.angles, fwd, right, up );
+		float fwd[3];
+		AngleVectors( view.angles, fwd, NULL, NULL );	// only fwd consumed here
 		moonDir[0] = fwd[0];  moonDir[1] = fwd[1];  moonDir[2] = fwd[2];
 		sunDir[0]  = -fwd[0]; sunDir[1]  = -fwd[1]; sunDir[2]  = -fwd[2];
 		moonVisOverride = 1.0f; sunVisOverride = 0.0f;
 	}
 	else if( dbg == 2 )
 	{
-		float fwd[3], right[3], up[3];
-		AngleVectors( view.angles, fwd, right, up );
+		float fwd[3];
+		AngleVectors( view.angles, fwd, NULL, NULL );	// only fwd consumed here
 		sunDir[0] = fwd[0]; sunDir[1] = fwd[1]; sunDir[2] = fwd[2];
 		sunVisOverride = 1.0f; moonVisOverride = 0.0f;
 	}

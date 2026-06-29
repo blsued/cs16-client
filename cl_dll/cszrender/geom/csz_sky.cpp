@@ -155,9 +155,7 @@ float MoonLitFraction()
 		s_moonPhaseCvar = gEngfuncs.pfnGetCvarPointer( "csz_moon_phase" );
 	if( s_moonPhaseCvar == NULL || s_moonPhaseCvar->value < 0.0f )
 		return 1.0f;	// legacy always-full moon
-	float p = skymath::clampf01( s_moonPhaseCvar->value );
-	float a = ( 1.0f - p ) * 3.14159265358979323846f;
-	return 0.5f * ( 1.0f + cosf( a ) );
+	return skymath::MoonLitFractionFromPhase( s_moonPhaseCvar->value );
 }
 
 #if defined( CSZ_DEV_TOOLS )

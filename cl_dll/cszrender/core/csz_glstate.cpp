@@ -36,6 +36,7 @@
 #include "csz_engine.h"		// gRenderAPI (GL_Bind / GL_CleanUpTextureUnits), ref_viewpass_t
 #include "csz_glfuncs.h"
 #include "csz_glcaps.h"		// Caps().profileMask (core-vs-compat GL_ALPHA_TEST guard)
+#include "csz_log.h"		// CSZ_LogDev (DbgGlError)
 
 #ifndef GL_ALPHA_TEST
 #define GL_ALPHA_TEST 0x0BC0
@@ -43,6 +44,15 @@
 
 namespace csz
 {
+
+void DbgGlError( cvar_t *gate, const char *tag, const char *where )
+{
+	if( ReadCvar( gate, 0.0f ) == 0.0f )
+		return;
+	GLenum e = glGetError();
+	if( e != GL_NO_ERROR )
+		CSZ_LogDev( tag, "GL error 0x%x at %s", (unsigned int)e, where );
+}
 
 namespace
 {

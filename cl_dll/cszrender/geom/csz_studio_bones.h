@@ -62,7 +62,7 @@ bool SetupBonesMerged( cl_entity_s *ent, studiohdr_t *carrierHdr, const BoneSetu
                        studiohdr_t *weaponHdr, float time, const BoneSetup **out );
 
 // Resets the per-frame bone cache; called once per frame (StudioRenderer::BeginFrame).
-void ResetBoneCache( float time );
+void ResetBoneCache();
 
 // ---------------------------------------------------------------------------
 // Sequence-frame helpers shared between the draw path (EvaluatePose) and the
