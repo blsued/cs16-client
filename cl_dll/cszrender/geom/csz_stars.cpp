@@ -104,8 +104,6 @@ cvar_t *s_cvarMoonWashMax;  // csz_moon_wash_max   "8.0":  GLOW_MAX cap on the f
 cvar_t *s_cvarMoonWashC;    // csz_moon_wash_dimc  "1.0":  star-dimming lower-edge factor c (threshold=moonLum*c)
 cvar_t *s_cvarMoonWashK;    // csz_moon_wash_dimk  "2.5":  star-dimming width factor k (upper edge=moonLum*c*k)
 
-float ReadCvar( cvar_t *cv, float fallback ) { return ( cv != NULL ) ? cv->value : fallback; }
-float clampf( float v, float lo, float hi ) { return ( v < lo ) ? lo : ( v > hi ) ? hi : v; }
 
 // --- GPU resources (generation-keyed; forget on foreign context) --------------
 struct StarsGpu

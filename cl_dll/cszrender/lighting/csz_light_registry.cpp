@@ -54,11 +54,6 @@ const float kDegToRadHalf = 3.14159265358979323846f / 360.0f;	// degrees -> radi
 // lazily by name and re-fetched until non-NULL so registration order never latches a miss.
 cvar_t *s_v3, *s_edge, *s_hot, *s_hotSharp, *s_dgain;
 
-float ReadCvar( cvar_t *cv, float fallback )
-{
-	return ( cv != NULL ) ? cv->value : fallback;
-}
-
 cvar_t *GetCvarCached( cvar_t **slot, const char *name )
 {
 	if( *slot == NULL )

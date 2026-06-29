@@ -46,41 +46,23 @@ namespace
 const float kDegToRad = 3.14159265358979323846f / 180.0f;
 
 // Column-major axis rotations; element (row, col) lives at m[col * 4 + row].
-void Mat4RotateX( float deg, Mat4 &out )
+// Each builds the same [c -s; s c] 2x2 block in the (a,b) coordinate plane of an
+// identity matrix; the per-axis wrappers just pick the plane.
+void Mat4AxisRotate( float deg, int a, int b, Mat4 &out )
 {
 	float c = cosf( deg * kDegToRad );
 	float s = sinf( deg * kDegToRad );
 
 	Mat4Identity( out );
-	out.m[5] = c;
-	out.m[9] = -s;
-	out.m[6] = s;
-	out.m[10] = c;
+	out.m[a * 4 + a] = c;
+	out.m[b * 4 + b] = c;
+	out.m[b * 4 + a] = -s;
+	out.m[a * 4 + b] = s;
 }
 
-void Mat4RotateY( float deg, Mat4 &out )
-{
-	float c = cosf( deg * kDegToRad );
-	float s = sinf( deg * kDegToRad );
-
-	Mat4Identity( out );
-	out.m[0] = c;
-	out.m[8] = s;
-	out.m[2] = -s;
-	out.m[10] = c;
-}
-
-void Mat4RotateZ( float deg, Mat4 &out )
-{
-	float c = cosf( deg * kDegToRad );
-	float s = sinf( deg * kDegToRad );
-
-	Mat4Identity( out );
-	out.m[0] = c;
-	out.m[4] = -s;
-	out.m[1] = s;
-	out.m[5] = c;
-}
+void Mat4RotateX( float deg, Mat4 &out ) { Mat4AxisRotate( deg, 1, 2, out ); }
+void Mat4RotateY( float deg, Mat4 &out ) { Mat4AxisRotate( deg, 2, 0, out ); }
+void Mat4RotateZ( float deg, Mat4 &out ) { Mat4AxisRotate( deg, 0, 1, out ); }
 
 }
 
@@ -187,11 +169,20 @@ void Mat4ViewQuake( const float origin[3], const float anglesDeg[3], Mat4 &out )
 	// forward): the classic fixed-function sequence, composed left to right
 	// exactly as consecutive glRotatef/glTranslatef calls post-multiply.
 	// Quake angle order: anglesDeg[0]=pitch, [1]=yaw, [2]=roll.
-	Mat4 m, r;
+	// The Quake->GL axis fix (RotateX(-90) * RotateZ(90)) is a compile-time
+	// invariant; build it once and reuse.
+	static Mat4 s_axisFix;
+	static bool s_axisFixReady = false;
+	if( !s_axisFixReady )
+	{
+		Mat4 a, b;
+		Mat4RotateX( -90.0f, a );
+		Mat4RotateZ( 90.0f, b );
+		Mat4Multiply( a, b, s_axisFix );
+		s_axisFixReady = true;
+	}
 
-	Mat4RotateX( -90.0f, m );
-	Mat4RotateZ( 90.0f, r );
-	Mat4Multiply( m, r, m );
+	Mat4 m = s_axisFix, r;
 	Mat4RotateX( -anglesDeg[2], r );	// -roll
 	Mat4Multiply( m, r, m );
 	Mat4RotateY( -anglesDeg[0], r );	// -pitch
@@ -209,15 +200,20 @@ void Mat4ViewQuake( const float origin[3], const float anglesDeg[3], Mat4 &out )
 void Mat4ShadowBias( const Mat4 &lightProj, const Mat4 &lightView, Mat4 &out )
 {
 	// bias = scale(0.5) then offset(0.5): maps clip [-1,1] to texture [0,1].
-	Mat4 bias;
-
-	Mat4Identity( bias );
-	bias.m[0] = bias.m[5] = bias.m[10] = 0.5f;
-	bias.m[12] = bias.m[13] = bias.m[14] = 0.5f;
+	// Invariant; build once.
+	static Mat4 s_bias;
+	static bool s_biasReady = false;
+	if( !s_biasReady )
+	{
+		Mat4Identity( s_bias );
+		s_bias.m[0] = s_bias.m[5] = s_bias.m[10] = 0.5f;
+		s_bias.m[12] = s_bias.m[13] = s_bias.m[14] = 0.5f;
+		s_biasReady = true;
+	}
 
 	Mat4 pv;
 	Mat4Multiply( lightProj, lightView, pv );
-	Mat4Multiply( bias, pv, out );
+	Mat4Multiply( s_bias, pv, out );
 }
 
 void FrustumFromMatrix( const Mat4 &viewProj, bool disableFar, Frustum &out )

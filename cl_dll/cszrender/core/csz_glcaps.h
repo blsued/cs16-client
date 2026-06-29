@@ -39,7 +39,7 @@ struct GlCaps
 {
 	char versionString[128];
 	char rendererString[128];
-	int major, minor;
+	int major;
 	int profileMask;               // GL_CONTEXT_PROFILE_MASK (0 on pre-3.2 contexts)
 	int maxTextureSize;
 	int maxVertexUniformComponents;

@@ -66,8 +66,6 @@ cvar_t *s_cvDevcamPitch;  // csz_devcam_pitch  override pitch deg (Quake: negati
 cvar_t *s_cvDevcamYaw;    // csz_devcam_yaw    override yaw deg
 bool    s_devcamCvarsReady;
 
-float ReadCvar( cvar_t *cv, float fallback ) { return ( cv != NULL ) ? cv->value : fallback; }
-
 void EnsureDevcamCvars()
 {
 	if( s_devcamCvarsReady )
@@ -76,6 +74,19 @@ void EnsureDevcamCvars()
 	s_cvDevcam      = gEngfuncs.pfnRegisterVariable( "csz_devcam", "0", FCVAR_CLIENTDLL );
 	s_cvDevcamPitch = gEngfuncs.pfnRegisterVariable( "csz_devcam_pitch", "0", FCVAR_CLIENTDLL );
 	s_cvDevcamYaw   = gEngfuncs.pfnRegisterVariable( "csz_devcam_yaw", "0", FCVAR_CLIENTDLL );
+}
+
+// Shared view-finalization tail: derive the projection/view/viewProj matrices and
+// frustum from the already-populated fov/near/far/origin/angles, then reset the
+// per-view pvs/ambience slots. disableFar drops the far culling plane (spot views).
+void FinalizeView( ViewSetup &out, bool disableFar )
+{
+	Mat4Perspective( out.fovX, out.fovY, out.zNear, out.zFar, out.matProj );
+	Mat4ViewQuake( out.origin, out.angles, out.matView );
+	Mat4Multiply( out.matProj, out.matView, out.matViewProj );
+	FrustumFromMatrix( out.matViewProj, disableFar, out.frustum );
+	out.pvs = NULL;
+	out.ambience = AmbienceNeutral();
 }
 
 }
@@ -112,12 +123,9 @@ void BuildViewFromPass( const struct ref_viewpass_s *rvp, ViewSetup &out )
 		out.angles[1] = ReadCvar( s_cvDevcamYaw, 0.0f );	// YAW
 	}
 
-	Mat4Perspective( out.fovX, out.fovY, out.zNear, out.zFar, out.matProj );
-	Mat4ViewQuake( out.origin, out.angles, out.matView );
-	Mat4Multiply( out.matProj, out.matView, out.matViewProj );
-	FrustumFromMatrix( out.matViewProj, false, out.frustum );
-	out.pvs = NULL;		// caller decides (main view: UpdateFatPvs result)
-	out.ambience = AmbienceNeutral();	// composition root overwrites from g_fog (slot 7.2)
+	// caller decides pvs (main view: UpdateFatPvs result); composition root
+	// overwrites ambience from g_fog (slot 7.2).
+	FinalizeView( out, false );
 }
 
 void BuildSpotLightView( const float origin[3], const float anglesDeg[3],
@@ -138,14 +146,10 @@ void BuildSpotLightView( const float origin[3], const float anglesDeg[3],
 	out.zNear = 0.1f;
 	out.zFar = radius;
 
-	Mat4Perspective( out.fovX, out.fovY, out.zNear, out.zFar, out.matProj );
-	Mat4ViewQuake( out.origin, out.angles, out.matView );
-	Mat4Multiply( out.matProj, out.matView, out.matViewProj );
 	// Far plane disabled for spot lights: attenuation handles the range and a
-	// hard far clip would pop shadow casters (notes-mechanisms e).
-	FrustumFromMatrix( out.matViewProj, true, out.frustum );
-	out.pvs = NULL;		// shadow passes render all-visible (notes-mechanisms f-8)
-	out.ambience = AmbienceNeutral();	// depth passes never read it; keep the struct fully defined
+	// hard far clip would pop shadow casters (notes-mechanisms e). Shadow passes
+	// render all-visible (pvs NULL); depth passes never read ambience.
+	FinalizeView( out, true );
 }
 
 const unsigned char *UpdateFatPvs( const float origin[3] )

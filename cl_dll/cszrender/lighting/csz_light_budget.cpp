@@ -60,11 +60,6 @@ int s_countFull;
 int s_countCheap;
 int s_countCull;
 
-float ReadCvar( cvar_t *cv, float fallback )
-{
-	return ( cv != NULL ) ? cv->value : fallback;
-}
-
 // Conservative world-space bounds of the spot cone (apex + four far-plane corners),
 // for the light-vs-view visibility test. Self-contained copy of the same math
 // RunLightPasses uses (SpotConeBounds) so the budgeter has no cross-TU dependency.

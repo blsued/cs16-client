@@ -99,11 +99,6 @@ struct GrGpu
 
 GrGpu s_gpu;
 
-float ReadCvar( cvar_t *cv, float fallback )
-{
-	return ( cv != NULL ) ? cv->value : fallback;
-}
-
 float Clampf( float v, float lo, float hi )
 {
 	return ( v < lo ) ? lo : ( v > hi ? hi : v );

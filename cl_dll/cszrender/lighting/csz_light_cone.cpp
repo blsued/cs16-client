@@ -137,11 +137,6 @@ struct ConeGpu
 };
 ConeGpu s_gpu;
 
-float ReadCvar( cvar_t *cv, float fallback )
-{
-	return ( cv != NULL ) ? cv->value : fallback;
-}
-
 void ForgetGpu()
 {
 	s_gpu.vao = 0;

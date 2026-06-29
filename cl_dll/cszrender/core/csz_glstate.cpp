@@ -302,6 +302,10 @@ void SetPolygonOffset( bool enable, float factor, float units )
 	{
 		glEnable( GL_POLYGON_OFFSET_FILL );
 		glPolygonOffset( factor, units );
+		// Only the enable path consults polygonFactor/polygonUnits (the early-out at
+		// the top short-circuits them on disable), so storing them here is sufficient.
+		s_state.polygonFactor = factor;
+		s_state.polygonUnits = units;
 	}
 	else
 	{
@@ -309,8 +313,6 @@ void SetPolygonOffset( bool enable, float factor, float units )
 	}
 
 	s_state.polygonOffset = enable ? 1 : 0;
-	s_state.polygonFactor = factor;
-	s_state.polygonUnits = units;
 }
 
 void BindFbo( unsigned int fbo )

@@ -147,11 +147,6 @@ struct DustGpu
 };
 DustGpu s_gpu;
 
-float ReadCvar( cvar_t *cv, float fallback )
-{
-	return ( cv != NULL ) ? cv->value : fallback;
-}
-
 // Deterministic per-index hash in [0,1) (spatial blue-noise-ish; NOT time-varying,
 // so size/brightness jitter is stable per mote -- no temporal shimmer).
 float Hash01( int i, int salt )

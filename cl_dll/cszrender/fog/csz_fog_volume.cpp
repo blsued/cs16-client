@@ -118,11 +118,6 @@ struct VolGpu
 
 VolGpu s_gpu;
 
-float ReadCvar( cvar_t *cv, float fallback )
-{
-	return ( cv != NULL ) ? cv->value : fallback;
-}
-
 void ForgetVol()
 {
 	s_vol.fbo = 0;

@@ -111,12 +111,9 @@ bool ProbeGlCaps()
 	value = 0;
 	glGetIntegerv( GL_MAJOR_VERSION, &value );
 	s_caps.major = (int)value;
-	value = 0;
-	glGetIntegerv( GL_MINOR_VERSION, &value );
-	s_caps.minor = (int)value;
 
 	if( glGetError() != GL_NO_ERROR || s_caps.major == 0 )
-		sscanf( s_caps.versionString, "%d.%d", &s_caps.major, &s_caps.minor );
+		sscanf( s_caps.versionString, "%d", &s_caps.major );
 
 	// GL_CONTEXT_PROFILE_MASK needs GL >= 3.2; keep 0 on older contexts.
 	value = 0;

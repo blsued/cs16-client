@@ -52,6 +52,10 @@ extern bool g_bHoldingKnife;               // defined in cs_wpn/cs_weapons.cpp (
 
 namespace csz
 {
+// Shared cvar read with null-safe fallback (one definition for the whole
+// renderer; replaces the per-TU anonymous-namespace copies).
+inline float ReadCvar( cvar_t *cv, float fallback ) { return ( cv != NULL ) ? cv->value : fallback; }
+
 model_t *WorldModel();                  // gRenderAPI.pfnGetModel( 1 ); NULL when no map
 int TexSlotToGlName( int texSlot );     // RenderGetParm( PARM_TEX_TEXNUM, texSlot ); 0 on failure
 float ClientTime();                     // gEngfuncs.GetClientTime()

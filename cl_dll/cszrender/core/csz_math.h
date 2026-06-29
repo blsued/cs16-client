@@ -57,4 +57,6 @@ void Mat4ViewQuake( const float origin[3], const float anglesDeg[3], Mat4 &out )
 void Mat4ShadowBias( const Mat4 &lightProj, const Mat4 &lightView, Mat4 &out );
 void FrustumFromMatrix( const Mat4 &viewProj, bool disableFar, Frustum &out );
 void AngleVectors( const float anglesDeg[3], float fwd[3], float right[3], float up[3] );
+// Scalar clamp to [lo, hi] (one definition shared across the renderer).
+inline float clampf( float v, float lo, float hi ) { return ( v < lo ) ? lo : ( v > hi ) ? hi : v; }
 }

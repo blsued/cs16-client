@@ -96,8 +96,6 @@ cvar_t *s_cvBloodMoon;   // csz_bloodmoon (registered by csz_sky); looked up
 bool    s_cvarsReady;
 bool    s_bloodLookedUp;
 
-float ReadCvar( cvar_t *cv, float fallback ) { return ( cv != NULL ) ? cv->value : fallback; }
-
 void EnsureCvars()
 {
 	if( s_cvarsReady )

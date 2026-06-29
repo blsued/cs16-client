@@ -94,10 +94,8 @@ struct AmbienceParams
 	// (fog / god-rays / dust / moon-dimming) sees safe, unchanged clear-sky behavior.
 	// The new volumetric cloud system (geom/csz_volcloud) will repopulate them later.
 	// Identity = 1.0 (clear sky).
-	//   * directTransmittance = moonlight direct transmission through cloud (1=clear)
 	//   * skyAmbientScale     = sky-ambient multiplier (1=clear; dims gently to ~0.6)
 	//   * shaftMask           = light-shaft gating (cloud-gap=1 / thick cloud=0)
-	float directTransmittance;
 	float skyAmbientScale;
 	float shaftMask;
 	// --- Analytic base fog (fog M1 Step 2, spec 3.6/4.3). Extends the legacy
@@ -178,7 +176,6 @@ inline AmbienceParams AmbienceNeutral()
 	p.tint[2] = 1.0f;
 	p.maxOpacity = 1.0f;	// no reveal floor by default: fog may fully occlude (env look unchanged)
 	p.cloudDim = 1.0f;	// L2: clear sky = no moonlight dimming (IEEE-exact identity until L3 drives it)
-	p.directTransmittance = 1.0f;	// L3a: clear sky = full moonlight transmission (identity; computed-not-applied)
 	p.skyAmbientScale     = 1.0f;	// L3a: clear sky = no sky-ambient dimming (identity)
 	p.shaftMask           = 1.0f;	// L3a: clear sky = light shafts fully pass (identity)
 	// S2 physical night defaults: neutral daylight is nightness=0 so the night model is

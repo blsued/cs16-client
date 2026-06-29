@@ -180,10 +180,6 @@ void EnsureAtmosDefault()
 	s_atmosInit = true;
 }
 
-float ReadCvar( cvar_t *cv, float fallback )
-{
-	return ( cv != NULL ) ? cv->value : fallback;
-}
 
 // Dev GL-error probe under csz_sky_glcheck (mirrors csz_renderer.cpp SkyGlCheck):
 // drains + reports the error queue at a named checkpoint. Used to ATTRIBUTE a

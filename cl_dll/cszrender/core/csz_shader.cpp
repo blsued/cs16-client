@@ -75,6 +75,35 @@ void LogInfoLogLines( const char *name, const char *what, const char *infoLog )
 	}
 }
 
+// Capture a GL info log (shader-compile or program-link) into a fixed buffer,
+// NUL-terminate against the driver-reported length, and log it line by line.
+void CaptureAndLogInfoLog( const char *name, const char *what, GLuint obj, bool isProgram )
+{
+	char infoLog[4096];
+	GLsizei written = 0;
+
+	if( isProgram )
+		glGetProgramInfoLog( obj, sizeof( infoLog ), &written, infoLog );
+	else
+		glGetShaderInfoLog( obj, sizeof( infoLog ), &written, infoLog );
+
+	infoLog[( written > 0 && written < (GLsizei)sizeof( infoLog )) ? written : sizeof( infoLog ) - 1] = '\0';
+	LogInfoLogLines( name, what, infoLog );
+}
+
+// Shared fatal-on-failure epilogue; always returns false so callers can
+// `return FailFatal(...)`.
+bool FailFatal( bool failFatal, const char *name, const char *what )
+{
+	if( failFatal )
+	{
+		char reason[256];
+		snprintf( reason, sizeof( reason ), "shader '%s': %s (full info log above)", name, what );
+		CSZ_FatalInit( "shader", reason );
+	}
+	return false;
+}
+
 // Returns 0 on failure (info log already printed).
 GLuint CompileStage( const char *name, GLenum stage, const char *source )
 {
@@ -87,12 +116,7 @@ GLuint CompileStage( const char *name, GLenum stage, const char *source )
 
 	if( status != GL_TRUE )
 	{
-		char infoLog[4096];
-		GLsizei written = 0;
-
-		glGetShaderInfoLog( shader, sizeof( infoLog ), &written, infoLog );
-		infoLog[( written > 0 && written < (GLsizei)sizeof( infoLog )) ? written : sizeof( infoLog ) - 1] = '\0';
-		LogInfoLogLines( name, ( stage == GL_VERTEX_SHADER ) ? "VS compile failed" : "FS compile failed", infoLog );
+		CaptureAndLogInfoLog( name, ( stage == GL_VERTEX_SHADER ) ? "VS compile failed" : "FS compile failed", shader, false );
 		glDeleteShader( shader );
 		return 0;
 	}
@@ -105,33 +129,19 @@ GLuint CompileStage( const char *name, GLenum stage, const char *source )
 bool BuildProgram( const char *name, const char *vsSource, const char *fsSource,
                    bool failFatal, ShaderProgram &out )
 {
-	char reason[256];
-
 	out.program = 0;
 
 	GLuint vs = CompileStage( name, GL_VERTEX_SHADER, vsSource );
 
 	if( vs == 0 )
-	{
-		if( failFatal )
-		{
-			snprintf( reason, sizeof( reason ), "shader '%s': vertex stage failed to compile (full info log above)", name );
-			CSZ_FatalInit( "shader", reason );
-		}
-		return false;
-	}
+		return FailFatal( failFatal, name, "vertex stage failed to compile" );
 
 	GLuint fs = CompileStage( name, GL_FRAGMENT_SHADER, fsSource );
 
 	if( fs == 0 )
 	{
 		glDeleteShader( vs );
-		if( failFatal )
-		{
-			snprintf( reason, sizeof( reason ), "shader '%s': fragment stage failed to compile (full info log above)", name );
-			CSZ_FatalInit( "shader", reason );
-		}
-		return false;
+		return FailFatal( failFatal, name, "fragment stage failed to compile" );
 	}
 
 	GLuint program = glCreateProgram();
@@ -149,20 +159,9 @@ bool BuildProgram( const char *name, const char *vsSource, const char *fsSource,
 
 	if( status != GL_TRUE )
 	{
-		char infoLog[4096];
-		GLsizei written = 0;
-
-		glGetProgramInfoLog( program, sizeof( infoLog ), &written, infoLog );
-		infoLog[( written > 0 && written < (GLsizei)sizeof( infoLog )) ? written : sizeof( infoLog ) - 1] = '\0';
-		LogInfoLogLines( name, "link failed", infoLog );
+		CaptureAndLogInfoLog( name, "link failed", program, true );
 		glDeleteProgram( program );
-
-		if( failFatal )
-		{
-			snprintf( reason, sizeof( reason ), "shader '%s': program link failed (full info log above)", name );
-			CSZ_FatalInit( "shader", reason );
-		}
-		return false;
+		return FailFatal( failFatal, name, "program link failed" );
 	}
 
 	out.program = program;

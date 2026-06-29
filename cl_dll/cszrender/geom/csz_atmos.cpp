@@ -143,8 +143,6 @@ AtmosTimer s_timer;
 cvar_t *s_cvarFullscreen;   // csz_sky_fullscreen (CSZ_DEV_TOOLS): repaint sky over the whole frame
 bool s_fullscreenLookedUp;
 
-float ReadCvar( cvar_t *cv, float fallback ) { return ( cv != NULL ) ? cv->value : fallback; }
-
 const float kDegToRad = 3.14159265358979323846f / 180.0f;
 
 // Diagnostic: log a non-clean glGetError at a named step, only when

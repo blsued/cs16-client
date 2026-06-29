@@ -67,8 +67,6 @@ namespace
 
 const float kDegToRad = 3.14159265358979323846f / 180.0f;
 
-float ReadCvar( cvar_t *cv, float fallback ) { return ( cv != NULL ) ? cv->value : fallback; }
-float clampf( float v, float lo, float hi ) { return ( v < lo ) ? lo : ( v > hi ) ? hi : v; }
 
 // --- cvars (registered eagerly at HUD init; read live each frame) ----------------
 bool    s_cvarsReady = false;
