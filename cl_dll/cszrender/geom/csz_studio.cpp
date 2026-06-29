@@ -65,7 +65,7 @@ const int kStudioNfMasked = 0x0040;	// alpha-tested texture
 // ignored by GL, so base-only/lit-only members stay harmless cross-program.
 struct PassLocs
 {
-	int uViewProj, uBones, uAlphaTest, uChrome, uViewRight, uViewUp;
+	int uViewProj, uBones, uAlphaTest, uChrome, uChromeMode, uViewRight, uViewUp;
 	int uAmbient, uShadeColor;					// base program only
 	int uFog, uAmbTint;						// base program only (M2a fog/night; lit/depth fog-free, pitfall 23)
 	int uSkyAmbScale;						// L3b sky-ambient cloud dimmer scalar (base program only); 1.0 neutral
@@ -116,6 +116,7 @@ void QueryPassLocs( const ShaderProgram &prog, PassLocs &out )
 	out.uBones = UniformLoc( prog, "u_bones" );
 	out.uAlphaTest = UniformLoc( prog, "u_alphaTest" );
 	out.uChrome = UniformLoc( prog, "u_chrome" );
+	out.uChromeMode = UniformLoc( prog, "u_chromeMode" );	// SHOULD 4
 	out.uViewRight = UniformLoc( prog, "u_viewRight" );
 	out.uViewUp = UniformLoc( prog, "u_viewUp" );
 	out.uAmbient = UniformLoc( prog, "u_ambient" );
@@ -593,9 +594,12 @@ cvar_t *s_rimPowerCvar = NULL;
 // drops the transparent / glowshell passes.
 cvar_t *s_rendermodeCvar = NULL;	// csz_studio_rendermode
 cvar_t *s_renderfxCvar = NULL;		// csz_renderfx
+cvar_t *s_chromeCvar = NULL;		// csz_chrome (SHOULD 4)
 
 inline bool RendermodeEnabled() { return ( s_rendermodeCvar == NULL ) || ( s_rendermodeCvar->value != 0.0f ); }
 inline bool RenderfxEnabled()   { return ( s_renderfxCvar == NULL ) || ( s_renderfxCvar->value != 0.0f ); }
+// SHOULD 4: 1 = per-bone chrome (default ON / fail-safe), 0 = legacy global view-basis sphere map.
+inline int  ChromeMode()        { return ( s_chromeCvar == NULL || s_chromeCvar->value != 0.0f ) ? 1 : 0; }
 
 // Per-frame observability counters (reset at the top of each owning pass).
 int s_transDrawn = 0;
@@ -819,6 +823,9 @@ void BeginStudioPassWith( const ViewSetup &view, const ShaderProgram &prog, cons
 	AngleVectors( view.angles, fwd, right, up );
 	glUniform3fv( locs.uViewRight, 1, right );
 	glUniform3fv( locs.uViewUp, 1, up );
+	// SHOULD 4 (csz_chrome): per-bone vs global chrome basis. u_camPos (the per-bone view
+	// vector origin) is fed just above via locs.uCamPos and shared with the VS.
+	if( locs.uChromeMode >= 0 ) glUniform1i( locs.uChromeMode, ChromeMode());
 
 	// Pin known uniform state so per-mesh dedup stays truthful.
 	const float kGray[3] = { 0.5f, 0.5f, 0.5f };
@@ -1029,6 +1036,11 @@ void StudioRegisterCvars()
 		s_rendermodeCvar = gEngfuncs.pfnRegisterVariable( "csz_studio_rendermode", "1", FCVAR_CLIENTDLL );
 	if( s_renderfxCvar == NULL )
 		s_renderfxCvar = gEngfuncs.pfnRegisterVariable( "csz_renderfx", "1", FCVAR_CLIENTDLL );
+	if( s_chromeCvar == NULL )	// SHOULD 4
+		s_chromeCvar = gEngfuncs.pfnRegisterVariable( "csz_chrome", "1", FCVAR_CLIENTDLL );
+	// SHOULD 5: csz_bonelerp (read by the bones module via pfnGetCvarPointer). Controllers +
+	// mouth only; cross-sequence transition lerp + multi-seqgroup deferred (see report).
+	gEngfuncs.pfnRegisterVariable( "csz_bonelerp", "1", FCVAR_CLIENTDLL );
 }
 
 void StudioRenderer::OnModelUnloaded( model_t *mod )

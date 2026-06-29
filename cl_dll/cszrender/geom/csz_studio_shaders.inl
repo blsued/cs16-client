@@ -51,9 +51,26 @@ uniform vec4 u_bones[384];
 uniform int u_chrome;       // chrome texture: sphere-map UV from view basis
 uniform vec3 u_viewRight;
 uniform vec3 u_viewUp;
+uniform vec3 u_camPos;      // SHOULD 4: viewer world position (per-bone chrome view vector)
+uniform int u_chromeMode;   // SHOULD 4 (csz_chrome): 0 = global view-basis sphere map, 1 = per-bone
 out vec2 v_uv;
 out vec3 v_normal;
 out vec3 v_worldPos;
+// SHOULD 4 per-bone chrome (StudioSetupChrome parity, world-space form): the env-map basis is
+// built per BONE from the camera->bone view vector, so bones whose orientation diverges from the
+// global view get accurate reflection UVs. World-space chromeUp/Right dotted with the world normal
+// is equivalent to stock's bone-space rotate-then-dot (dot is rotation-invariant). u_chromeMode 0
+// keeps the legacy global basis byte-identical for A/B.
+vec2 cszChromeUV( int b, vec3 nn )
+{
+	if( u_chromeMode == 0 )
+		return vec2( 0.5 + 0.5 * dot( nn, u_viewRight ), 0.5 - 0.5 * dot( nn, u_viewUp ));
+	vec3 boneOrigin = vec3( u_bones[b].w, u_bones[b + 1].w, u_bones[b + 2].w );
+	vec3 toView = normalize( boneOrigin - u_camPos );          // camera -> this bone
+	vec3 chromeUp = normalize( cross( toView, u_viewRight ));
+	vec3 chromeRight = normalize( cross( toView, chromeUp ));
+	return vec2( 0.5 + 0.5 * dot( nn, chromeRight ), 0.5 - 0.5 * dot( nn, chromeUp ));
+}
 void main()
 {
 	int b = a_bone * 3;
@@ -65,14 +82,9 @@ void main()
 	               dot( u_bones[b + 2].xyz, a_normal ));
 	v_normal = n;
 	if( u_chrome != 0 )
-	{
-		vec3 nn = normalize( n );
-		v_uv = vec2( 0.5 + 0.5 * dot( nn, u_viewRight ), 0.5 - 0.5 * dot( nn, u_viewUp ));
-	}
+		v_uv = cszChromeUV( b, normalize( n ));
 	else
-	{
 		v_uv = a_uv;
-	}
 	gl_Position = u_viewProj * vec4( worldPos, 1.0 );
 }
 )GLSL";
@@ -323,9 +335,21 @@ uniform vec4 u_bones[384];
 uniform int u_chrome;       // chrome texture: sphere-map UV from view basis
 uniform vec3 u_viewRight;
 uniform vec3 u_viewUp;
+uniform vec3 u_camPos;      // SHOULD 4: viewer world position (per-bone chrome view vector)
+uniform int u_chromeMode;   // SHOULD 4 (csz_chrome): 0 = global view-basis sphere map, 1 = per-bone
 out vec2 v_uv;
 out vec3 v_worldPos;
 out vec3 v_worldNormal;
+vec2 cszChromeUV( int b, vec3 nn )
+{
+	if( u_chromeMode == 0 )
+		return vec2( 0.5 + 0.5 * dot( nn, u_viewRight ), 0.5 - 0.5 * dot( nn, u_viewUp ));
+	vec3 boneOrigin = vec3( u_bones[b].w, u_bones[b + 1].w, u_bones[b + 2].w );
+	vec3 toView = normalize( boneOrigin - u_camPos );
+	vec3 chromeUp = normalize( cross( toView, u_viewRight ));
+	vec3 chromeRight = normalize( cross( toView, chromeUp ));
+	return vec2( 0.5 + 0.5 * dot( nn, chromeRight ), 0.5 - 0.5 * dot( nn, chromeUp ));
+}
 void main()
 {
 	int b = a_bone * 3;
@@ -337,14 +361,9 @@ void main()
 	v_worldPos = worldPos;
 	v_worldNormal = n;
 	if( u_chrome != 0 )
-	{
-		vec3 nn = normalize( n );
-		v_uv = vec2( 0.5 + 0.5 * dot( nn, u_viewRight ), 0.5 - 0.5 * dot( nn, u_viewUp ));
-	}
+		v_uv = cszChromeUV( b, normalize( n ));
 	else
-	{
 		v_uv = a_uv;
-	}
 	gl_Position = u_viewProj * vec4( worldPos, 1.0 );
 }
 )GLSL";

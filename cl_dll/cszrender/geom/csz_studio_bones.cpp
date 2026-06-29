@@ -221,8 +221,12 @@ void AngleMatrixDeg( const float anglesDeg[3], float m[3][4] )
 // StudioCalcBoneQuaterion / StudioCalcBonePosition; bone controllers
 // dropped on purpose, M1).
 // ---------------------------------------------------------------------------
+// SHOULD 5 bone controllers: adj[] is indexed by the bonecontroller array index (== the value
+// stored in pbone->bonecontroller[k]); NULL = controllers off (csz_bonelerp 0 -> pre-S5 path).
+const int kMaxBoneAdj = 8;	// MAXSTUDIOCONTROLLERS headroom; guarded against the model's count
+
 void CalcBoneQuaternion( int frame, float s, const mstudiobone_t *pbone,
-	const mstudioanim_t *panim, float q[4] )
+	const mstudioanim_t *panim, const float *adj, float q[4] )
 {
 	float angle1[3], angle2[3];
 
@@ -279,6 +283,21 @@ void CalcBoneQuaternion( int frame, float s, const mstudiobone_t *pbone,
 		angle2[j] = pbone->value[j + 3] + angle2[j] * pbone->scale[j + 3];
 	}
 
+	// SHOULD 5: rotation bone-controller adjustment (DoFs 3..5 = XR/YR/ZR).
+	if( adj != NULL )
+	{
+		for( int j = 0; j < 3; j++ )
+		{
+			int ctl = pbone->bonecontroller[j + 3];
+
+			if( ctl >= 0 && ctl < kMaxBoneAdj )
+			{
+				angle1[j] += adj[ctl];
+				angle2[j] += adj[ctl];
+			}
+		}
+	}
+
 	if( angle1[0] != angle2[0] || angle1[1] != angle2[1] || angle1[2] != angle2[2] )
 	{
 		float q1[4], q2[4];
@@ -294,11 +313,20 @@ void CalcBoneQuaternion( int frame, float s, const mstudiobone_t *pbone,
 }
 
 void CalcBonePosition( int frame, float s, const mstudiobone_t *pbone,
-	const mstudioanim_t *panim, float pos[3] )
+	const mstudioanim_t *panim, const float *adj, float pos[3] )
 {
 	for( int j = 0; j < 3; j++ )
 	{
 		pos[j] = pbone->value[j];
+
+		// SHOULD 5: position bone-controller adjustment (DoFs 0..2 = X/Y/Z).
+		if( adj != NULL )
+		{
+			int ctl = pbone->bonecontroller[j];
+
+			if( ctl >= 0 && ctl < kMaxBoneAdj )
+				pos[j] += adj[ctl];
+		}
 
 		if( panim->offset[j] == 0 )
 			continue;
@@ -360,7 +388,7 @@ int NumBonesClamped( const studiohdr_t *hdr )
 // (adapted StudioCalcRotations; controller adjustments dropped, dead linear
 // movement term dropped).
 void CalcRotations( const studiohdr_t *hdr, const mstudioseqdesc_t *pseqdesc,
-	const mstudioanim_t *panim, float f, float pos[][3], float q[][4] )
+	const mstudioanim_t *panim, const float *adj, float f, float pos[][3], float q[][4] )
 {
 	if( f > pseqdesc->numframes - 1 )
 		f = 0.0f;
@@ -374,8 +402,8 @@ void CalcRotations( const studiohdr_t *hdr, const mstudioseqdesc_t *pseqdesc,
 
 	for( int i = 0; i < numBones; i++, pbone++, panim++ )
 	{
-		CalcBoneQuaternion( frame, s, pbone, panim, q[i] );
-		CalcBonePosition( frame, s, pbone, panim, pos[i] );
+		CalcBoneQuaternion( frame, s, pbone, panim, adj, q[i] );
+		CalcBonePosition( frame, s, pbone, panim, adj, pos[i] );
 	}
 
 	if( pseqdesc->motionbone >= 0 && pseqdesc->motionbone < numBones )
@@ -675,6 +703,89 @@ const mstudioanim_t *BlendAnim( const studiohdr_t *hdr, const mstudioanim_t *pan
 	return panim + blend * hdr->numbones;
 }
 
+// ---------------------------------------------------------------------------
+// SHOULD 5 bone controllers (csz_bonelerp). Maps curstate.controller[0..3] + the mouth
+// controller (index 4, ent->mouth.mouthopen) to per-controller adjustment values, indexed by
+// the model's bonecontroller array index. Adapted from StudioCalcBoneAdj (HLSDK lineage). No
+// latched prev-controller interpolation (dadt == 1; current value only) -- the cross-sequence
+// transition lerp + latched state are deferred (reported), this delivers the live aim/mouth
+// articulation. Gated by csz_bonelerp (default 1; 0 -> adj == NULL == pre-S5 path).
+// ---------------------------------------------------------------------------
+cvar_t *s_bonelerpCvar = NULL;
+bool s_bonelerpQueried = false;
+
+bool ControllersEnabled()
+{
+	if( !s_bonelerpQueried )
+	{
+		s_bonelerpQueried = true;
+		s_bonelerpCvar = gEngfuncs.pfnGetCvarPointer( "csz_bonelerp" );
+	}
+
+	return ( s_bonelerpCvar == NULL ) || ( s_bonelerpCvar->value != 0.0f );
+}
+
+// Fills adj[0..kMaxBoneAdj-1]; returns true if any controller was applied (else adj is all 0
+// and the caller passes NULL to keep the pre-S5 code path byte-identical).
+bool CalcBoneAdj( const studiohdr_t *hdr, const cl_entity_s *ent, float adj[kMaxBoneAdj] )
+{
+	for( int i = 0; i < kMaxBoneAdj; i++ )
+		adj[i] = 0.0f;
+
+	if( !ControllersEnabled() || hdr->numbonecontrollers <= 0 )
+		return false;
+
+	const mstudiobonecontroller_t *pbc =
+		(const mstudiobonecontroller_t *)((const byte *)hdr + hdr->bonecontrollerindex );
+	int n = hdr->numbonecontrollers;
+
+	if( n > kMaxBoneAdj )
+		n = kMaxBoneAdj;
+
+	for( int j = 0; j < n; j++ )
+	{
+		int idx = pbc[j].index;	// 0..3 user controller, 4 = mouth
+		float value;
+
+		if( idx >= 0 && idx <= 3 )
+		{
+			float raw = (float)ent->curstate.controller[idx];
+
+			if( pbc[j].type & STUDIO_RLOOP )
+			{
+				value = raw * ( 360.0f / 256.0f ) + pbc[j].start;
+			}
+			else
+			{
+				value = raw / 255.0f;
+				value = ClampF( value, 0.0f, 1.0f );
+				value = ( 1.0f - value ) * pbc[j].start + value * pbc[j].end;
+			}
+		}
+		else
+		{
+			// Mouth controller (index 4): 0..64 maps to start..end (stock /64.0).
+			value = (float)ent->mouth.mouthopen / 64.0f;
+			value = ClampF( value, 0.0f, 1.0f );
+			value = ( 1.0f - value ) * pbc[j].start + value * pbc[j].end;
+		}
+
+		switch( pbc[j].type & ( STUDIO_XR | STUDIO_YR | STUDIO_ZR | STUDIO_X | STUDIO_Y | STUDIO_Z ))
+		{
+		case STUDIO_XR:
+		case STUDIO_YR:
+		case STUDIO_ZR:
+			adj[j] = value * kDegToRad;	// rotation DoF: degrees -> radians
+			break;
+		default:
+			adj[j] = value;			// position DoF (world units)
+			break;
+		}
+	}
+
+	return true;
+}
+
 // Evaluates the local pose (s_pos/s_q) for the entity's current sequence,
 // including the CS 9-way aim blend and the player gait leg overlay.
 void EvaluatePose( cl_entity_s *ent, const studiohdr_t *hdr, float time )
@@ -702,6 +813,10 @@ void EvaluatePose( cl_entity_s *ent, const studiohdr_t *hdr, float time )
 	}
 
 	float f = EstimateFrame( pseqdesc, ent, time );
+
+	// SHOULD 5: per-controller adjustments (NULL keeps the pre-S5 path byte-identical).
+	float adj[kMaxBoneAdj];
+	const float *adjPtr = CalcBoneAdj( hdr, ent, adj ) ? adj : NULL;
 
 	// Blend axis values: players get locally computed gait yaw/pitch blends,
 	// other entities use the networked blending bytes.
@@ -762,10 +877,10 @@ void EvaluatePose( cl_entity_s *ent, const studiohdr_t *hdr, float time )
 			}
 		}
 
-		CalcRotations( hdr, pseqdesc, BlendAnim( hdr, panim, c0 ), f, s_pos, s_q );
-		CalcRotations( hdr, pseqdesc, BlendAnim( hdr, panim, c1 ), f, s_pos2, s_q2 );
-		CalcRotations( hdr, pseqdesc, BlendAnim( hdr, panim, c2 ), f, s_pos3, s_q3 );
-		CalcRotations( hdr, pseqdesc, BlendAnim( hdr, panim, c3 ), f, s_pos4, s_q4 );
+		CalcRotations( hdr, pseqdesc, BlendAnim( hdr, panim, c0 ), adjPtr, f, s_pos, s_q );
+		CalcRotations( hdr, pseqdesc, BlendAnim( hdr, panim, c1 ), adjPtr, f, s_pos2, s_q2 );
+		CalcRotations( hdr, pseqdesc, BlendAnim( hdr, panim, c2 ), adjPtr, f, s_pos3, s_q3 );
+		CalcRotations( hdr, pseqdesc, BlendAnim( hdr, panim, c3 ), adjPtr, f, s_pos4, s_q4 );
 
 		s /= 255.0f;
 		t /= 255.0f;
@@ -776,13 +891,13 @@ void EvaluatePose( cl_entity_s *ent, const studiohdr_t *hdr, float time )
 	}
 	else if( pseqdesc->numblends > 1 )
 	{
-		CalcRotations( hdr, pseqdesc, panim, f, s_pos, s_q );
-		CalcRotations( hdr, pseqdesc, BlendAnim( hdr, panim, 1 ), f, s_pos2, s_q2 );
+		CalcRotations( hdr, pseqdesc, panim, adjPtr, f, s_pos, s_q );
+		CalcRotations( hdr, pseqdesc, BlendAnim( hdr, panim, 1 ), adjPtr, f, s_pos2, s_q2 );
 		SlerpBones( numBones, s_q, s_pos, s_q2, s_pos2, blendS / 255.0f );
 	}
 	else
 	{
-		CalcRotations( hdr, pseqdesc, panim, f, s_pos, s_q );
+		CalcRotations( hdr, pseqdesc, panim, adjPtr, f, s_pos, s_q );
 	}
 
 	// --- player gait leg overlay ---
@@ -806,7 +921,7 @@ void EvaluatePose( cl_entity_s *ent, const studiohdr_t *hdr, float time )
 	if( pganim == NULL )
 		return;
 
-	CalcRotations( hdr, pgait, pganim, gs->frame, s_pos2, s_q2 );
+	CalcRotations( hdr, pgait, pganim, adjPtr, gs->frame, s_pos2, s_q2 );
 
 	// Copy pelvis-and-below bones from the gait pose: copy until "Bip01
 	// Spine" starts the upper body, re-enable for direct pelvis children
@@ -1150,9 +1265,18 @@ bool SetupBonesMerged( cl_entity_s *ent, studiohdr_t *carrierHdr, const BoneSetu
 	const mstudioanim_t *panim = GetAnim( weaponHdr, pseqdesc );
 
 	if( panim != NULL )
-		CalcRotations( weaponHdr, pseqdesc, panim, EstimateFrame( pseqdesc, ent, time ), s_pos, s_q );
+	{
+		// SHOULD 5: the p_ weapon shares the carrier entity's controllers (its own
+		// bonecontroller table is indexed by the same curstate.controller bytes).
+		float wadj[kMaxBoneAdj];
+		const float *wadjPtr = CalcBoneAdj( weaponHdr, ent, wadj ) ? wadj : NULL;
+
+		CalcRotations( weaponHdr, pseqdesc, panim, wadjPtr, EstimateFrame( pseqdesc, ent, time ), s_pos, s_q );
+	}
 	else
+	{
 		CalcBindPose( weaponHdr, s_pos, s_q );
+	}
 
 	int numBones = NumBonesClamped( weaponHdr );
 	int carrierCount = carrierBones->numBones;
