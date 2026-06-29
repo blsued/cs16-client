@@ -44,6 +44,7 @@
 #include "fog/csz_fog_godrays.h"
 #include "geom/csz_sky.h"
 #include "geom/csz_sky_compose.h"
+#include "geom/csz_spike.h"
 #include "geom/csz_sprite.h"
 #include "geom/csz_studio.h"
 #include "geom/csz_studio_texture.h"
@@ -297,6 +298,7 @@ void Renderer::OnHudInit()
 	FogGodraysRegisterCvars();	// fog M1 Step 4: csz_fog_godrays/_intensity/_dev (sun/moon god rays)
 	CszRegisterMoonShaftCvar();	// fog M1 L4: csz_moonshaft (default 0 = off, S3 HG owns moon glow; 1 = L4 cloud-gap shaft, clouds milestone)
 	gEngfuncs.pfnRegisterVariable( "csz_sky_glcheck", "0", FCVAR_CLIENTDLL );	// A2: per-sky-pass glGetError bisection (dev, default off)
+	SpikeRegisterCvars();		// M2c S1/S2/S3 de-risk probe (csz_spike, default 0; droppable)
 }
 
 void Renderer::OnVidInit()
@@ -313,6 +315,8 @@ void Renderer::OnVidInit()
 
 void Renderer::Shutdown()
 {
+	SpikeShutdown();	// restore engine pEfxAPI if the spike shim was installed (safety)
+
 	// GL context is still current during HUD_Shutdown; destroy our objects.
 	if( m_glReady )
 	{
@@ -364,6 +368,11 @@ int Renderer::RenderFrame( const ref_viewpass_t *rvp )
 	s_worldModel = world;						// slot 6: world build + visible set
 	g_world.EnsureBuilt( world );
 	g_world.BuildVisibleSet( view );
+
+	// M2c de-risk probe (csz_spike, default 0): manages the efx emit shim and
+	// runs the throttled S1/S2/S3 probes. No-op + zero render effect when off;
+	// the whole module is droppable once the spikes are answered.
+	SpikeFrame();
 
 	g_studio.BeginFrame( ClientTime());				// slot 7: studio begin-frame
 	StudioTexturePollDevCvars();					// slot 7: csz_dev_armskin change check
