@@ -210,7 +210,7 @@ void EmitMuzzleFlash( cl_entity_t *ent, int attachIdx, const char *options )
 	}
 
 	float frac = (float)rand() / ( (float)RAND_MAX + 1.0f );
-	float scale = 0.5f + frac * 0.5f;		// 0.5 .. 1.0 (TUNABLE)
+	float scale = 0.2f + frac * 0.2f;		// 0.2 .. 0.4 (TUNABLE) -- tight contained flash, no screen-wash halo
 	float roll = (float)( rand() % 360 );
 
 	SpritePushMuzzleFlash( sprName, pos, scale, roll, 0.06f );
@@ -225,7 +225,7 @@ void EmitMuzzleFlash( cl_entity_t *ent, int attachIdx, const char *options )
 	d.type = kLightPoint;
 	d.origin[0] = pos[0]; d.origin[1] = pos[1]; d.origin[2] = pos[2];
 	d.color[0] = 2.0f; d.color[1] = 1.7f; d.color[2] = 1.0f;	// warm, intensity premultiplied (TUNABLE)
-	d.radius = 200.0f;
+	d.radius = 90.0f;		// tight muzzle pop, not a room-washing flash (TUNABLE)
 	d.die = now + 0.05f;
 	d.castShadow = false;
 	g_lights.AddOrUpdate( kMuzzleDlightKey, d );

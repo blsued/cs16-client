@@ -1107,8 +1107,8 @@ void DrawMuzzleFlashes( const ViewSetup &view )
 			v[2] = mf.origin[2] + right[2] * r + up[2] * u;
 			v[3] = uv[c][0];
 			v[4] = uv[c][1];
-			v[5] = v[6] = v[7] = 1.0f;	// white emitter
-			v[8] = 1.0f;
+			v[5] = v[6] = v[7] = 1.0f;	// white emitter (hue unchanged)
+			v[8] = 0.45f;			// additive intensity (TUNABLE): ~0.45x so the flash is bright but not screen-washing
 			v += kVertexFloats;
 		}
 
