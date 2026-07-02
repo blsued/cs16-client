@@ -196,6 +196,28 @@ void ClearSceneThunk( void )
 extern "C"
 {
 
+// V1/M0 audit dump (v18 §0.3.8 + BRIEF-M0 S6/G8): one CSZ_AUDIT line per
+// render_interface_t v37 function-pointer member, consumed by the generative
+// audit tool (ref_csz repo, tools/audit_render_interface.py).
+static void CSZ_AuditDumpRenderInterface( const struct render_interface_s *cb )
+{
+#define CSZ_AUDIT_DUMP( m ) \
+	gEngfuncs.Con_Printf( "CSZ_AUDIT %s=%08x\n", #m, (unsigned int)(size_t)cb->m )
+	CSZ_AUDIT_DUMP( GL_RenderFrame );
+	CSZ_AUDIT_DUMP( GL_BuildLightmaps );
+	CSZ_AUDIT_DUMP( GL_OrthoBounds );
+	CSZ_AUDIT_DUMP( R_CreateStudioDecalList );
+	CSZ_AUDIT_DUMP( R_ClearStudioDecals );
+	CSZ_AUDIT_DUMP( R_SpeedsMessage );
+	CSZ_AUDIT_DUMP( Mod_ProcessUserData );
+	CSZ_AUDIT_DUMP( R_ProcessEntData );
+	CSZ_AUDIT_DUMP( Mod_GetCurrentVis );
+	CSZ_AUDIT_DUMP( R_NewMap );
+	CSZ_AUDIT_DUMP( R_ClearScene );
+	CSZ_AUDIT_DUMP( CL_UpdateLatchedVars );
+#undef CSZ_AUDIT_DUMP
+}
+
 int CSZ_GetRenderInterface( int version, struct render_api_s *renderfuncs, struct render_interface_s *callback )
 {
 	// 1) Version gate: hard mismatch is an explicit failure (spec 3.2);
@@ -208,6 +230,24 @@ int CSZ_GetRenderInterface( int version, struct render_api_s *renderfuncs, struc
 
 	// 2) Audit the engine-provided function table (FATAL inside on bad NULL).
 	AuditRenderApi( renderfuncs );
+
+	// V1 (M0 CLIENT-side prerequisite, v18 §0.3.8 / BRIEF-M0 S6): under -ref csz
+	// the modern ref_csz plugin owns the frame. Return WITHOUT fataling and WITHOUT
+	// registering ANY legacy draw callback -- all 12 render_interface_t function
+	// pointers stay NULL (12-field v37 generative audit, BRIEF-M0 G8). The -ref gl
+	// path below stays behaviorally unchanged (old renderer remains reachable).
+	{
+		const char *refdll_v1 = gEngfuncs.pfnGetCvarString( "r_refdll_loaded" );
+
+		if( refdll_v1 != NULL && strcmp( refdll_v1, "csz" ) == 0 )
+		{
+			memset( callback, 0, sizeof( *callback ) );
+			callback->version = CL_RENDER_INTERFACE_VERSION;
+			CSZ_LogInfo( "core", "ref_csz active (r_refdll_loaded=csz): legacy takeover DISABLED, zero callbacks registered (V1)" );
+			CSZ_AuditDumpRenderInterface( callback );
+			return 1;
+		}
+	}
 
 	// 3) Active renderer must be ref_gl: full-frame takeover renders GLSL in
 	//    the engine's GL context (notes-renderapi D; PARM_GL_CONTEXT_TYPE is
