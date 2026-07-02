@@ -196,6 +196,14 @@ void ClearSceneThunk( void )
 extern "C"
 {
 
+// V1 (M0): latched when the csz early-return branch below runs.
+static int g_v1_takeover_disabled = 0;
+
+int CSZ_V1TakeoverDisabled( void )
+{
+	return g_v1_takeover_disabled;
+}
+
 // V1/M0 audit dump (v18 §0.3.8 + BRIEF-M0 S6/G8): one CSZ_AUDIT line per
 // render_interface_t v37 function-pointer member, consumed by the generative
 // audit tool (ref_csz repo, tools/audit_render_interface.py).
@@ -241,6 +249,7 @@ int CSZ_GetRenderInterface( int version, struct render_api_s *renderfuncs, struc
 
 		if( refdll_v1 != NULL && strcmp( refdll_v1, "csz" ) == 0 )
 		{
+			g_v1_takeover_disabled = 1;
 			memset( callback, 0, sizeof( *callback ) );
 			callback->version = CL_RENDER_INTERFACE_VERSION;
 			CSZ_LogInfo( "core", "ref_csz active (r_refdll_loaded=csz): legacy takeover DISABLED, zero callbacks registered (V1)" );

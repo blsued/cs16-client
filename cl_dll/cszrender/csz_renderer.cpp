@@ -33,6 +33,7 @@
  * exception statement from your version.
  */
 #include "csz_renderer.h"
+#include "csz_render_iface.h" // CSZ_V1TakeoverDisabled (V1/M0)
 #include "core/csz_glcaps.h"
 #include "core/csz_glfuncs.h"
 #include "core/csz_glstate.h"
@@ -269,6 +270,15 @@ bool Renderer::OnHandshake( render_api_t *api )
 
 void Renderer::OnHudInit()
 {
+	// V1 (M0, v18 0.3.8): under -ref csz the takeover is DISABLED BY CONTRACT --
+	// the missing handshake is expected, not a silent fallback. Skip the whole
+	// legacy renderer cvar/command suite (old cszrender fully not participating).
+	if( CSZ_V1TakeoverDisabled() )
+	{
+		CSZ_LogInfo( "core", "HUD init under ref_csz: legacy takeover suite skipped (V1)" );
+		return;
+	}
+
 	// Catch the engine-side silent fallback: if the engine never called
 	// HUD_GetRenderInterface the game would keep running on the stock
 	// renderer and takeover would silently never engage (notes-mechanisms f-1).

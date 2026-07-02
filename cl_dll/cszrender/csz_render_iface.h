@@ -47,6 +47,10 @@ extern "C"
 // checks cvar r_refdll_loaded == "gl", fills *callback with CSZ callbacks.
 // Hard failure does not return (CSZ_FatalInit). Returns 1 on success.
 int CSZ_GetRenderInterface( int version, struct render_api_s *renderfuncs, struct render_interface_s *callback );
+// V1 (M0, v18 0.3.8): returns 1 when r_refdll_loaded=="csz" was detected during the
+// render-interface handshake -- the legacy takeover is then fully disabled by contract
+// (zero callbacks registered) and the "handshake never ran" watchdog must not fatal.
+int CSZ_V1TakeoverDisabled( void );
 void CSZ_HudInit( void );    // from HUD_Init: register cvars/commands; FATAL if handshake never ran
 void CSZ_VidInit( void );    // from HUD_VidInit: invalidate ALL GPU resources (vid_restart safety)
 void CSZ_Shutdown( void );   // from HUD_Shutdown: destroy GL objects and caches
