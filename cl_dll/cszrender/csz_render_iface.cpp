@@ -228,14 +228,14 @@ int CSZ_GetRenderInterface( int version, struct render_api_s *renderfuncs, struc
 	if( renderfuncs == NULL || callback == NULL )
 		CSZ_FatalInit( "core", "render interface handshake got NULL table pointer" );
 
-	// 2) Audit the engine-provided function table (FATAL inside on bad NULL).
-	AuditRenderApi( renderfuncs );
-
 	// V1 (M0 CLIENT-side prerequisite, v18 §0.3.8 / BRIEF-M0 S6): under -ref csz
 	// the modern ref_csz plugin owns the frame. Return WITHOUT fataling and WITHOUT
 	// registering ANY legacy draw callback -- all 12 render_interface_t function
 	// pointers stay NULL (12-field v37 generative audit, BRIEF-M0 G8). The -ref gl
 	// path below stays behaviorally unchanged (old renderer remains reachable).
+	// NOTE: this branch runs BEFORE AuditRenderApi -- that audit validates the
+	// LEGACY takeover's render_api_t needs (ref_gl fills them; ref_csz deliberately
+	// does not at M0), and the takeover never engages under csz.
 	{
 		const char *refdll_v1 = gEngfuncs.pfnGetCvarString( "r_refdll_loaded" );
 
@@ -248,6 +248,9 @@ int CSZ_GetRenderInterface( int version, struct render_api_s *renderfuncs, struc
 			return 1;
 		}
 	}
+
+	// 2) Audit the engine-provided function table (FATAL inside on bad NULL).
+	AuditRenderApi( renderfuncs );
 
 	// 3) Active renderer must be ref_gl: full-frame takeover renders GLSL in
 	//    the engine's GL context (notes-renderapi D; PARM_GL_CONTEXT_TYPE is
